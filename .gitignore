@@ -1,0 +1,12 @@
+MLB_BETTING_SYSTEM.md
+venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.db
+data/odds/*
+data/stats/*
+data/lineups/*
+data/weather/*
+!data/**/.gitkeep
