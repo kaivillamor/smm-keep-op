@@ -8,6 +8,7 @@ from parlay.leg_selector import select_legs
 from parlay.parlay_builder import build_parlay
 from llm.context_analyzer import analyze_context
 from output.daily_slip import print_slip
+from output.backtest import log_parlay
 
 
 def run():
@@ -43,6 +44,7 @@ def run():
 
     parlay = build_parlay(legs)
     print_slip(parlay)
+    log_parlay(parlay)
 
 
 if __name__ == "__main__":
