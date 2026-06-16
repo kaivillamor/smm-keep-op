@@ -1,3 +1,5 @@
+import argparse
+
 from pipeline.odds_fetcher import fetch_odds
 from pipeline.stats_fetcher import fetch_stats
 from pipeline.lineup_fetcher import fetch_lineups
@@ -11,12 +13,12 @@ from output.daily_slip import print_slip
 from output.backtest import log_parlay
 
 
-def run():
+def run(use_llm: bool = True):
     print("\n[main] Fetching data...")
-    odds     = fetch_odds()
-    stats    = fetch_stats()
-    lineups  = fetch_lineups()
-    weather  = fetch_weather(odds)   # needs game list to match game times to forecasts
+    odds    = fetch_odds()
+    stats   = fetch_stats()
+    lineups = fetch_lineups()
+    weather = fetch_weather(odds)
 
     if not odds:
         print("[main] No games found today.")
@@ -39,8 +41,11 @@ def run():
         print("[main] No legs passed filters today.")
         return
 
-    print("[main] Running LLM context check...")
-    legs = analyze_context(legs)
+    if use_llm:
+        print("[main] Running LLM context check...")
+        legs = analyze_context(legs)
+    else:
+        print("[main] Skipping LLM layer.")
 
     parlay = build_parlay(legs)
     print_slip(parlay)
@@ -48,4 +53,11 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description="MLB value betting pipeline")
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Skip the OpenAI context check and run quant model only",
+    )
+    args = parser.parse_args()
+    run(use_llm=not args.no_llm)
