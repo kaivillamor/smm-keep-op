@@ -127,6 +127,159 @@ def _fetch_savant_pitcher_leaderboard(year: str) -> dict:
     return savant
 
 
+def fetch_batter_statcast_season(year: str) -> dict:
+    """
+    Bulk-fetches Sweet Spot % and Hard Hit % for all batters from Baseball Savant leaderboard.
+    One call for the whole season — use this to pre-filter before making per-batter calls.
+    Returns dict keyed by player_id (str).
+    """
+    url = f"{SAVANT_BASE}/leaderboard/custom"
+    params = {
+        "year": year,
+        "type": "batter",
+        "filter": "",
+        "sort": "4",
+        "sortDir": "desc",
+        "min": "1",
+        "selections": "sweet_spot_percent,hard_hit_percent,xba,xwoba,barrel_batted_rate",
+        "player_type": "batter",
+        "csv": "true",
+    }
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    df = pd.read_csv(io.StringIO(resp.text))
+
+    result = {}
+    for _, row in df.iterrows():
+        pid = str(int(row.get("player_id", 0)))
+        result[pid] = {
+            "sweet_spot_percent": _safe_float(row.get("sweet_spot_percent")),
+            "hard_hit_percent": _safe_float(row.get("hard_hit_percent")),
+            "xba": _safe_float(row.get("xba")),
+            "xwoba": _safe_float(row.get("xwoba")),
+            "barrel_batted_rate": _safe_float(row.get("barrel_batted_rate")),
+        }
+
+    print(f"[stats_fetcher] Season batter Statcast: {len(result)} batters loaded")
+    return result
+
+
+def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
+    """
+    Fetches Hard Hit % and Sweet Spot % for a batter over the last N days.
+    Uses Baseball Savant statcast search aggregated by name over a date range.
+    Returns empty dict if the batter had no batted balls in the window.
+    """
+    from datetime import timedelta
+    today = datetime.utcnow().date()
+    start = today - timedelta(days=days)
+
+    url = f"{SAVANT_BASE}/statcast_search/csv"
+    params = {
+        "type": "batter",
+        "player_id": batter_id,
+        "start_dt": start.strftime("%Y-%m-%d"),
+        "end_dt": today.strftime("%Y-%m-%d"),
+        "hfGT": "R|",
+        "group_by": "name",
+        "sort_col": "pitches",
+        "sort_order": "desc",
+        "min_results": "0",
+        "min_pas": "0",
+    }
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+
+    try:
+        df = pd.read_csv(io.StringIO(resp.text))
+        if df.empty:
+            return {}
+        row = df.iloc[0]
+        n = row.get("n", None)
+        return {
+            "hard_hit_percent": _safe_float(row.get("hard_hit_percent")),
+            "sweet_spot_percent": _safe_float(row.get("sweet_spot_percent")),
+            "batted_balls": int(n) if n is not None and not pd.isna(n) else 0,
+        }
+    except Exception:
+        return {}
+
+
+def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
+    """
+    Fetches batter xwOBA by Statcast zone for the season.
+    Pulls pitch-level data and aggregates estimated_woba_using_speedangle by zone.
+    Returns {zone_id (int): xwoba (float)} for zones 1-14.
+    """
+    url = f"{SAVANT_BASE}/statcast_search/csv"
+    params = {
+        "type": "batter",
+        "player_id": batter_id,
+        "hfSea": f"{year}|",
+        "hfGT": "R|",
+        "sort_col": "game_date",
+        "sort_order": "desc",
+        "min_results": "0",
+        "min_pas": "0",
+    }
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+
+    try:
+        df = pd.read_csv(io.StringIO(resp.text))
+        if df.empty or "zone" not in df.columns:
+            return {}
+
+        col = "estimated_woba_using_speedangle"
+        if col not in df.columns:
+            return {}
+
+        valid = df[df["zone"].notna() & df[col].notna()].copy()
+        if valid.empty:
+            return {}
+
+        valid["zone"] = valid["zone"].astype(int)
+        return valid.groupby("zone")[col].mean().round(3).to_dict()
+    except Exception:
+        return {}
+
+
+def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
+    """
+    Fetches a pitcher's pitch frequency by Statcast zone for the season.
+    Returns {zone_id (int): fraction_of_total_pitches (float)}.
+    """
+    url = f"{SAVANT_BASE}/statcast_search/csv"
+    params = {
+        "type": "pitcher",
+        "player_id": pitcher_id,
+        "hfSea": f"{year}|",
+        "hfGT": "R|",
+        "sort_col": "game_date",
+        "sort_order": "desc",
+        "min_results": "0",
+        "min_pas": "0",
+    }
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+
+    try:
+        df = pd.read_csv(io.StringIO(resp.text))
+        if df.empty or "zone" not in df.columns:
+            return {}
+
+        df_zones = df[df["zone"].notna()].copy()
+        if df_zones.empty:
+            return {}
+
+        df_zones["zone"] = df_zones["zone"].astype(int)
+        counts = df_zones["zone"].value_counts()
+        total = counts.sum()
+        return {int(z): round(count / total, 4) for z, count in counts.items()}
+    except Exception:
+        return {}
+
+
 def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
     if year is None:
         year = str(datetime.utcnow().year)
