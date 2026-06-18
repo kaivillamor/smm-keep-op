@@ -94,10 +94,13 @@ def _match_probable(game_pk, probable_pitchers: dict) -> dict:
 def _passes_season_prefilter(season_stats: dict) -> bool:
     """
     Quick check before spending API calls on recent/zone data.
-    Uses a threshold lower than the final gate to avoid dropping borderline batters early.
+    Mirrors the OR gate — passes if either season stat clears the pre-filter floor.
+    Zone Fit can't be pre-filtered (it's a per-matchup calculation), so batters with
+    weak season stats but potentially strong zone fit will be caught at the gate stage.
     """
     sweet_spot = season_stats.get("sweet_spot_percent")
     hard_hit = season_stats.get("hard_hit_percent")
-    if sweet_spot is None or hard_hit is None:
+    if sweet_spot is None and hard_hit is None:
         return False
-    return sweet_spot >= _SEASON_PREFILTER and hard_hit >= _SEASON_PREFILTER
+    return (sweet_spot is not None and sweet_spot >= _SEASON_PREFILTER) or \
+           (hard_hit is not None and hard_hit >= _SEASON_PREFILTER)

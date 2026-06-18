@@ -14,7 +14,7 @@ def score_batter_hr_props(
 ) -> dict:
     """
     Scores a batter on three HR prop metrics (each 0-100).
-    Passes the gate only when all three >= HR_GATE_THRESHOLD.
+    Passes the gate when ANY ONE score >= HR_GATE_THRESHOLD.
 
     season_stats  : from fetch_batter_statcast_season (sweet_spot_percent)
     recent_stats  : from fetch_batter_recent_stats    (hard_hit_percent, last N days)
@@ -77,9 +77,9 @@ def _zone_fit_score(batter_zones: dict, pitcher_zones: dict) -> float | None:
 # ── gate ──────────────────────────────────────────────────────────────────────
 
 def _check_gate(scores: dict, threshold: float = HR_GATE_THRESHOLD) -> bool:
-    """All three metric scores must be non-None and >= threshold."""
+    """At least one metric score must be non-None and >= threshold."""
     metric_keys = ("sweet_spot", "recent_hard_contact", "zone_fit")
-    return all(
+    return any(
         scores.get(k) is not None and scores[k] >= threshold
         for k in metric_keys
     )
