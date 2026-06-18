@@ -57,8 +57,12 @@ def _build_total_leg(game: dict) -> dict | None:
     if not side or not bet.get("odds"):
         return None
 
-    matchup = f"{_abbr(game['away_team'])}/{_abbr(game['home_team'])}"
-    line    = bet.get("line", "")
+    matchup  = f"{_abbr(game['away_team'])}/{_abbr(game['home_team'])}"
+    line     = bet.get("line") or 8.8
+    run_edge = game["total_edge"]
+    # Normalize to 0–1 scale (same as ML edge) so sorting and parlay totals are consistent
+    norm_edge = round(run_edge / line, 4) if line else 0.0
+
     return {
         "game_id":   game["game_id"],
         "home_team": game["home_team"],
@@ -66,7 +70,8 @@ def _build_total_leg(game: dict) -> dict | None:
         "bet_type":  "total",
         "side":      side,
         "team":      None,
-        "edge":      game["total_edge"],
+        "edge":      norm_edge,   # normalized fraction — used for sorting/filtering/totals
+        "run_edge":  round(run_edge, 2),  # raw runs — used for display only
         "odds":      bet["odds"],
         "book":      bet.get("book", ""),
         "line":      line,

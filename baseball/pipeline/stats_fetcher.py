@@ -3,14 +3,14 @@ import json
 import os
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 MLB_API = "https://statsapi.mlb.com/api/v1"
 SAVANT_BASE = "https://baseballsavant.mlb.com"
 
 
 def fetch_stats() -> dict:
-    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     year = date_str[:4]
 
     probable = _fetch_probable_pitchers(date_str)
@@ -170,8 +170,7 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
     Uses Baseball Savant statcast search aggregated by name over a date range.
     Returns empty dict if the batter had no batted balls in the window.
     """
-    from datetime import timedelta
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=days)
 
     url = f"{SAVANT_BASE}/statcast_search/csv"
@@ -282,7 +281,7 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
 
 def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
     if year is None:
-        year = str(datetime.utcnow().year)
+        year = str(datetime.now(timezone.utc).year)
 
     url = f"{MLB_API}/people/{batter_id}/stats"
     params = {

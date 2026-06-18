@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 DB_PATH = "data/history/bets.db"
 
@@ -63,7 +63,7 @@ def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
     Returns the parlay ID for future outcome updates.
     """
     conn    = _connect(db_path)
-    now     = datetime.utcnow().isoformat()
+    now     = datetime.now(timezone.utc).isoformat()
     today   = str(date.today())
 
     cur = conn.execute(

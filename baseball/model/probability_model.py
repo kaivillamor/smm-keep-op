@@ -52,6 +52,8 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
     weather_adj   = get_weather_adjustment(weather_data, home_team)
 
     game_entry    = _match_game(game, probable)
+    if not game_entry:
+        print(f"[probability_model] WARNING: no pitcher match for {game.get('away_team')} @ {game.get('home_team')} — using league avg total")
     home_pid      = str((game_entry or {}).get("home_pitcher_id") or "")
     away_pid      = str((game_entry or {}).get("away_pitcher_id") or "")
 

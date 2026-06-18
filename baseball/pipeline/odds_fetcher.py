@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +20,13 @@ def fetch_odds() -> list[dict]:
 
 
 def _fetch_raw() -> list[dict]:
+    now = datetime.now(timezone.utc)
+    # Window: from right now (exclude started games) to 7am UTC next day
+    # (covers all MLB games including late west-coast starts, ~midnight PT)
+    next_day_7am = (now + timedelta(days=1)).replace(
+        hour=7, minute=0, second=0, microsecond=0
+    )
+
     url = f"{BASE_URL}/sports/baseball_mlb/odds"
     params = {
         "regions": "us",
@@ -27,6 +34,8 @@ def _fetch_raw() -> list[dict]:
         "bookmakers": ",".join(BOOKMAKERS),
         "oddsFormat": "american",
         "apiKey": ODDS_API_KEY,
+        "commenceTimeFrom": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "commenceTimeTo":   next_day_7am.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     response = requests.get(url, params=params)
     response.raise_for_status()
@@ -35,7 +44,9 @@ def _fetch_raw() -> list[dict]:
     used = response.headers.get("x-requests-used", "?")
     print(f"[odds_fetcher] API credits used: {used} | remaining: {remaining}")
 
-    return response.json()
+    games = response.json()
+    print(f"[odds_fetcher] {len(games)} games in today's window")
+    return games
 
 
 def _normalize_game(game: dict) -> dict:

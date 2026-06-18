@@ -1,13 +1,13 @@
 import json
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 MLB_API = "https://statsapi.mlb.com/api/v1"
 
 
 def fetch_lineups() -> dict:
-    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     games = _fetch_today_games(date_str)
 
     lineups = {}

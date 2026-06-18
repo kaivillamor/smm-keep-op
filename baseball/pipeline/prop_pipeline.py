@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pipeline.stats_fetcher import (
     fetch_batter_recent_stats,
@@ -28,7 +28,7 @@ def analyze_hr_props(
     Additional HR prop logic can be added here as new scoring functions in
     hr_prop_model.py — score_batter_hr_props() accepts any new metric naturally.
     """
-    year = str(datetime.utcnow().year)
+    year = str(datetime.now(timezone.utc).year)
     candidates = []
     pitcher_zone_cache: dict[int, dict] = {}
 

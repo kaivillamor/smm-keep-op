@@ -46,7 +46,7 @@ BALLPARK_COORDS = {
 
 def fetch_weather(games: list[dict]) -> dict:
     """Takes normalized game dicts from odds_fetcher and returns weather keyed by game id."""
-    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     results = {}
 
     for game in games:
