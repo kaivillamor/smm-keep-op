@@ -16,14 +16,14 @@ def score_batter_hr_props(
     Scores a batter on three HR prop metrics (each 0-100).
     Passes the gate when ANY ONE score >= HR_GATE_THRESHOLD.
 
-    season_stats  : from fetch_batter_statcast_season (sweet_spot_percent)
-    recent_stats  : from fetch_batter_recent_stats    (hard_hit_percent, last N days)
+    season_stats  : from fetch_batter_statcast_season (sweet_spot_percent, hard_hit_percent)
+    recent_stats  : from fetch_batter_recent_stats — used as override for hard contact if available
     batter_zones  : from fetch_batter_zone_stats      ({zone_id: xwoba})
     pitcher_zones : from fetch_pitcher_zone_tendencies({zone_id: frequency})
     """
     scores = {
         "sweet_spot": _sweet_spot_score(season_stats),
-        "recent_hard_contact": _hard_contact_score(recent_stats),
+        "recent_hard_contact": _hard_contact_score(recent_stats, season_stats),
         "zone_fit": _zone_fit_score(batter_zones, pitcher_zones),
     }
     scores["passes_gate"] = _check_gate(scores)
@@ -39,8 +39,9 @@ def _sweet_spot_score(season_stats: dict) -> float | None:
     return round(float(pct), 1)
 
 
-def _hard_contact_score(recent_stats: dict) -> float | None:
-    pct = recent_stats.get("hard_hit_percent")
+def _hard_contact_score(recent_stats: dict, season_stats: dict) -> float | None:
+    # Prefer the 14-day recent window; fall back to season if recent data is unavailable
+    pct = recent_stats.get("hard_hit_percent") or season_stats.get("hard_hit_percent")
     if pct is None:
         return None
     return round(float(pct), 1)

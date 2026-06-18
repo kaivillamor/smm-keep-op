@@ -1,13 +1,20 @@
 import json
 import os
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 MLB_API = "https://statsapi.mlb.com/api/v1"
 
+# MLB schedules are always in Eastern Time.
+# Offset from UTC: EDT = UTC-4 (summer), EST = UTC-5 (winter).
+# Using -5 as a safe floor — in the worst case we're off by an hour near midnight ET,
+# but it prevents us from accidentally pulling tomorrow's games when UTC ticks past midnight.
+_ET_OFFSET = timedelta(hours=5)
+
 
 def fetch_lineups() -> dict:
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    et_now = datetime.now(timezone.utc) - _ET_OFFSET
+    date_str = et_now.strftime("%Y-%m-%d")
     games = _fetch_today_games(date_str)
 
     lineups = {}
@@ -47,23 +54,55 @@ def _fetch_today_games(date_str: str) -> list[dict]:
 
 
 def _fetch_game_lineup(game_pk: int) -> dict:
+    # Primary: /lineups endpoint (data is nested under a "lineups" key)
     resp = requests.get(f"{MLB_API}/game/{game_pk}/lineups")
+    if resp.status_code == 200:
+        data = resp.json()
+        nested = data.get("lineups", data)  # handle both nested and flat responses
+        home_players = nested.get("homePlayers", [])
+        away_players = nested.get("awayPlayers", [])
+        if home_players or away_players:
+            return {
+                "confirmed": True,
+                "home": [_parse_player(p) for p in home_players],
+                "away": [_parse_player(p) for p in away_players],
+            }
 
+    # Fallback: /boxscore works for in-progress and completed games
+    return _fetch_lineup_from_boxscore(game_pk)
+
+
+def _fetch_lineup_from_boxscore(game_pk: int) -> dict:
+    resp = requests.get(f"{MLB_API}/game/{game_pk}/boxscore")
     if resp.status_code != 200:
         return {"confirmed": False, "home": [], "away": []}
 
     data = resp.json()
-    home_players = data.get("homePlayers", [])
-    away_players = data.get("awayPlayers", [])
+    teams = data.get("teams", {})
 
-    if not home_players and not away_players:
+    def extract_batting_order(side: dict) -> list[dict]:
+        players = side.get("players", {})
+        order = side.get("battingOrder", [])
+        result = []
+        for pid in order:
+            player_key = f"ID{pid}"
+            p = players.get(player_key, {})
+            person = p.get("person", {})
+            result.append({
+                "id": person.get("id"),
+                "name": person.get("fullName"),
+                "position": p.get("position", {}).get("abbreviation"),
+                "batting_order": p.get("battingOrder"),
+            })
+        return result
+
+    home = extract_batting_order(teams.get("home", {}))
+    away = extract_batting_order(teams.get("away", {}))
+
+    if not home and not away:
         return {"confirmed": False, "home": [], "away": []}
 
-    return {
-        "confirmed": True,
-        "home": [_parse_player(p) for p in home_players],
-        "away": [_parse_player(p) for p in away_players],
-    }
+    return {"confirmed": True, "home": home, "away": away}
 
 
 def _parse_player(player: dict) -> dict:
