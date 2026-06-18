@@ -32,6 +32,11 @@ def analyze_hr_props(
     candidates = []
     pitcher_zone_cache: dict[int, dict] = {}
 
+    confirmed_games = sum(1 for v in lineups.values() if v.get("confirmed"))
+    total_batters_checked = 0
+    prefilter_passed = 0
+    print(f"[prop_pipeline] {confirmed_games}/{len(lineups)} games have confirmed lineups")
+
     for game_pk, lineup_entry in lineups.items():
         if not lineup_entry.get("confirmed"):
             continue
@@ -56,9 +61,12 @@ def analyze_hr_props(
                 if not batter_id:
                     continue
 
+                total_batters_checked += 1
                 season_stats = season_batter_stats.get(str(batter_id), {})
                 if not _passes_season_prefilter(season_stats):
                     continue
+
+                prefilter_passed += 1
 
                 recent_stats = fetch_batter_recent_stats(batter_id, days=RECENT_DAYS)
                 batter_zones = fetch_batter_zone_stats(batter_id, year)
@@ -78,7 +86,9 @@ def analyze_hr_props(
                         "scores": scores,
                     })
 
-    print(f"[prop_pipeline] {len(candidates)} HR prop candidate(s) passed the gate")
+    print(f"[prop_pipeline] Batters checked: {total_batters_checked} | "
+          f"Passed pre-filter: {prefilter_passed} | "
+          f"Passed gate: {len(candidates)}")
     return candidates
 
 
