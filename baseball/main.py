@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime, timezone
 
 from pipeline.odds_fetcher import fetch_odds
 from pipeline.stats_fetcher import fetch_stats, fetch_batter_statcast_season
@@ -56,7 +57,7 @@ def run(use_llm: bool = True, run_props: bool = False):
     if run_props:
         print("\n[main] Running HR prop analysis...")
         from datetime import datetime
-        year = str(datetime.utcnow().year)
+        year = str(datetime.now(timezone.utc).year)
         season_batter_stats = fetch_batter_statcast_season(year)
         candidates = analyze_hr_props(lineups, season_batter_stats, stats["probable_pitchers"])
         _print_hr_candidates(candidates)
