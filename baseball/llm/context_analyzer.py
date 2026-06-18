@@ -5,13 +5,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = "gpt-4o"
 
 
 def analyze_context(legs: list[dict], news_summary: str = "") -> list[dict]:
     if not legs:
         return legs
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("[context_analyzer] No OPENAI_API_KEY set — returning legs unchanged")
+        return legs
+
+    client = OpenAI(api_key=api_key)
 
     # Strip raw_odds before sending — keeps the prompt lean
     slim_legs = [
