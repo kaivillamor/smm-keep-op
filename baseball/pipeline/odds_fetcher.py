@@ -92,6 +92,70 @@ def _find_best_lines(home: str, away: str, bookmakers: dict) -> dict:
     return best
 
 
+def fetch_hr_prop_odds() -> list[dict]:
+    """
+    Fetches HR prop odds for today's games from The Odds API.
+
+    Requires The Odds API player props tier ($50+/month as of 2025).
+    Uses per-event endpoint: one call per game to get batter_home_runs market.
+    Returns a flat list of {batter_name, game_id, home_team, away_team, book, odds, point}.
+
+    NOTE: odds are "to score 1+ HRs" (point = 0.5 threshold, Over only).
+    """
+    if not ODDS_API_KEY:
+        print("[odds_fetcher] No ODDS_API_KEY — skipping HR prop odds")
+        return []
+
+    today = datetime.utcnow().date().isoformat()
+    events = _fetch_today_events(today)
+    if not events:
+        return []
+
+    all_props = []
+    for event in events:
+        event_id = event["id"]
+        url = f"{BASE_URL}/sports/baseball_mlb/events/{event_id}/odds"
+        params = {
+            "apiKey": ODDS_API_KEY,
+            "regions": "us",
+            "markets": "batter_home_runs",
+            "bookmakers": ",".join(BOOKMAKERS),
+            "oddsFormat": "american",
+        }
+        resp = requests.get(url, params=params)
+        if resp.status_code != 200:
+            continue
+
+        data = resp.json()
+        for bookmaker in data.get("bookmakers", []):
+            book = bookmaker["key"]
+            for market in bookmaker.get("markets", []):
+                if market["key"] != "batter_home_runs":
+                    continue
+                for outcome in market.get("outcomes", []):
+                    all_props.append({
+                        "batter_name": outcome["name"],
+                        "game_id": event_id,
+                        "home_team": event.get("home_team"),
+                        "away_team": event.get("away_team"),
+                        "book": book,
+                        "odds": outcome["price"],
+                        "point": outcome.get("point"),
+                    })
+
+    print(f"[odds_fetcher] HR prop lines fetched: {len(all_props)} outcomes")
+    return all_props
+
+
+def _fetch_today_events(date_str: str) -> list[dict]:
+    url = f"{BASE_URL}/sports/baseball_mlb/events"
+    params = {"apiKey": ODDS_API_KEY, "dateFormat": "iso"}
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    events = resp.json()
+    return [e for e in events if e.get("commence_time", "")[:10] == date_str]
+
+
 def _save_raw(raw: list[dict]) -> None:
     os.makedirs("data/odds", exist_ok=True)
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
