@@ -14,7 +14,8 @@ from parlay.leg_selector import select_legs
 from parlay.parlay_builder import build_parlay
 from llm.context_analyzer import analyze_context
 from output.daily_slip import print_slip
-from output.backtest import log_parlay
+from output.backtest import log_parlay, log_hit_parlay
+from output.result_tracker import resolve_pending
 
 
 def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False):
@@ -68,6 +69,7 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False):
         print("\n[main] Running hit parlay analysis...")
         hit_legs = analyze_hit_props(lineups, stats)
         _print_hit_parlay(hit_legs)
+        log_hit_parlay(hit_legs)
 
 
 def _print_usage() -> None:
@@ -198,9 +200,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Show Odds API credit usage and monthly reset date, then exit",
     )
+    parser.add_argument(
+        "--results",
+        action="store_true",
+        help="Grade yesterday's pending parlay and hit legs against actual game results",
+    )
     args = parser.parse_args()
 
     if args.usage:
         _print_usage()
+    elif args.results:
+        resolve_pending()
     else:
         run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits)
