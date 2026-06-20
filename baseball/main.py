@@ -104,13 +104,47 @@ def _print_hit_parlay(legs: list[dict]) -> None:
 
     for i, leg in enumerate(legs, 1):
         hand_label = "RHP" if leg["pitcher_hand"] == "R" else "LHP"
-        owner_adj = leg.get("owner_adj", 0.0)
-        adj_str = f"  [owner +{owner_adj*100:.1f}%]" if owner_adj > 0 else (
-                  f"  [owner {owner_adj*100:.1f}%]" if owner_adj < 0 else "")
+        owner_adj  = leg.get("owner_adj", 0.0)
+
+        notes = []
+        h2h_ab  = leg.get("h2h_ab", 0)
+        h2h_avg = leg.get("h2h_avg")
+        if h2h_ab >= 10 and h2h_avg is not None:
+            notes.append(f"H2H: {h2h_avg:.3f} ({h2h_ab} AB)")
+
+        recent_ab  = leg.get("recent_ab", 0)
+        recent_avg = leg.get("recent_avg")
+        if recent_ab >= 10 and recent_avg is not None:
+            notes.append(f"L14: {recent_avg:.3f} ({recent_ab} AB)")
+
+        venue_ab  = leg.get("venue_ab", 0)
+        venue_avg = leg.get("venue_avg")
+        if venue_ab >= 20 and venue_avg is not None:
+            notes.append(f"at venue: {venue_avg:.3f} ({venue_ab} AB)")
+
+        pitcher_h9  = leg.get("pitcher_recent_h9")
+        days_rest   = leg.get("pitcher_days_rest")
+        if pitcher_h9 is not None:
+            rest_str = f", {days_rest}d rest" if days_rest is not None else ""
+            notes.append(f"P recent H/9: {pitcher_h9:.1f}{rest_str}")
+
+        team_avg = leg.get("team_recent_avg")
+        if team_avg is not None:
+            trend = "hot" if team_avg >= 0.265 else ("cold" if team_avg <= 0.225 else "avg")
+            notes.append(f"team L14: {team_avg:.3f} ({trend})")
+
+        if leg.get("is_day_game"):
+            notes.append("day game")
+
+        if owner_adj != 0.0:
+            sign = "+" if owner_adj > 0 else ""
+            notes.append(f"owner {sign}{owner_adj*100:.1f}%")
+
+        note_str = f"  [{', '.join(notes)}]" if notes else ""
         print(
             f"  LEG {i}: {leg['batter_name']} ({leg['team']})\n"
             f"          1+ Hit vs {leg['pitcher_name']} ({hand_label})\n"
-            f"          Model Prob: {leg['hit_probability'] * 100:.1f}%{adj_str}"
+            f"          Model Prob: {leg['hit_probability'] * 100:.1f}%{note_str}"
         )
 
     combined = 1.0
