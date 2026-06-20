@@ -1,9 +1,10 @@
-HR_GATE_THRESHOLD = 65.0
-RECENT_DAYS = 14
+HR_GATE_THRESHOLD = 65.0   # threshold for sweet spot, hard contact, zone fit
+BARREL_THRESHOLD  = 8.0    # barrel rate % that qualifies alone (league avg ~7%)
+RECENT_DAYS       = 14
 
 # xwOBA normalization bounds: floor → 0 pts, ceiling → 100 pts
 _XWOBA_FLOOR = 0.150
-_XWOBA_CEIL = 0.700
+_XWOBA_CEIL  = 0.700
 
 
 def score_batter_hr_props(
@@ -13,24 +14,38 @@ def score_batter_hr_props(
     pitcher_zones: dict,
 ) -> dict:
     """
-    Scores a batter on three HR prop metrics (each 0-100).
-    Passes the gate when ANY ONE score >= HR_GATE_THRESHOLD.
+    Scores a batter on four HR prop metrics and applies the gate.
 
-    season_stats  : from fetch_batter_statcast_season (sweet_spot_percent, hard_hit_percent)
-    recent_stats  : from fetch_batter_recent_stats — used as override for hard contact if available
-    batter_zones  : from fetch_batter_zone_stats      ({zone_id: xwoba})
-    pitcher_zones : from fetch_pitcher_zone_tendencies({zone_id: frequency})
+    Gate logic (any condition qualifies):
+      1. Barrel rate >= BARREL_THRESHOLD               (elite contact quality alone)
+      2. Sweet Spot >= HR_GATE_THRESHOLD
+         AND Hard Contact >= HR_GATE_THRESHOLD          (angle + power together)
+      3. Zone Fit >= HR_GATE_THRESHOLD
+         AND Hard Contact >= HR_GATE_THRESHOLD          (great matchup + power together)
+
+    season_stats  : from fetch_batter_statcast_season
+    recent_stats  : from fetch_batter_recent_stats (14-day window; falls back to season)
+    batter_zones  : from fetch_batter_zone_stats   ({zone_id: xwoba})
+    pitcher_zones : from fetch_pitcher_zone_tendencies ({zone_id: frequency})
     """
     scores = {
-        "sweet_spot": _sweet_spot_score(season_stats),
+        "barrel_rate":        _barrel_rate_score(season_stats),
+        "sweet_spot":         _sweet_spot_score(season_stats),
         "recent_hard_contact": _hard_contact_score(recent_stats, season_stats),
-        "zone_fit": _zone_fit_score(batter_zones, pitcher_zones),
+        "zone_fit":           _zone_fit_score(batter_zones, pitcher_zones),
     }
     scores["passes_gate"] = _check_gate(scores)
     return scores
 
 
 # ── individual metric scorers ─────────────────────────────────────────────────
+
+def _barrel_rate_score(season_stats: dict) -> float | None:
+    rate = season_stats.get("barrel_batted_rate")
+    if rate is None:
+        return None
+    return round(float(rate), 1)
+
 
 def _sweet_spot_score(season_stats: dict) -> float | None:
     pct = season_stats.get("sweet_spot_percent")
@@ -40,7 +55,7 @@ def _sweet_spot_score(season_stats: dict) -> float | None:
 
 
 def _hard_contact_score(recent_stats: dict, season_stats: dict) -> float | None:
-    # Prefer the 14-day recent window; fall back to season if recent data is unavailable
+    # Prefer 14-day recent window; fall back to season if recent data is unavailable
     pct = recent_stats.get("hard_hit_percent") or season_stats.get("hard_hit_percent")
     if pct is None:
         return None
@@ -67,7 +82,7 @@ def _zone_fit_score(batter_zones: dict, pitcher_zones: dict) -> float | None:
     weighted_sum = 0.0
     for zone in common_zones:
         xwoba = batter_zones[zone]
-        freq = pitcher_zones[zone]
+        freq  = pitcher_zones[zone]
         strength = (xwoba - _XWOBA_FLOOR) / (_XWOBA_CEIL - _XWOBA_FLOOR)
         strength = max(0.0, min(1.0, strength)) * 100
         weighted_sum += strength * (freq / total_freq)
@@ -77,10 +92,29 @@ def _zone_fit_score(batter_zones: dict, pitcher_zones: dict) -> float | None:
 
 # ── gate ──────────────────────────────────────────────────────────────────────
 
-def _check_gate(scores: dict, threshold: float = HR_GATE_THRESHOLD) -> bool:
-    """At least one metric score must be non-None and >= threshold."""
-    metric_keys = ("sweet_spot", "recent_hard_contact", "zone_fit")
-    return any(
-        scores.get(k) is not None and scores[k] >= threshold
-        for k in metric_keys
-    )
+def _check_gate(scores: dict) -> bool:
+    """
+    Three ways to pass:
+      1. Barrel rate alone  (combines exit velocity + launch angle already)
+      2. Sweet Spot + Hard Contact  (angle AND power)
+      3. Zone Fit + Hard Contact    (matchup AND power)
+    """
+    barrel       = scores.get("barrel_rate")
+    sweet_spot   = scores.get("sweet_spot")
+    hard_contact = scores.get("recent_hard_contact")
+    zone_fit     = scores.get("zone_fit")
+
+    t = HR_GATE_THRESHOLD
+
+    if barrel is not None and barrel >= BARREL_THRESHOLD:
+        return True
+
+    if (sweet_spot   is not None and sweet_spot   >= t and
+            hard_contact is not None and hard_contact >= t):
+        return True
+
+    if (zone_fit     is not None and zone_fit     >= t and
+            hard_contact is not None and hard_contact >= t):
+        return True
+
+    return False

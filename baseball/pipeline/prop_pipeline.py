@@ -5,11 +5,11 @@ from pipeline.stats_fetcher import (
     fetch_batter_zone_stats,
     fetch_pitcher_zone_tendencies,
 )
-from model.factors.hr_prop_model import score_batter_hr_props, RECENT_DAYS
+from model.factors.hr_prop_model import score_batter_hr_props, RECENT_DAYS, BARREL_THRESHOLD
 
-# Slightly under the final gate — filters out batters who clearly won't pass
-# without spending API calls on recent/zone data for everyone.
-_SEASON_PREFILTER = 55.0
+# Slightly under the final gate thresholds
+_SEASON_PREFILTER        = 55.0
+_BARREL_PREFILTER        = BARREL_THRESHOLD - 2.0  # 6% — catches borderline barrel guys
 
 
 def analyze_hr_props(
@@ -104,13 +104,19 @@ def _match_probable(game_pk, probable_pitchers: dict) -> dict:
 def _passes_season_prefilter(season_stats: dict) -> bool:
     """
     Quick check before spending API calls on recent/zone data.
-    Mirrors the OR gate — passes if either season stat clears the pre-filter floor.
-    Zone Fit can't be pre-filtered (it's a per-matchup calculation), so batters with
-    weak season stats but potentially strong zone fit will be caught at the gate stage.
+    Passes if the batter could plausibly qualify via any gate condition:
+      - barrel rate alone (>= BARREL_PREFILTER)
+      - sweet spot or hard hit at season level (>= _SEASON_PREFILTER)
+    Zone Fit can't be pre-filtered — it's a per-matchup calculation.
     """
+    barrel     = season_stats.get("barrel_batted_rate")
     sweet_spot = season_stats.get("sweet_spot_percent")
-    hard_hit = season_stats.get("hard_hit_percent")
-    if sweet_spot is None and hard_hit is None:
-        return False
-    return (sweet_spot is not None and sweet_spot >= _SEASON_PREFILTER) or \
-           (hard_hit is not None and hard_hit >= _SEASON_PREFILTER)
+    hard_hit   = season_stats.get("hard_hit_percent")
+
+    if barrel is not None and barrel >= _BARREL_PREFILTER:
+        return True
+    if sweet_spot is not None and sweet_spot >= _SEASON_PREFILTER:
+        return True
+    if hard_hit is not None and hard_hit >= _SEASON_PREFILTER:
+        return True
+    return False
