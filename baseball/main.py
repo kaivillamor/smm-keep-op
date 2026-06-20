@@ -75,6 +75,7 @@ def _print_hr_candidates(candidates: list[dict]) -> None:
         s = c["scores"]
         print(
             f"  {c['batter_name']} ({c['team']})\n"
+            f"    Barrel Rate:        {s['barrel_rate']}%\n"
             f"    Sweet Spot:         {s['sweet_spot']}%\n"
             f"    Hard Contact (L{RECENT_DAYS}d): {s['recent_hard_contact']}%\n"
             f"    Zone Fit:           {s['zone_fit']}\n"
