@@ -63,8 +63,10 @@ def _fetch_probable_pitchers(date_str: str) -> dict:
                 "away_team": away["team"]["name"],
                 "home_pitcher_id": home_pitcher.get("id"),
                 "home_pitcher_name": home_pitcher.get("fullName"),
+                "home_pitcher_throws": (home_pitcher.get("pitchHand") or {}).get("code", "R"),
                 "away_pitcher_id": away_pitcher.get("id"),
                 "away_pitcher_name": away_pitcher.get("fullName"),
+                "away_pitcher_throws": (away_pitcher.get("pitchHand") or {}).get("code", "R"),
                 "commence_time": game.get("gameDate"),
             }
 
@@ -115,6 +117,7 @@ def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
             "fip": fip,
             "k_per_9": _safe_float(stat.get("strikeoutsPer9Inn")),
             "bb_per_9": _safe_float(stat.get("walksPer9Inn")),
+            "opp_avg": _safe_float(stat.get("avg")),
             "innings_pitched": ip,
             "games_started": int(stat.get("gamesStarted", 0)),
         }
@@ -191,7 +194,8 @@ def fetch_batter_statcast_season(year: str) -> dict:
 def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
     """
     Fetches Hard Hit % and Sweet Spot % for a batter over the last N days.
-    Uses Baseball Savant statcast search aggregated by name over a date range.
+    Pulls raw batted ball events and computes metrics from launch_speed / launch_angle
+    to avoid column name uncertainty in Statcast's group_by aggregation.
     Returns empty dict if the batter had no batted balls in the window.
     """
     today = datetime.now(timezone.utc).date()
@@ -201,11 +205,11 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
     params = {
         "type": "batter",
         "player_id": batter_id,
+        "hfBBT": "ground_ball|line_drive|fly_ball|popup|",
         "start_dt": start.strftime("%Y-%m-%d"),
         "end_dt": today.strftime("%Y-%m-%d"),
         "hfGT": "R|",
-        "group_by": "name",
-        "sort_col": "pitches",
+        "sort_col": "game_date",
         "sort_order": "desc",
         "min_results": "0",
         "min_pas": "0",
@@ -217,21 +221,30 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
         df = pd.read_csv(io.StringIO(resp.text))
         if df.empty:
             return {}
-        row = df.iloc[0]
-        n = row.get("n", None)
-        return {
-            "hard_hit_percent": _safe_float(row.get("hard_hit_percent")),
-            "sweet_spot_percent": _safe_float(row.get("sweet_spot_percent")),
-            "batted_balls": int(n) if n is not None and not pd.isna(n) else 0,
-        }
-    except Exception:
+
+        result: dict = {"batted_balls": len(df)}
+
+        if "launch_speed" in df.columns:
+            ev = df["launch_speed"].dropna()
+            if len(ev) > 0:
+                result["hard_hit_percent"] = round((ev >= 95).sum() / len(ev) * 100, 1)
+
+        if "launch_angle" in df.columns:
+            la = df["launch_angle"].dropna()
+            if len(la) > 0:
+                result["sweet_spot_percent"] = round(((la >= 8) & (la <= 32)).sum() / len(la) * 100, 1)
+
+        return result
+    except Exception as e:
+        print(f"[stats_fetcher] fetch_batter_recent_stats({batter_id}): {e}")
         return {}
 
 
 def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
     """
     Fetches batter xwOBA by Statcast zone for the season.
-    Pulls pitch-level data and aggregates estimated_woba_using_speedangle by zone.
+    Filters to batted balls only (hfBBT) so estimated_woba_using_speedangle is populated
+    and the dataset is smaller. Aggregates xwOBA by zone.
     Returns {zone_id (int): xwoba (float)} for zones 1-14.
     """
     url = f"{SAVANT_BASE}/statcast_search/csv"
@@ -239,6 +252,7 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
         "type": "batter",
         "player_id": batter_id,
         "hfSea": f"{year}|",
+        "hfBBT": "ground_ball|line_drive|fly_ball|popup|",
         "hfGT": "R|",
         "sort_col": "game_date",
         "sort_order": "desc",
@@ -263,7 +277,8 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
 
         valid["zone"] = valid["zone"].astype(int)
         return valid.groupby("zone")[col].mean().round(3).to_dict()
-    except Exception:
+    except Exception as e:
+        print(f"[stats_fetcher] fetch_batter_zone_stats({batter_id}): {e}")
         return {}
 
 
@@ -299,7 +314,8 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
         counts = df_zones["zone"].value_counts()
         total = counts.sum()
         return {int(z): round(count / total, 4) for z, count in counts.items()}
-    except Exception:
+    except Exception as e:
+        print(f"[stats_fetcher] fetch_pitcher_zone_tendencies({pitcher_id}): {e}")
         return {}
 
 
