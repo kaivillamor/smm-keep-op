@@ -56,10 +56,21 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
         print(f"[probability_model] WARNING: no pitcher match for {game.get('away_team')} @ {game.get('home_team')} — using league avg total")
     home_pid      = str((game_entry or {}).get("home_pitcher_id") or "")
     away_pid      = str((game_entry or {}).get("away_pitcher_id") or "")
+    home_name     = (game_entry or {}).get("home_pitcher_name", "TBD")
+    away_name     = (game_entry or {}).get("away_pitcher_name", "TBD")
+
+    home_stats = pitcher_stats.get(home_pid, {})
+    away_stats = pitcher_stats.get(away_pid, {})
+
+    if game_entry:
+        if not home_stats.get("fip") and not home_stats.get("xfip"):
+            print(f"[probability_model] WARNING: no FIP data for {home_name} (ID {home_pid}) — using league avg")
+        if not away_stats.get("fip") and not away_stats.get("xfip"):
+            print(f"[probability_model] WARNING: no FIP data for {away_name} (ID {away_pid}) — using league avg")
 
     # Each pitcher adjusts the opposing team's run expectation
-    home_pitcher_runs_adj = _pitcher_run_delta(pitcher_stats.get(home_pid, {}))
-    away_pitcher_runs_adj = _pitcher_run_delta(pitcher_stats.get(away_pid, {}))
+    home_pitcher_runs_adj = _pitcher_run_delta(home_stats)
+    away_pitcher_runs_adj = _pitcher_run_delta(away_stats)
 
     half_base       = (LEAGUE_AVG_TOTAL / 2) * park_runs
     away_team_runs  = half_base + home_pitcher_runs_adj   # home SP affects away scoring

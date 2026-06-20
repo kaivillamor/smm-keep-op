@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import os
 import requests
 import pandas as pd
@@ -21,7 +22,7 @@ def fetch_stats() -> dict:
         if pid
     }
 
-    pitcher_stats = {pid: _fetch_pitcher_season_stats(pid, year) for pid in pitcher_ids}
+    pitcher_stats = {str(pid): _fetch_pitcher_season_stats(pid, year) for pid in pitcher_ids}
     savant = _fetch_savant_pitcher_leaderboard(year)
 
     for pid, stats in pitcher_stats.items():
@@ -70,6 +71,21 @@ def _fetch_probable_pitchers(date_str: str) -> dict:
     return probable
 
 
+_FIP_CONSTANT = 3.12   # league-average FIP constant (roughly stable year-to-year)
+
+
+def _parse_ip(ip_str) -> float:
+    """Convert '78.1' (78 and 1/3 innings) to 78.333."""
+    try:
+        s = str(ip_str)
+        if "." in s:
+            whole, thirds = s.split(".", 1)
+            return int(whole) + int(thirds) / 3
+        return float(s)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
     url = f"{MLB_API}/people/{pitcher_id}/stats"
     params = {
@@ -84,12 +100,22 @@ def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
 
     try:
         stat = data["stats"][0]["splits"][0]["stat"]
+        ip = _parse_ip(stat.get("inningsPitched", 0))
+        hr = int(stat.get("homeRuns", 0))
+        bb = int(stat.get("baseOnBalls", 0))
+        hbp = int(stat.get("hitByPitch", 0))
+        k = int(stat.get("strikeOuts", 0))
+
+        # FIP = ((13*HR) + (3*(BB+HBP)) - (2*K)) / IP + constant
+        fip = round((13 * hr + 3 * (bb + hbp) - 2 * k) / ip + _FIP_CONSTANT, 2) if ip > 0 else None
+
         return {
-            "era": float(stat.get("era", 0)),
-            "whip": float(stat.get("whip", 0)),
-            "k_per_9": float(stat.get("strikeoutsPer9Inn", 0)),
-            "bb_per_9": float(stat.get("walksPer9Inn", 0)),
-            "innings_pitched": float(stat.get("inningsPitched", 0)),
+            "era": _safe_float(stat.get("era")),
+            "whip": _safe_float(stat.get("whip")),
+            "fip": fip,
+            "k_per_9": _safe_float(stat.get("strikeoutsPer9Inn")),
+            "bb_per_9": _safe_float(stat.get("walksPer9Inn")),
+            "innings_pitched": ip,
             "games_started": int(stat.get("gamesStarted", 0)),
         }
     except (IndexError, KeyError):
@@ -97,16 +123,17 @@ def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
 
 
 def _fetch_savant_pitcher_leaderboard(year: str) -> dict:
-    url = f"{SAVANT_BASE}/leaderboard/custom"
+    """
+    Fetches xERA (expected ERA from Statcast contact quality) for all pitchers.
+    The custom leaderboard p_fip/xfip columns are empty; expected_statistics has real values.
+    xERA is used as our xfip proxy in _pitcher_run_delta.
+    """
+    url = f"{SAVANT_BASE}/leaderboard/expected_statistics"
     params = {
-        "year": year,
         "type": "pitcher",
-        "filter": "",
-        "sort": "4",
-        "sortDir": "desc",
-        "min": "1",
-        "selections": "p_era,p_fip,xfip,p_k_percent,p_bb_percent,p_called_strike_percent",
-        "player_type": "pitcher",
+        "year": year,
+        "position": "",
+        "team": "",
         "csv": "true",
     }
     resp = requests.get(url, params=params)
@@ -118,10 +145,7 @@ def _fetch_savant_pitcher_leaderboard(year: str) -> dict:
     for _, row in df.iterrows():
         pid = str(int(row.get("player_id", 0)))
         savant[pid] = {
-            "fip": _safe_float(row.get("p_fip")),
-            "xfip": _safe_float(row.get("xfip")),
-            "k_pct": _safe_float(row.get("p_k_percent")),
-            "bb_pct": _safe_float(row.get("p_bb_percent")),
+            "xfip": _safe_float(row.get("xera")),   # xERA ≈ xFIP: both normalize ERA for true contact quality
         }
 
     return savant
@@ -321,7 +345,8 @@ def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
 
 def _safe_float(val) -> float | None:
     try:
-        return float(val)
+        f = float(val)
+        return None if math.isnan(f) else f
     except (TypeError, ValueError):
         return None
 
