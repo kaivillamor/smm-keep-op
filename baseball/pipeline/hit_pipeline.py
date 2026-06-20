@@ -1,4 +1,13 @@
-from pipeline.stats_fetcher import fetch_batter_splits
+from pipeline.stats_fetcher import (
+    fetch_batter_splits,
+    fetch_batter_vs_pitcher,
+    fetch_batter_recent_ba,
+    fetch_batter_venue_stats,
+    get_venue_id,
+    fetch_pitcher_recent_form,
+    fetch_team_recent_hitting,
+    get_team_id,
+)
 from model.factors.hit_model import (
     score_batter_hit_prob,
     HIT_PARLAY_LEGS,
@@ -23,6 +32,8 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
     print(f"[hit_pipeline] {confirmed_count}/{len(lineups)} games have confirmed lineups")
 
     candidates: list[dict] = []
+    pitcher_recent_cache: dict[int, dict] = {}
+    team_recent_cache:    dict[str, dict] = {}
 
     for game_pk, lineup_entry in lineups.items():
         if not lineup_entry.get("confirmed"):
@@ -34,6 +45,14 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
 
         home_team = lineup_entry.get("home_team", "")
         runs_factor, _ = get_park_factor(home_team)
+        venue_id = get_venue_id(home_team)
+
+        commence = lineup_entry.get("commence_time", "")
+        try:
+            utc_hour   = int(commence[11:13])
+            is_day_game = utc_hour < 22   # before 6pm ET (EDT = UTC-4)
+        except (ValueError, IndexError):
+            is_day_game = False
 
         away_team = lineup_entry.get("away_team", "")
 
@@ -62,6 +81,10 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
 
             p_stats = pitcher_stats.get(str(pitcher_id), {})
 
+            if pitcher_id not in pitcher_recent_cache:
+                pitcher_recent_cache[pitcher_id] = fetch_pitcher_recent_form(pitcher_id)
+            pitcher_recent = pitcher_recent_cache[pitcher_id]
+
             for idx, batter in enumerate(batters):
                 batter_id = batter.get("id")
                 if not batter_id:
@@ -71,10 +94,26 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
                 if lineup_pos > MAX_LINEUP_DEPTH:
                     continue
 
-                batter_name = batter.get("name", "")
-                splits = fetch_batter_splits(batter_id)
+                batter_name  = batter.get("name", "")
+
+                if team not in team_recent_cache:
+                    tid = get_team_id(team)
+                    team_recent_cache[team] = fetch_team_recent_hitting(tid) if tid else {}
+                team_recent = team_recent_cache[team]
+
+                splits       = fetch_batter_splits(batter_id)
+                h2h_stats    = fetch_batter_vs_pitcher(batter_id, pitcher_id)
+                recent_stats = fetch_batter_recent_ba(batter_id)
+                venue_stats  = fetch_batter_venue_stats(batter_id, venue_id) if venue_id else {}
+
                 base_prob = score_batter_hit_prob(
-                    splits, p_stats, pitcher_hand, lineup_pos, runs_factor
+                    splits, p_stats, pitcher_hand, lineup_pos, runs_factor,
+                    h2h_stats=h2h_stats,
+                    recent_ba_stats=recent_stats,
+                    venue_stats=venue_stats,
+                    pitcher_recent=pitcher_recent,
+                    team_recent=team_recent,
+                    is_day_game=is_day_game,
                 )
 
                 owner_adj = apply_hit_owner_logic(batter_name, opponent_team, base_prob)
@@ -88,6 +127,16 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
                     "lineup_pos":      lineup_pos,
                     "pitcher_name":    pitcher_name,
                     "pitcher_hand":    pitcher_hand,
+                    "h2h_ab":          h2h_stats.get("ab", 0),
+                    "h2h_avg":         h2h_stats.get("avg"),
+                    "recent_ab":       recent_stats.get("ab", 0),
+                    "recent_avg":      recent_stats.get("avg"),
+                    "venue_ab":          venue_stats.get("ab", 0),
+                    "venue_avg":         venue_stats.get("avg"),
+                    "pitcher_recent_h9": pitcher_recent.get("h_per_9"),
+                    "pitcher_days_rest": pitcher_recent.get("days_rest"),
+                    "team_recent_avg":   team_recent.get("avg"),
+                    "is_day_game":       is_day_game,
                     "base_prob":       base_prob,
                     "owner_adj":       owner_adj,
                     "hit_probability": prob,

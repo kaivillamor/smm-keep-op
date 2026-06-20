@@ -319,6 +319,233 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
         return {}
 
 
+# MLB team IDs — stable, update only when expansion teams are added.
+_TEAM_IDS: dict[str, int] = {
+    "Arizona Diamondbacks":  109,
+    "Atlanta Braves":        144,
+    "Baltimore Orioles":     110,
+    "Boston Red Sox":        111,
+    "Chicago Cubs":          112,
+    "Chicago White Sox":     145,
+    "Cincinnati Reds":       113,
+    "Cleveland Guardians":   114,
+    "Colorado Rockies":      115,
+    "Detroit Tigers":        116,
+    "Houston Astros":        117,
+    "Kansas City Royals":    118,
+    "Los Angeles Angels":    108,
+    "Los Angeles Dodgers":   119,
+    "Miami Marlins":         146,
+    "Milwaukee Brewers":     158,
+    "Minnesota Twins":       142,
+    "New York Mets":         121,
+    "New York Yankees":      147,
+    "Oakland Athletics":     133,
+    "Philadelphia Phillies": 143,
+    "Pittsburgh Pirates":    134,
+    "San Diego Padres":      135,
+    "San Francisco Giants":  137,
+    "Seattle Mariners":      136,
+    "St. Louis Cardinals":   138,
+    "Tampa Bay Rays":        139,
+    "Texas Rangers":         140,
+    "Toronto Blue Jays":     141,
+    "Washington Nationals":  120,
+}
+
+
+def get_team_id(team_name: str) -> int | None:
+    return _TEAM_IDS.get(team_name)
+
+
+# MLB venue IDs — stable, update only when a team moves or opens a new park.
+_VENUE_IDS: dict[str, int] = {
+    "Arizona Diamondbacks":  15,
+    "Atlanta Braves":        4705,
+    "Baltimore Orioles":     2,
+    "Boston Red Sox":        3,
+    "Chicago Cubs":          17,
+    "Chicago White Sox":     4,
+    "Cincinnati Reds":       2602,
+    "Cleveland Guardians":   5,
+    "Colorado Rockies":      19,
+    "Detroit Tigers":        2394,
+    "Houston Astros":        2392,
+    "Kansas City Royals":    7,
+    "Los Angeles Angels":    1,
+    "Los Angeles Dodgers":   22,
+    "Miami Marlins":         4169,
+    "Milwaukee Brewers":     32,
+    "Minnesota Twins":       3312,
+    "New York Mets":         3289,
+    "New York Yankees":      3313,
+    "Oakland Athletics":     10,
+    "Philadelphia Phillies": 2681,
+    "Pittsburgh Pirates":    31,
+    "San Diego Padres":      2680,
+    "San Francisco Giants":  2395,
+    "Seattle Mariners":      680,
+    "St. Louis Cardinals":   2889,
+    "Tampa Bay Rays":        12,
+    "Texas Rangers":         5325,
+    "Toronto Blue Jays":     14,
+    "Washington Nationals":  3309,
+}
+
+
+def get_venue_id(home_team: str) -> int | None:
+    return _VENUE_IDS.get(home_team)
+
+
+def fetch_batter_venue_stats(batter_id: int, venue_id: int) -> dict:
+    """
+    Career regular-season batting stats for a batter at a specific MLB ballpark.
+    Display-only — not weighted into hit probability.
+    Returns {ab, hits, avg}. Empty dict if no history at this venue.
+    """
+    url = f"{MLB_API}/people/{batter_id}/stats"
+    params = {
+        "stats":   "career",
+        "group":   "hitting",
+        "gameType": "R",
+        "venueId": venue_id,
+    }
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        stat = resp.json()["stats"][0]["splits"][0]["stat"]
+        return {
+            "ab":   int(stat.get("atBats", 0)),
+            "hits": int(stat.get("hits", 0)),
+            "avg":  _safe_float(stat.get("avg")),
+        }
+    except (IndexError, KeyError, requests.RequestException):
+        return {}
+
+
+def fetch_pitcher_recent_form(pitcher_id: int, num_starts: int = 3) -> dict:
+    """
+    Computes H/9 and days rest from the pitcher's last N starts via the game log.
+    Returns {h_per_9, days_rest}. Empty dict if no starts logged yet this season.
+    """
+    year = str(datetime.now(timezone.utc).year)
+    url  = f"{MLB_API}/people/{pitcher_id}/stats"
+    params = {
+        "stats":    "gameLog",
+        "group":    "pitching",
+        "season":   year,
+        "gameType": "R",
+    }
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        splits = resp.json()["stats"][0]["splits"]
+
+        starts = [s for s in splits if int(s["stat"].get("gamesStarted", 0)) > 0]
+        if not starts:
+            return {}
+
+        recent = starts[-num_starts:]
+
+        total_h  = sum(int(s["stat"].get("hits", 0)) for s in recent)
+        total_ip = sum(_parse_ip(s["stat"].get("inningsPitched", 0)) for s in recent)
+        h_per_9  = round(total_h / total_ip * 9, 2) if total_ip > 0 else None
+
+        last_date_str = recent[-1].get("date", "")
+        days_rest = None
+        if last_date_str:
+            try:
+                last_date = datetime.strptime(last_date_str[:10], "%Y-%m-%d").date()
+                days_rest = (datetime.now(timezone.utc).date() - last_date).days
+            except ValueError:
+                pass
+
+        return {"h_per_9": h_per_9, "days_rest": days_rest}
+    except (IndexError, KeyError, requests.RequestException):
+        return {}
+
+
+def fetch_team_recent_hitting(team_id: int, days: int = 14) -> dict:
+    """
+    Team batting average over the last N days from the MLB Stats API.
+    Returns {avg}. Empty dict if no data available.
+    """
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days)
+
+    url    = f"{MLB_API}/teams/{team_id}/stats"
+    params = {
+        "stats":     "byDateRange",
+        "group":     "hitting",
+        "season":    str(today.year),
+        "startDate": start.strftime("%Y-%m-%d"),
+        "endDate":   today.strftime("%Y-%m-%d"),
+        "gameType":  "R",
+    }
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        stat = resp.json()["stats"][0]["splits"][0]["stat"]
+        return {"avg": _safe_float(stat.get("avg"))}
+    except (IndexError, KeyError, requests.RequestException):
+        return {}
+
+
+def fetch_batter_vs_pitcher(batter_id: int, pitcher_id: int) -> dict:
+    """
+    Career regular-season stats for a batter against one specific pitcher.
+    Returns {ab, hits, avg}. Empty dict if no history exists.
+    """
+    url = f"{MLB_API}/people/{batter_id}/stats"
+    params = {
+        "stats": "vsPlayer",
+        "opposingPlayerId": pitcher_id,
+        "group": "hitting",
+        "gameType": "R",
+    }
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        stat = resp.json()["stats"][0]["splits"][0]["stat"]
+        return {
+            "ab":   int(stat.get("atBats", 0)),
+            "hits": int(stat.get("hits", 0)),
+            "avg":  _safe_float(stat.get("avg")),
+        }
+    except (IndexError, KeyError, requests.RequestException):
+        return {}
+
+
+def fetch_batter_recent_ba(batter_id: int, days: int = 14) -> dict:
+    """
+    Batting average for a batter over the last N days from the MLB Stats API.
+    Returns {ab, hits, avg}. Empty dict if no games in the window.
+    """
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days)
+
+    url = f"{MLB_API}/people/{batter_id}/stats"
+    params = {
+        "stats": "byDateRange",
+        "group": "hitting",
+        "season": str(today.year),
+        "startDate": start.strftime("%Y-%m-%d"),
+        "endDate": today.strftime("%Y-%m-%d"),
+        "gameType": "R",
+    }
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        stat = resp.json()["stats"][0]["splits"][0]["stat"]
+        return {
+            "ab":   int(stat.get("atBats", 0)),
+            "hits": int(stat.get("hits", 0)),
+            "avg":  _safe_float(stat.get("avg")),
+        }
+    except (IndexError, KeyError, requests.RequestException):
+        return {}
+
+
 def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
     if year is None:
         year = str(datetime.now(timezone.utc).year)
