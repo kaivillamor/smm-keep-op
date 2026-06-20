@@ -1,7 +1,7 @@
 import argparse
 from datetime import datetime, timezone
 
-from pipeline.odds_fetcher import fetch_odds
+from pipeline.odds_fetcher import fetch_odds, check_usage
 from pipeline.stats_fetcher import fetch_stats, fetch_batter_statcast_season
 from pipeline.lineup_fetcher import fetch_lineups
 from pipeline.weather_fetcher import fetch_weather
@@ -68,6 +68,27 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False):
         print("\n[main] Running hit parlay analysis...")
         hit_legs = analyze_hit_props(lineups, stats)
         _print_hit_parlay(hit_legs)
+
+
+def _print_usage() -> None:
+    usage = check_usage()
+    if not usage:
+        return
+
+    used      = usage["used"]
+    remaining = usage["remaining"]
+    total     = usage["total"]
+    bar_filled = round((used / total) * 20) if total else 0
+    bar = "█" * bar_filled + "░" * (20 - bar_filled)
+
+    print(f"\n{'=' * 40}")
+    print(f"  THE ODDS API — MONTHLY USAGE")
+    print(f"{'=' * 40}")
+    print(f"  [{bar}]")
+    print(f"  Used:      {used:>5} / {total}")
+    print(f"  Remaining: {remaining:>5} / {total}")
+    print(f"  Reset:     {usage['reset_date']}  ({usage['days_until_reset']} days)")
+    print(f"{'=' * 40}\n")
 
 
 def _print_hit_parlay(legs: list[dict]) -> None:
@@ -138,5 +159,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Generate a hit parlay (1+ hit per leg) from top-6 lineup spots in confirmed games",
     )
+    parser.add_argument(
+        "--usage",
+        action="store_true",
+        help="Show Odds API credit usage and monthly reset date, then exit",
+    )
     args = parser.parse_args()
-    run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits)
+
+    if args.usage:
+        _print_usage()
+    else:
+        run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits)

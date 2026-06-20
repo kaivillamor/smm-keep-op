@@ -103,6 +103,42 @@ def _find_best_lines(home: str, away: str, bookmakers: dict) -> dict:
     return best
 
 
+def check_usage() -> dict:
+    """
+    Checks Odds API quota by hitting /v4/sports (0 credits, free endpoint).
+    Returns used, remaining, total, reset date, and days until reset.
+    The Odds API resets on the 1st of each calendar month (UTC).
+    """
+    if not ODDS_API_KEY:
+        print("[odds_fetcher] No ODDS_API_KEY set")
+        return {}
+
+    resp = requests.get(f"{BASE_URL}/sports", params={"apiKey": ODDS_API_KEY, "all": "false"})
+    resp.raise_for_status()
+
+    used      = int(resp.headers.get("x-requests-used", 0))
+    remaining = int(resp.headers.get("x-requests-remaining", 0))
+    total     = used + remaining
+
+    now = datetime.now(timezone.utc)
+    if now.month == 12:
+        reset = now.replace(year=now.year + 1, month=1, day=1,
+                            hour=0, minute=0, second=0, microsecond=0)
+    else:
+        reset = now.replace(month=now.month + 1, day=1,
+                            hour=0, minute=0, second=0, microsecond=0)
+
+    days_left = (reset.date() - now.date()).days
+
+    return {
+        "used":            used,
+        "remaining":       remaining,
+        "total":           total,
+        "reset_date":      reset.strftime("%Y-%m-%d"),
+        "days_until_reset": days_left,
+    }
+
+
 def fetch_hr_prop_odds() -> list[dict]:
     """
     Fetches HR prop odds for today's games from The Odds API.
