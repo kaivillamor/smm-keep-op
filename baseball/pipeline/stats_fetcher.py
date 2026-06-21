@@ -288,12 +288,16 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
     Filters to batted balls only (hfBBT) so estimated_woba_using_speedangle is populated
     and the dataset is smaller. Aggregates xwOBA by zone.
     Returns {zone_id (int): xwoba (float)} for zones 1-14.
+    Uses start_dt/end_dt instead of hfSea — hfSea is unreliable in the statcast_search endpoint.
     """
+    today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
     params = {
+        "all": "true",
         "type": "batter",
         "player_id": batter_id,
-        "hfSea": f"{year}|",
+        "start_dt": f"{year}-01-01",
+        "end_dt": today.strftime("%Y-%m-%d"),
         "hfBBT": "ground_ball|line_drive|fly_ball|popup|",
         "hfGT": "R|",
         "sort_col": "game_date",
@@ -328,12 +332,16 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
     """
     Fetches a pitcher's pitch frequency by Statcast zone for the season.
     Returns {zone_id (int): fraction_of_total_pitches (float)}.
+    Uses start_dt/end_dt instead of hfSea — hfSea is unreliable in the statcast_search endpoint.
     """
+    today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
     params = {
+        "all": "true",
         "type": "pitcher",
         "player_id": pitcher_id,
-        "hfSea": f"{year}|",
+        "start_dt": f"{year}-01-01",
+        "end_dt": today.strftime("%Y-%m-%d"),
         "hfGT": "R|",
         "sort_col": "game_date",
         "sort_order": "desc",

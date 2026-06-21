@@ -14,7 +14,7 @@ from parlay.leg_selector import select_legs
 from parlay.parlay_builder import build_parlay
 from llm.context_analyzer import analyze_context
 from output.daily_slip import print_slip
-from output.backtest import log_parlay, log_hit_parlay
+from output.backtest import log_parlay, log_hit_parlay, log_hr_candidates
 from output.result_tracker import resolve_pending
 
 
@@ -66,6 +66,7 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False, r
         season_batter_stats = fetch_batter_statcast_season(year)
         candidates = analyze_hr_props(lineups, season_batter_stats, stats["probable_pitchers"], stats["pitcher_stats"])
         _print_hr_candidates(candidates)
+        log_hr_candidates(candidates)
 
     # ── Hit parlay (1+ hit, top-6 lineup spots) ───────────────────────────────
     if run_hits:

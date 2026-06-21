@@ -65,6 +65,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             actual_hits     INTEGER DEFAULT NULL,
             created_at      TEXT    NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS hr_prop_candidates (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            date            TEXT    NOT NULL,
+            game_pk         INTEGER NOT NULL,
+            batter_id       INTEGER NOT NULL,
+            batter_name     TEXT    NOT NULL,
+            team            TEXT,
+            pitcher_id      INTEGER,
+            barrel_rate     REAL,
+            sweet_spot      REAL,
+            hard_contact    REAL,
+            zone_fit        REAL,
+            pitcher_hr_fb   REAL,
+            gate_triggered  TEXT,               -- 'barrel' | 'sweet_hc' | 'zone_hc' | 'pitcher_hrfb'
+            outcome         TEXT    DEFAULT NULL,  -- 'hr' | 'no_hr'
+            actual_hrs      INTEGER DEFAULT NULL,
+            created_at      TEXT    NOT NULL
+        );
     """)
     conn.commit()
 
@@ -128,6 +147,52 @@ def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
     conn.close()
     print(f"[backtest] Logged parlay #{parlay_id} ({parlay['num_legs']} legs, {_fmt_odds(parlay['combined_odds'])})")
     return parlay_id
+
+
+def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> None:
+    """Persists HR prop gate candidates so result_tracker can grade them next morning.
+    Skips if candidates were already logged today."""
+    if not candidates:
+        return
+    conn  = _connect(db_path)
+    today = str(date.today())
+
+    existing = conn.execute(
+        "SELECT id FROM hr_prop_candidates WHERE date=? LIMIT 1", (today,)
+    ).fetchone()
+    if existing:
+        print(f"[backtest] HR candidates already logged for {today} — skipping.")
+        conn.close()
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    for c in candidates:
+        s = c.get("scores", {})
+        conn.execute(
+            """INSERT INTO hr_prop_candidates
+               (date, game_pk, batter_id, batter_name, team, pitcher_id,
+                barrel_rate, sweet_spot, hard_contact, zone_fit, pitcher_hr_fb,
+                gate_triggered, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                today,
+                c.get("game_pk"),
+                c.get("batter_id"),
+                c.get("batter_name"),
+                c.get("team"),
+                c.get("pitcher_id"),
+                s.get("barrel_rate"),
+                s.get("sweet_spot"),
+                s.get("recent_hard_contact"),
+                s.get("zone_fit"),
+                s.get("pitcher_hr_fb"),
+                s.get("gate_triggered"),
+                now,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    print(f"[backtest] Logged {len(candidates)} HR prop candidate(s) for {today}")
 
 
 def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> None:
@@ -220,9 +285,10 @@ def get_pending_parlays(db_path: str = DB_PATH) -> list[dict]:
 def evaluate_results(db_path: str = DB_PATH) -> dict:
     conn = _connect(db_path)
 
-    parlays   = conn.execute("SELECT * FROM parlays WHERE outcome IS NOT NULL").fetchall()
-    legs      = conn.execute("SELECT * FROM legs    WHERE outcome IS NOT NULL").fetchall()
-    hit_legs  = conn.execute("SELECT * FROM hit_legs WHERE outcome IS NOT NULL").fetchall()
+    parlays    = conn.execute("SELECT * FROM parlays WHERE outcome IS NOT NULL").fetchall()
+    legs       = conn.execute("SELECT * FROM legs    WHERE outcome IS NOT NULL").fetchall()
+    hit_legs   = conn.execute("SELECT * FROM hit_legs WHERE outcome IS NOT NULL").fetchall()
+    hr_cands   = conn.execute("SELECT * FROM hr_prop_candidates WHERE outcome IS NOT NULL").fetchall()
     conn.close()
 
     # ── Game parlays ──────────────────────────────────────────────────────────
@@ -249,6 +315,10 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
     hit_wins     = sum(1 for l in hit_resolved if l["outcome"] == "win")
     hit_rate_leg = hit_wins / len(hit_resolved) if hit_resolved else None
 
+    # ── HR prop candidates ────────────────────────────────────────────────────
+    hr_hits  = sum(1 for r in hr_cands if r["outcome"] == "hr")
+    hr_rate  = round(hr_hits / len(hr_cands), 4) if hr_cands else None
+
     summary = {
         # game parlays
         "parlays_tracked":   parlay_total,
@@ -262,6 +332,9 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
         # hit parlay
         "hit_legs_graded":   len(hit_resolved),
         "hit_leg_win_rate":  round(hit_rate_leg, 4) if hit_rate_leg is not None else None,
+        # hr props
+        "hr_cands_graded":   len(hr_cands),
+        "hr_hit_rate":       hr_rate,
     }
 
     _print_summary(summary)
@@ -332,7 +405,12 @@ def _print_summary(s: dict) -> None:
         print(f"  Leg hit rate:  — (no resolved legs yet)")
 
     print(f"{'─' * w}")
-    print(f"  HR PROPS         (not yet tracked)")
+    print(f"  HR PROPS  ({s['hr_cands_graded']} graded)")
+    print(f"{'─' * w}")
+    if s["hr_hit_rate"] is not None:
+        print(f"  HR rate:       {s['hr_hit_rate'] * 100:.1f}%  ({s['hr_cands_graded']} candidates)")
+    else:
+        print(f"  HR rate:       — (no resolved candidates yet)")
     print(f"{'=' * w}\n")
 
 
