@@ -23,10 +23,12 @@ def fetch_stats() -> dict:
     }
 
     pitcher_stats = {str(pid): _fetch_pitcher_season_stats(pid, year) for pid in pitcher_ids}
-    savant = _fetch_savant_pitcher_leaderboard(year)
+    savant   = _fetch_savant_pitcher_leaderboard(year)
+    hr_fb    = _fetch_savant_pitcher_hr_fb(year)
 
     for pid, stats in pitcher_stats.items():
         stats.update(savant.get(str(pid), {}))
+        stats.update(hr_fb.get(str(pid), {}))
 
     result = {
         "date": date_str,
@@ -152,6 +154,46 @@ def _fetch_savant_pitcher_leaderboard(year: str) -> dict:
         }
 
     return savant
+
+
+def _fetch_savant_pitcher_hr_fb(year: str) -> dict:
+    """
+    Fetches HR/FB rate for all pitchers from Baseball Savant custom leaderboard.
+    HR/FB = home runs allowed per fly ball — higher means more homer-prone.
+    League average is ~10-12%. Returns {player_id (str): {"hr_fb_rate": float}}.
+    """
+    url = f"{SAVANT_BASE}/leaderboard/custom"
+    params = {
+        "year": year,
+        "type": "pitcher",
+        "filter": "",
+        "sort": "4",
+        "sortDir": "desc",
+        "min": "1",
+        "selections": "p_home_run_pct",
+        "player_type": "pitcher",
+        "csv": "true",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+
+        col = next((c for c in df.columns if "home_run" in c.lower()), None)
+        if not col:
+            print(f"[stats_fetcher] HR/FB column not found in Savant pitcher leaderboard. Columns: {list(df.columns[:10])}")
+            return {}
+
+        result = {}
+        for _, row in df.iterrows():
+            pid = str(int(row.get("player_id", 0)))
+            val = _safe_float(row.get(col))
+            if val is not None:
+                result[pid] = {"hr_fb_rate": round(val, 1)}
+        return result
+    except Exception as e:
+        print(f"[stats_fetcher] _fetch_savant_pitcher_hr_fb: {e}")
+        return {}
 
 
 def fetch_batter_statcast_season(year: str) -> dict:

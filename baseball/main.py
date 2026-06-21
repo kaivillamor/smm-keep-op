@@ -18,7 +18,10 @@ from output.backtest import log_parlay, log_hit_parlay
 from output.result_tracker import resolve_pending
 
 
-def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False):
+def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False, run_all: bool = False):
+    if run_all:
+        run_props = True
+        run_hits  = True
     print("\n[main] Fetching data...")
     odds    = fetch_odds()
     stats   = fetch_stats()
@@ -61,7 +64,7 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False):
         from datetime import datetime
         year = str(datetime.now(timezone.utc).year)
         season_batter_stats = fetch_batter_statcast_season(year)
-        candidates = analyze_hr_props(lineups, season_batter_stats, stats["probable_pitchers"])
+        candidates = analyze_hr_props(lineups, season_batter_stats, stats["probable_pitchers"], stats["pitcher_stats"])
         _print_hr_candidates(candidates)
 
     # ── Hit parlay (1+ hit, top-6 lineup spots) ───────────────────────────────
@@ -168,12 +171,14 @@ def _print_hr_candidates(candidates: list[dict]) -> None:
     print(f"{'=' * 50}")
     for c in candidates:
         s = c["scores"]
+        hrfb_str = f"{s['pitcher_hr_fb']}%" if s.get("pitcher_hr_fb") is not None else "N/A"
         print(
             f"  {c['batter_name']} ({c['team']})\n"
             f"    Barrel Rate:        {s['barrel_rate']}%\n"
             f"    Sweet Spot:         {s['sweet_spot']}%\n"
             f"    Hard Contact (L{RECENT_DAYS}d): {s['recent_hard_contact']}%\n"
             f"    Zone Fit:           {s['zone_fit']}\n"
+            f"    Pitcher HR/FB:      {hrfb_str}\n"
         )
     print("=" * 50)
 
@@ -196,6 +201,11 @@ if __name__ == "__main__":
         help="Generate a hit parlay (1+ hit per leg) from top-6 lineup spots in confirmed games",
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run everything: game lines + HR props + hit parlay in one command",
+    )
+    parser.add_argument(
         "--usage",
         action="store_true",
         help="Show Odds API credit usage and monthly reset date, then exit",
@@ -212,4 +222,4 @@ if __name__ == "__main__":
     elif args.results:
         resolve_pending()
     else:
-        run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits)
+        run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits, run_all=args.all)

@@ -16,6 +16,7 @@ def analyze_hr_props(
     lineups: dict,
     season_batter_stats: dict,
     probable_pitchers: dict,
+    pitcher_stats: dict | None = None,
 ) -> list[dict]:
     """
     Runs the 65/65/65 HR gate across every batter in confirmed lineups.
@@ -56,6 +57,9 @@ def analyze_hr_props(
                 pitcher_zone_cache[pitcher_id] = fetch_pitcher_zone_tendencies(pitcher_id, year)
             pitcher_zones = pitcher_zone_cache[pitcher_id]
 
+            p_stats    = (pitcher_stats or {}).get(str(pitcher_id), {})
+            hr_fb_rate = p_stats.get("hr_fb_rate")
+
             for batter in batters:
                 batter_id = batter.get("id")
                 if not batter_id:
@@ -72,7 +76,8 @@ def analyze_hr_props(
                 batter_zones = fetch_batter_zone_stats(batter_id, year)
 
                 scores = score_batter_hr_props(
-                    season_stats, recent_stats, batter_zones, pitcher_zones
+                    season_stats, recent_stats, batter_zones, pitcher_zones,
+                    pitcher_hr_fb=hr_fb_rate,
                 )
 
                 if scores["passes_gate"]:

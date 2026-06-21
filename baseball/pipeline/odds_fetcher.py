@@ -8,7 +8,12 @@ load_dotenv()
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 BASE_URL = "https://api.the-odds-api.com/v4"
-BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "williamhill_us"]
+_ALL_BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "williamhill_us"]
+_my_books_env = os.getenv("MY_BOOKS", "").strip()
+BOOKMAKERS = (
+    [b.strip() for b in _my_books_env.split(",") if b.strip()]
+    if _my_books_env else _ALL_BOOKMAKERS
+)
 MARKETS = ["h2h", "totals"]
 
 
