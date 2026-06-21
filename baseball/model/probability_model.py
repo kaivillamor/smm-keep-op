@@ -72,7 +72,10 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
     home_pitcher_runs_adj = _pitcher_run_delta(home_stats)
     away_pitcher_runs_adj = _pitcher_run_delta(away_stats)
 
-    half_base       = (LEAGUE_AVG_TOTAL / 2) * park_runs
+    # Park factor applied at 40% weight — historical averages overstate
+    # game-to-game impact, especially at extreme parks like Coors.
+    park_adj        = 1.0 + (park_runs - 1.0) * 0.40
+    half_base       = (LEAGUE_AVG_TOTAL / 2) * park_adj
     away_team_runs  = half_base + home_pitcher_runs_adj   # home SP affects away scoring
     home_team_runs  = half_base + away_pitcher_runs_adj   # away SP affects home scoring
     implied_total   = round(max(away_team_runs + home_team_runs + weather_adj, 4.0), 2)
