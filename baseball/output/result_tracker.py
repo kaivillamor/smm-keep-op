@@ -6,11 +6,12 @@ MLB_API = "https://statsapi.mlb.com/api/v1"
 
 def resolve_pending(db_path: str = DB_PATH) -> None:
     """
-    Grades all unresolved parlay legs and hit legs, then rolls up parlay outcomes.
+    Grades all unresolved parlay legs, hit legs, and HR prop candidates, then rolls up parlay outcomes.
     Run after games finish (e.g. next morning with --results).
     """
     _resolve_parlay_legs(db_path)
     _resolve_hit_legs(db_path)
+    _resolve_hr_prop_legs(db_path)
     _roll_up_parlays(db_path)
 
 
@@ -111,6 +112,38 @@ def _resolve_hit_legs(db_path: str) -> None:
     print(f"[result_tracker] {resolved} hit leg(s) graded.")
 
 
+# ── HR prop candidates ────────────────────────────────────────────────────────
+
+def _resolve_hr_prop_legs(db_path: str) -> None:
+    conn = _connect(db_path)
+    rows = conn.execute(
+        "SELECT id, game_pk, batter_id, batter_name FROM hr_prop_candidates WHERE outcome IS NULL"
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        print("[result_tracker] No pending HR prop candidates.")
+        return
+
+    resolved = 0
+    for row in rows:
+        hrs = _fetch_batter_batting_stat(row["game_pk"], row["batter_id"], "homeRuns")
+        if hrs is None:
+            print(f"[result_tracker] Game {row['game_pk']} not final yet (or batter not found).")
+            continue
+
+        outcome = "hr" if hrs >= 1 else "no_hr"
+        conn = _connect(db_path)
+        conn.execute("UPDATE hr_prop_candidates SET outcome=?, actual_hrs=? WHERE id=?",
+                     (outcome, hrs, row["id"]))
+        conn.commit()
+        conn.close()
+        print(f"[result_tracker] HR prop — {row['batter_name']}: {hrs} HR(s) → {outcome}")
+        resolved += 1
+
+    print(f"[result_tracker] {resolved} HR prop candidate(s) graded.")
+
+
 # ── Parlay roll-up ────────────────────────────────────────────────────────────
 
 def _roll_up_parlays(db_path: str) -> None:
@@ -178,11 +211,9 @@ def _fetch_scores(date_str: str) -> dict[tuple, dict]:
     return scores
 
 
-def _fetch_batter_hits(game_pk: int, batter_id: int) -> int | None:
-    """
-    Returns the number of hits the batter recorded in the game, or None if the
-    game isn't final or the batter doesn't appear in the box score.
-    """
+def _fetch_batter_batting_stat(game_pk: int, batter_id: int, stat_key: str) -> int | None:
+    """Returns a batting stat (e.g. 'hits', 'homeRuns') for a batter from the box score,
+    or None if the game isn't final or the batter doesn't appear."""
     url = f"{MLB_API}/game/{game_pk}/boxscore"
     try:
         resp = requests.get(url, timeout=10)
@@ -194,18 +225,15 @@ def _fetch_batter_hits(game_pk: int, batter_id: int) -> int | None:
 
     for side in ("home", "away"):
         players = data.get("teams", {}).get(side, {}).get("players", {})
-        key = f"ID{batter_id}"
-        player = players.get(key)
+        player = players.get(f"ID{batter_id}")
         if player:
-            status = data.get("gameInfo", {}).get("gameDate")  # present when game is recorded
-            # Check game state via linescore flag in boxscore
-            hits = (
-                player.get("stats", {})
-                      .get("batting", {})
-                      .get("hits")
-            )
-            if hits is None:
+            val = player.get("stats", {}).get("batting", {}).get(stat_key)
+            if val is None:
                 return None
-            return int(hits)
+            return int(val)
 
     return None
+
+
+def _fetch_batter_hits(game_pk: int, batter_id: int) -> int | None:
+    return _fetch_batter_batting_stat(game_pk, batter_id, "hits")
