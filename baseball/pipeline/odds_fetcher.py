@@ -210,8 +210,11 @@ def _fetch_today_events(date_str: str) -> list[dict]:
 
 def _save_raw(raw: list[dict]) -> None:
     os.makedirs("data/odds", exist_ok=True)
-    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     path = f"data/odds/{date_str}.json"
+    if os.path.exists(path):
+        print(f"[odds_fetcher] Odds file already exists for {date_str} — skipping overwrite (parlay audit trail)")
+        return
     with open(path, "w") as f:
         json.dump(raw, f, indent=2)
     print(f"[odds_fetcher] Saved raw odds → {path}")
