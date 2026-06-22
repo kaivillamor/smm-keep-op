@@ -18,8 +18,7 @@ from output.backtest import log_parlay, log_hit_parlay, log_hr_candidates
 from output.result_tracker import resolve_pending
 
 
-def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
-        run_hits_2: bool = False, run_all: bool = False):
+def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False, run_all: bool = False):
     if run_all:
         run_props = True
         run_hits  = True
@@ -71,16 +70,9 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
 
     # ── Hit parlay (1+ hit, top-6 lineup spots) ───────────────────────────────
     if run_hits:
-        print("\n[main] Running hit parlay analysis (8-leg)...")
+        print("\n[main] Running hit parlay analysis...")
         hit_legs = analyze_hit_props(lineups, stats)
         _print_hit_parlay(hit_legs)
-        log_hit_parlay(hit_legs)
-
-    if run_hits_2:
-        print("\n[main] Running hit parlay analysis (4×2-leg split)...")
-        hit_legs = analyze_hit_props(lineups, stats)
-        pairs = _pair_hit_legs(hit_legs)
-        _print_hit_parlay_split(pairs)
         log_hit_parlay(hit_legs)
 
 
@@ -170,51 +162,6 @@ def _print_hit_parlay(legs: list[dict]) -> None:
     print(f"{'=' * width}")
 
 
-def _pair_hit_legs(legs: list[dict]) -> list[list[dict]]:
-    """
-    Splits hit parlay legs into 4 interleaved pairs for the 2-leg split mode.
-    Interleaved pairing (1&5, 2&6, 3&7, 4&8) ensures each pair has one
-    higher-probability and one moderate leg rather than concentrating the
-    best legs in a single pair.
-    """
-    half = len(legs) // 2
-    pairs = []
-    for i in range(half):
-        pair = [legs[i], legs[i + half]]
-        pairs.append(pair)
-    return pairs
-
-
-def _print_hit_parlay_split(pairs: list[list[dict]]) -> None:
-    width = 54
-    stake = 50
-    print(f"\n{'=' * width}")
-    print(f"  HIT PARLAY SPLIT — {len(pairs)} × 2-leg  |  ${stake} each  |  ${stake * len(pairs)} total")
-    print(f"{'=' * width}")
-
-    if not pairs:
-        print("  No pairs generated (no confirmed lineups?).")
-        print(f"{'=' * width}")
-        return
-
-    for p_idx, pair in enumerate(pairs, 1):
-        combined = 1.0
-        for leg in pair:
-            combined *= leg["hit_probability"]
-        print(f"\n  PARLAY {p_idx}  —  combined: {combined * 100:.1f}%  |  stake: ${stake}")
-        print(f"  {'─' * (width - 2)}")
-        for leg in pair:
-            hand_label = "RHP" if leg["pitcher_hand"] == "R" else "LHP"
-            print(
-                f"  {leg['batter_name']} ({leg['team']}) 1+ Hit "
-                f"vs {leg['pitcher_name']} ({hand_label})  "
-                f"{leg['hit_probability'] * 100:.1f}%"
-            )
-
-    print(f"\n  Note: Book odds required to place — check FanDuel/DK for 1+ hit lines.")
-    print(f"{'=' * width}")
-
-
 def _print_hr_candidates(candidates: list[dict]) -> None:
     if not candidates:
         print("[main] No HR prop candidates passed the gate today.")
@@ -250,16 +197,9 @@ if __name__ == "__main__":
         help="Run HR prop analysis using the 65/65/65 gate (Sweet Spot / Hard Contact / Zone Fit)",
     )
     parser.add_argument(
-        "--hits", "--hits-8",
-        dest="hits",
+        "--hits",
         action="store_true",
-        help="8-leg hit parlay list at $10 (default hit mode)",
-    )
-    parser.add_argument(
-        "--hits-2",
-        dest="hits_2",
-        action="store_true",
-        help="4×2-leg hit parlays at $50 each (interleaved pairing)",
+        help="Generate a hit parlay (1+ hit per leg) from top-6 lineup spots in confirmed games",
     )
     parser.add_argument(
         "--all",
@@ -283,5 +223,4 @@ if __name__ == "__main__":
     elif args.results:
         resolve_pending()
     else:
-        run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits,
-            run_hits_2=args.hits_2, run_all=args.all)
+        run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits, run_all=args.all)
