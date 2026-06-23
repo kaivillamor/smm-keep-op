@@ -66,6 +66,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             created_at      TEXT    NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS hit_parlays (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            date        TEXT    NOT NULL,
+            parlay_num  INTEGER NOT NULL,
+            leg1_id     INTEGER REFERENCES hit_legs(id),
+            leg2_id     INTEGER REFERENCES hit_legs(id),
+            stake       REAL    NOT NULL DEFAULT 50.0,
+            outcome     TEXT    DEFAULT NULL,  -- 'win' | 'loss' | 'void'
+            payout      REAL    DEFAULT NULL,  -- actual dollars returned (stake + profit)
+            created_at  TEXT    NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS hr_prop_candidates (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             date            TEXT    NOT NULL,
@@ -195,11 +207,11 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> None:
     print(f"[backtest] Logged {len(candidates)} HR prop candidate(s) for {today}")
 
 
-def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> None:
+def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
     """Persists hit parlay legs so result_tracker can grade them later.
-    Skips if hit legs were already logged today."""
+    Skips insertion if already logged today. Always returns today's leg IDs in order."""
     if not legs:
-        return
+        return []
     conn  = _connect(db_path)
     today = str(date.today())
 
@@ -208,32 +220,78 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> None:
     ).fetchone()
     if existing:
         print(f"[backtest] Hit legs already logged for {today} — skipping.")
+    else:
+        now = datetime.now(timezone.utc).isoformat()
+        for leg in legs:
+            conn.execute(
+                """INSERT INTO hit_legs
+                   (date, game_pk, batter_id, batter_name, team, opponent_team,
+                    pitcher_name, lineup_pos, hit_probability, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    today,
+                    leg.get("game_pk"),
+                    leg.get("batter_id"),
+                    leg.get("batter_name"),
+                    leg.get("team"),
+                    leg.get("opponent_team"),
+                    leg.get("pitcher_name"),
+                    leg.get("lineup_pos"),
+                    leg.get("hit_probability"),
+                    now,
+                ),
+            )
+        conn.commit()
+        print(f"[backtest] Logged {len(legs)} hit parlay leg(s) for {today}")
+
+    rows = conn.execute(
+        "SELECT id FROM hit_legs WHERE date=? ORDER BY id", (today,)
+    ).fetchall()
+    conn.close()
+    return [r["id"] for r in rows]
+
+
+def log_hit_parlays(leg_ids: list[int], stake: float = 50.0,
+                    db_path: str = DB_PATH) -> None:
+    """Logs the 2-leg parlay structure (interleaved pairs) for a --hits-2 run.
+    Requires leg_ids to already be in the DB (call log_hit_parlay first)."""
+    if not leg_ids:
+        return
+    conn  = _connect(db_path)
+    today = str(date.today())
+
+    existing = conn.execute(
+        "SELECT id FROM hit_parlays WHERE date=? LIMIT 1", (today,)
+    ).fetchone()
+    if existing:
+        print(f"[backtest] Hit parlays already logged for {today} — skipping.")
         conn.close()
         return
 
-    now = datetime.now(timezone.utc).isoformat()
-    for leg in legs:
+    half = len(leg_ids) // 2
+    now  = datetime.now(timezone.utc).isoformat()
+    for i in range(half):
         conn.execute(
-            """INSERT INTO hit_legs
-               (date, game_pk, batter_id, batter_name, team, opponent_team,
-                pitcher_name, lineup_pos, hit_probability, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                today,
-                leg.get("game_pk"),
-                leg.get("batter_id"),
-                leg.get("batter_name"),
-                leg.get("team"),
-                leg.get("opponent_team"),
-                leg.get("pitcher_name"),
-                leg.get("lineup_pos"),
-                leg.get("hit_probability"),
-                now,
-            ),
+            """INSERT INTO hit_parlays (date, parlay_num, leg1_id, leg2_id, stake, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (today, i + 1, leg_ids[i], leg_ids[i + half], stake, now),
         )
     conn.commit()
     conn.close()
-    print(f"[backtest] Logged {len(legs)} hit parlay leg(s) for {today}")
+    print(f"[backtest] Logged {half} hit parlays for {today} (${stake:.0f} each)")
+
+
+def record_hit_payout(date_str: str, parlay_num: int, payout_dollars: float,
+                      db_path: str = DB_PATH) -> None:
+    """Records the actual sportsbook payout for a winning hit parlay."""
+    conn = _connect(db_path)
+    conn.execute(
+        "UPDATE hit_parlays SET payout=? WHERE date=? AND parlay_num=?",
+        (payout_dollars, date_str, parlay_num),
+    )
+    conn.commit()
+    conn.close()
+    print(f"[backtest] Recorded ${payout_dollars:.2f} payout for hit parlay #{parlay_num} on {date_str}")
 
 
 # ---------------------------------------------------------------------------
@@ -285,21 +343,22 @@ def get_pending_parlays(db_path: str = DB_PATH) -> list[dict]:
 def evaluate_results(db_path: str = DB_PATH) -> dict:
     conn = _connect(db_path)
 
-    parlays    = conn.execute("SELECT * FROM parlays WHERE outcome IS NOT NULL").fetchall()
-    legs       = conn.execute("SELECT * FROM legs    WHERE outcome IS NOT NULL").fetchall()
-    hit_legs   = conn.execute("SELECT * FROM hit_legs WHERE outcome IS NOT NULL").fetchall()
-    hr_cands   = conn.execute("SELECT * FROM hr_prop_candidates WHERE outcome IS NOT NULL").fetchall()
+    parlays      = conn.execute("SELECT * FROM parlays WHERE outcome IS NOT NULL").fetchall()
+    legs         = conn.execute("SELECT * FROM legs    WHERE outcome IS NOT NULL").fetchall()
+    hit_legs     = conn.execute("SELECT * FROM hit_legs WHERE outcome IS NOT NULL").fetchall()
+    hit_parlays  = conn.execute("SELECT * FROM hit_parlays WHERE outcome IS NOT NULL").fetchall()
+    hr_cands     = conn.execute("SELECT * FROM hr_prop_candidates WHERE outcome IS NOT NULL").fetchall()
     conn.close()
 
     # ── Game parlays ──────────────────────────────────────────────────────────
-    game_parlays  = [p for p in parlays]
-    parlay_wins   = sum(1 for p in game_parlays if p["outcome"] == "win")
-    parlay_total  = len(game_parlays)
-    hit_rate      = parlay_wins / parlay_total if parlay_total else 0
+    parlay_wins  = sum(1 for p in parlays if p["outcome"] == "win")
+    parlay_total = len(parlays)
+    hit_rate     = parlay_wins / parlay_total if parlay_total else 0
 
-    total_staked  = parlay_total
-    total_return  = sum((p["payout"] or 0) for p in game_parlays if p["outcome"] == "win")
-    roi           = (total_return - total_staked) / total_staked if total_staked else 0
+    gp_staked    = parlay_total * 10.0
+    gp_returned  = sum((p["payout"] or 0) * 10.0 for p in parlays if p["outcome"] == "win")
+    gp_net       = gp_returned - gp_staked
+    roi          = gp_net / gp_staked if gp_staked else 0
 
     clv_legs = [l for l in legs if l["closing_odds"] is not None]
     avg_clv  = (
@@ -315,26 +374,53 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
     hit_wins     = sum(1 for l in hit_resolved if l["outcome"] == "win")
     hit_rate_leg = hit_wins / len(hit_resolved) if hit_resolved else None
 
+    # ── Hit parlays (2-leg pairs) ─────────────────────────────────────────────
+    hp_resolved  = [p for p in hit_parlays if p["outcome"] in ("win", "loss", "void")]
+    hp_wins      = sum(1 for p in hp_resolved if p["outcome"] == "win")
+    hp_losses    = sum(1 for p in hp_resolved if p["outcome"] == "loss")
+    hp_staked    = sum(p["stake"] for p in hp_resolved if p["outcome"] in ("win", "loss"))
+    hp_returned  = sum(p["payout"] for p in hp_resolved
+                       if p["outcome"] == "win" and p["payout"] is not None)
+    hp_wins_no_payout = sum(1 for p in hp_resolved
+                            if p["outcome"] == "win" and p["payout"] is None)
+    hp_net       = (hp_returned - hp_staked) if hp_staked and not hp_wins_no_payout else None
+
     # ── HR prop candidates ────────────────────────────────────────────────────
     hr_hits  = sum(1 for r in hr_cands if r["outcome"] == "hr")
     hr_rate  = round(hr_hits / len(hr_cands), 4) if hr_cands else None
 
+    # ── Combined net (only where all payouts are known) ───────────────────────
+    combined_net = gp_net + (hp_net if hp_net is not None else 0)
+    combined_complete = hp_net is not None  # False = hit parlay payouts still TBD
+
     summary = {
         # game parlays
-        "parlays_tracked":   parlay_total,
-        "parlay_hit_rate":   round(hit_rate, 4),
-        "roi":               round(roi, 4),
-        "avg_clv":           round(avg_clv, 4) if avg_clv is not None else None,
-        "ml_win_rate":       _win_rate(ml_legs),
-        "ml_legs_graded":    len([l for l in ml_legs if l["outcome"] in ("win", "loss")]),
-        "total_win_rate":    _win_rate(total_legs),
-        "total_legs_graded": len([l for l in total_legs if l["outcome"] in ("win", "loss")]),
-        # hit parlay
-        "hit_legs_graded":   len(hit_resolved),
-        "hit_leg_win_rate":  round(hit_rate_leg, 4) if hit_rate_leg is not None else None,
+        "parlays_tracked":      parlay_total,
+        "parlay_hit_rate":      round(hit_rate, 4),
+        "gp_net":               round(gp_net, 2),
+        "roi":                  round(roi, 4),
+        "avg_clv":              round(avg_clv, 4) if avg_clv is not None else None,
+        "ml_win_rate":          _win_rate(ml_legs),
+        "ml_legs_graded":       len([l for l in ml_legs if l["outcome"] in ("win", "loss")]),
+        "total_win_rate":       _win_rate(total_legs),
+        "total_legs_graded":    len([l for l in total_legs if l["outcome"] in ("win", "loss")]),
+        # hit parlay legs
+        "hit_legs_graded":      len(hit_resolved),
+        "hit_leg_win_rate":     round(hit_rate_leg, 4) if hit_rate_leg is not None else None,
+        # hit parlays
+        "hp_tracked":           len(hp_resolved),
+        "hp_wins":              hp_wins,
+        "hp_losses":            hp_losses,
+        "hp_staked":            round(hp_staked, 2),
+        "hp_returned":          round(hp_returned, 2),
+        "hp_net":               round(hp_net, 2) if hp_net is not None else None,
+        "hp_wins_no_payout":    hp_wins_no_payout,
         # hr props
-        "hr_cands_graded":   len(hr_cands),
-        "hr_hit_rate":       hr_rate,
+        "hr_cands_graded":      len(hr_cands),
+        "hr_hit_rate":          hr_rate,
+        # combined
+        "combined_net":         round(combined_net, 2),
+        "combined_complete":    combined_complete,
     }
 
     _print_summary(summary)
@@ -383,34 +469,53 @@ def _fmt_odds(odds: int) -> str:
 
 
 def _print_summary(s: dict) -> None:
-    w = 36
+    w = 40
     print(f"\n{'=' * w}")
-    print(f"  GAME PARLAYS  ({s['parlays_tracked']} tracked)")
+
+    # ── Combined P&L ─────────────────────────────────────────────────────────
+    net = s["combined_net"]
+    net_str = f"${net:+.2f}" if s["combined_complete"] else f"${s['gp_net']:+.2f} + hit TBD"
+    print(f"  NET P&L (all bets):  {net_str}")
     print(f"{'─' * w}")
-    print(f"  Hit rate:      {s['parlay_hit_rate'] * 100:.1f}%")
-    print(f"  ROI ($10/bet): ${(s['roi'] * 10 * s['parlays_tracked']):.2f}  ({s['roi']*100:+.1f}%)")
+
+    # ── Game parlays ──────────────────────────────────────────────────────────
+    print(f"  GAME PARLAYS  ({s['parlays_tracked']} tracked, $10/bet)")
+    print(f"{'─' * w}")
+    print(f"  Hit rate:   {s['parlay_hit_rate'] * 100:.1f}%")
+    print(f"  Net P&L:    ${s['gp_net']:+.2f}  ({s['roi']*100:+.1f}% ROI)")
     if s["avg_clv"] is not None:
-        print(f"  Avg CLV:       {s['avg_clv'] * 100:+.2f}%")
+        print(f"  Avg CLV:    {s['avg_clv'] * 100:+.2f}%")
     if s["ml_win_rate"] is not None:
-        print(f"  ML legs:       {s['ml_win_rate'] * 100:.1f}%  ({s['ml_legs_graded']} graded)")
+        print(f"  ML legs:    {s['ml_win_rate'] * 100:.1f}%  ({s['ml_legs_graded']} graded)")
     if s["total_win_rate"] is not None:
-        print(f"  Total legs:    {s['total_win_rate'] * 100:.1f}%  ({s['total_legs_graded']} graded)")
+        print(f"  Totals:     {s['total_win_rate'] * 100:.1f}%  ({s['total_legs_graded']} graded)")
 
+    # ── Hit parlays ───────────────────────────────────────────────────────────
     print(f"{'─' * w}")
-    print(f"  HIT PARLAY LEGS  ({s['hit_legs_graded']} graded)")
+    print(f"  HIT PARLAYS  ({s['hp_tracked']} tracked, $50/bet)")
     print(f"{'─' * w}")
+    if s["hp_tracked"]:
+        print(f"  Won/Lost:   {s['hp_wins']}/{s['hp_losses']}  "
+              f"({s['hp_wins'] / max(s['hp_wins'] + s['hp_losses'], 1) * 100:.0f}%)")
+        print(f"  Staked:     ${s['hp_staked']:.2f}")
+        if s["hp_net"] is not None:
+            print(f"  Net P&L:    ${s['hp_net']:+.2f}")
+        else:
+            returned_str = f"${s['hp_returned']:.2f} confirmed" if s["hp_returned"] else "—"
+            print(f"  Returned:   {returned_str}")
+            print(f"  Note: {s['hp_wins_no_payout']} win(s) need payout — "
+                  f"use --record-hit-win DATE NUM AMOUNT")
     if s["hit_leg_win_rate"] is not None:
-        print(f"  Leg hit rate:  {s['hit_leg_win_rate'] * 100:.1f}%  ({s['hit_legs_graded']} legs)")
-    else:
-        print(f"  Leg hit rate:  — (no resolved legs yet)")
+        print(f"  Leg rate:   {s['hit_leg_win_rate'] * 100:.1f}%  ({s['hit_legs_graded']} legs)")
 
+    # ── HR props ──────────────────────────────────────────────────────────────
     print(f"{'─' * w}")
     print(f"  HR PROPS  ({s['hr_cands_graded']} graded)")
     print(f"{'─' * w}")
     if s["hr_hit_rate"] is not None:
-        print(f"  HR rate:       {s['hr_hit_rate'] * 100:.1f}%  ({s['hr_cands_graded']} candidates)")
+        print(f"  HR rate:    {s['hr_hit_rate'] * 100:.1f}%  ({s['hr_cands_graded']} candidates)")
     else:
-        print(f"  HR rate:       — (no resolved candidates yet)")
+        print(f"  HR rate:    — (no resolved candidates yet)")
     print(f"{'=' * w}\n")
 
 

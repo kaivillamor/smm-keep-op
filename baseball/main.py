@@ -14,7 +14,7 @@ from parlay.leg_selector import select_legs
 from parlay.parlay_builder import build_parlay
 from llm.context_analyzer import analyze_context
 from output.daily_slip import print_slip
-from output.backtest import log_parlay, log_hit_parlay, log_hr_candidates
+from output.backtest import log_parlay, log_hit_parlay, log_hit_parlays, log_hr_candidates, record_hit_payout
 from output.result_tracker import resolve_pending
 
 
@@ -81,7 +81,8 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
         hit_legs = analyze_hit_props(lineups, stats)
         pairs = _pair_hit_legs(hit_legs)
         _print_hit_parlay_split(pairs)
-        log_hit_parlay(hit_legs)
+        leg_ids = log_hit_parlay(hit_legs)
+        log_hit_parlays(leg_ids)
 
 
 def _print_usage() -> None:
@@ -276,12 +277,21 @@ if __name__ == "__main__":
         action="store_true",
         help="Grade yesterday's pending parlay and hit legs against actual game results",
     )
+    parser.add_argument(
+        "--record-hit-win",
+        nargs=3,
+        metavar=("DATE", "PARLAY_NUM", "PAYOUT"),
+        help="Record actual payout for a winning hit parlay, e.g. --record-hit-win 2026-06-22 1 127.50",
+    )
     args = parser.parse_args()
 
     if args.usage:
         _print_usage()
     elif args.results:
         resolve_pending()
+    elif args.record_hit_win:
+        date_str, parlay_num, payout = args.record_hit_win
+        record_hit_payout(date_str, int(parlay_num), float(payout))
     else:
         run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits,
             run_hits_2=args.hits_2, run_all=args.all)

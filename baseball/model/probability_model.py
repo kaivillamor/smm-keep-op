@@ -3,6 +3,7 @@ from model.factors.lineup_ratings import score_lineups
 from model.factors.park_factors import get_runs_factor
 from model.factors.weather_adjustments import get_weather_adjustment
 from model.factors.owner_logic import apply_owner_logic
+from model.factors.team_quality import get_quality_adj
 
 LEAGUE_AVG_TOTAL = 8.8        # total runs per game, both teams combined
 HOME_FIELD_ADV   = 0.04       # ~54% home win rate historically
@@ -44,7 +45,19 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
     # --- Win probability ---
     pitcher_adj = score_pitchers(game, stats)
     lineup_adj  = score_lineups(game, lineups, pitcher_stats, probable)
-    win_pct     = _clamp(0.50 + HOME_FIELD_ADV + pitcher_adj + lineup_adj, 0.10, 0.90)
+
+    standings   = stats.get("standings", {})
+    wrc_plus    = stats.get("wrc_plus", {})
+    away_team   = game.get("away_team", "")
+    home_record = standings.get(home_team, {})
+    away_record = standings.get(away_team, {})
+    quality_adj = get_quality_adj(
+        home_record.get("win_pct"),        away_record.get("win_pct"),
+        wrc_plus.get(home_team),           wrc_plus.get(away_team),
+        home_record.get("run_diff_per_game"), away_record.get("run_diff_per_game"),
+    )
+
+    win_pct = _clamp(0.50 + HOME_FIELD_ADV + pitcher_adj + lineup_adj + quality_adj, 0.10, 0.90)
 
     # --- Expected run total ---
     park_runs     = get_runs_factor(home_team)
@@ -87,6 +100,13 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
             "home_field_adv":         HOME_FIELD_ADV,
             "pitcher_win_adj":        pitcher_adj,
             "lineup_win_adj":         lineup_adj,
+            "team_quality_adj":       quality_adj,
+            "home_win_pct":           home_record.get("win_pct"),
+            "away_win_pct":           away_record.get("win_pct"),
+            "home_wrc_plus":          wrc_plus.get(home_team),
+            "away_wrc_plus":          wrc_plus.get(away_team),
+            "home_run_diff_pg":       home_record.get("run_diff_per_game"),
+            "away_run_diff_pg":       away_record.get("run_diff_per_game"),
             "park_runs_factor":       park_runs,
             "weather_run_adj":        weather_adj,
             "home_pitcher_run_delta": home_pitcher_runs_adj,
