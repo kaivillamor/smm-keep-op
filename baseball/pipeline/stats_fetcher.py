@@ -30,10 +30,15 @@ def fetch_stats() -> dict:
         stats.update(savant.get(str(pid), {}))
         stats.update(hr_fb.get(str(pid), {}))
 
+    standings = fetch_standings(year)
+    wrc_plus  = fetch_team_wrc_plus(year)
+
     result = {
         "date": date_str,
         "probable_pitchers": probable,
         "pitcher_stats": pitcher_stats,
+        "standings": standings,
+        "wrc_plus": wrc_plus,
     }
 
     _save(result, date_str)
@@ -193,6 +198,136 @@ def _fetch_savant_pitcher_hr_fb(year: str) -> dict:
         return result
     except Exception as e:
         print(f"[stats_fetcher] _fetch_savant_pitcher_hr_fb: {e}")
+        return {}
+
+
+def fetch_standings(year: str) -> dict:
+    """
+    Fetches current season win% and run differential for all 30 teams.
+    Returns {team_name: {win_pct, run_diff, wins, losses}}.
+    Falls back to empty dict on failure — probability model uses 0.0 quality adj.
+    """
+    url = f"{MLB_API}/standings"
+    params = {
+        "leagueId": "103,104",
+        "season": year,
+        "standingsType": "regularSeason",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        standings = {}
+        for record in data.get("records", []):
+            for tr in record.get("teamRecords", []):
+                name     = tr["team"]["name"]
+                wins     = tr.get("wins", 0)
+                losses   = tr.get("losses", 0)
+                total    = wins + losses
+                run_diff = tr.get("runDifferential", 0)
+                standings[name] = {
+                    "win_pct":          round(wins / total, 4) if total > 0 else 0.500,
+                    "run_diff":         run_diff,
+                    "run_diff_per_game": round(run_diff / total, 3) if total > 0 else 0.0,
+                    "wins":             wins,
+                    "losses":           losses,
+                }
+
+        print(f"[stats_fetcher] Standings: {len(standings)} teams loaded")
+        return standings
+    except Exception as e:
+        print(f"[stats_fetcher] fetch_standings: {e}")
+        return {}
+
+
+_FG_ABBR_TO_TEAM: dict[str, str] = {
+    "LAA": "Los Angeles Angels",
+    "HOU": "Houston Astros",
+    "OAK": "Oakland Athletics",
+    "ATH": "Oakland Athletics",
+    "TOR": "Toronto Blue Jays",
+    "ATL": "Atlanta Braves",
+    "MIL": "Milwaukee Brewers",
+    "STL": "St. Louis Cardinals",
+    "CHC": "Chicago Cubs",
+    "ARI": "Arizona Diamondbacks",
+    "LAD": "Los Angeles Dodgers",
+    "SF":  "San Francisco Giants",
+    "SFG": "San Francisco Giants",
+    "CLE": "Cleveland Guardians",
+    "MIA": "Miami Marlins",
+    "NYM": "New York Mets",
+    "WSH": "Washington Nationals",
+    "WSN": "Washington Nationals",
+    "BAL": "Baltimore Orioles",
+    "SD":  "San Diego Padres",
+    "SDP": "San Diego Padres",
+    "PHI": "Philadelphia Phillies",
+    "PIT": "Pittsburgh Pirates",
+    "TEX": "Texas Rangers",
+    "TB":  "Tampa Bay Rays",
+    "TBR": "Tampa Bay Rays",
+    "BOS": "Boston Red Sox",
+    "CIN": "Cincinnati Reds",
+    "COL": "Colorado Rockies",
+    "KC":  "Kansas City Royals",
+    "KCR": "Kansas City Royals",
+    "SEA": "Seattle Mariners",
+    "DET": "Detroit Tigers",
+    "MIN": "Minnesota Twins",
+    "CWS": "Chicago White Sox",
+    "CHW": "Chicago White Sox",
+    "NYY": "New York Yankees",
+}
+
+
+def fetch_team_wrc_plus(year: str) -> dict:
+    """
+    Fetches team wRC+ from FanGraphs dashboard leaderboard.
+    wRC+ is park and league adjusted: 100 = league avg, 110 = 10% above avg.
+    Returns {team_full_name: wrc_plus (float)}.
+    Falls back to empty dict on failure.
+    """
+    url = "https://www.fangraphs.com/leaders.aspx"
+    params = {
+        "pos":     "all",
+        "stats":   "bat",
+        "lg":      "all",
+        "qual":    "0",
+        "type":    "8",
+        "season":  year,
+        "season1": year,
+        "ind":     "0",
+        "team":    "0,ts",
+        "wal":     "0",
+        "csv":     "1",
+    }
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; mlb-research-tool/1.0)"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+
+        # FanGraphs CSV column is "wRC+" — find it case-insensitively
+        wrc_col = next((c for c in df.columns if c.strip().lower() == "wrc+"), None)
+        team_col = next((c for c in df.columns if c.strip().lower() == "team"), None)
+        if not wrc_col or not team_col:
+            print(f"[stats_fetcher] FanGraphs wRC+ columns not found. Got: {list(df.columns[:10])}")
+            return {}
+
+        result = {}
+        for _, row in df.iterrows():
+            abbr    = str(row[team_col]).strip()
+            full    = _FG_ABBR_TO_TEAM.get(abbr)
+            wrc_val = _safe_float(row[wrc_col])
+            if full and wrc_val is not None:
+                result[full] = wrc_val
+
+        print(f"[stats_fetcher] FanGraphs wRC+: {len(result)} teams loaded")
+        return result
+    except Exception as e:
+        print(f"[stats_fetcher] fetch_team_wrc_plus: {e}")
         return {}
 
 
