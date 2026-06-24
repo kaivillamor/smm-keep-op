@@ -47,13 +47,13 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
     lineup_adj  = score_lineups(game, lineups, pitcher_stats, probable)
 
     standings   = stats.get("standings", {})
-    wrc_plus    = stats.get("wrc_plus", {})
+    offense     = stats.get("offense", {})
     away_team   = game.get("away_team", "")
     home_record = standings.get(home_team, {})
     away_record = standings.get(away_team, {})
     quality_adj = get_quality_adj(
-        home_record.get("win_pct"),        away_record.get("win_pct"),
-        wrc_plus.get(home_team),           wrc_plus.get(away_team),
+        home_record.get("win_pct"),           away_record.get("win_pct"),
+        offense.get(home_team),               offense.get(away_team),
         home_record.get("run_diff_per_game"), away_record.get("run_diff_per_game"),
     )
 
@@ -69,8 +69,8 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
         print(f"[probability_model] WARNING: no pitcher match for {game.get('away_team')} @ {game.get('home_team')} — using league avg total")
     home_pid      = str((game_entry or {}).get("home_pitcher_id") or "")
     away_pid      = str((game_entry or {}).get("away_pitcher_id") or "")
-    home_name     = (game_entry or {}).get("home_pitcher_name", "TBD")
-    away_name     = (game_entry or {}).get("away_pitcher_name", "TBD")
+    home_name     = (game_entry or {}).get("home_pitcher_name") or "TBD"
+    away_name     = (game_entry or {}).get("away_pitcher_name") or "TBD"
 
     home_stats = pitcher_stats.get(home_pid, {})
     away_stats = pitcher_stats.get(away_pid, {})
@@ -103,8 +103,8 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
             "team_quality_adj":       quality_adj,
             "home_win_pct":           home_record.get("win_pct"),
             "away_win_pct":           away_record.get("win_pct"),
-            "home_wrc_plus":          wrc_plus.get(home_team),
-            "away_wrc_plus":          wrc_plus.get(away_team),
+            "home_wrc_plus":          offense.get(home_team),
+            "away_wrc_plus":          offense.get(away_team),
             "home_run_diff_pg":       home_record.get("run_diff_per_game"),
             "away_run_diff_pg":       away_record.get("run_diff_per_game"),
             "park_runs_factor":       park_runs,
@@ -115,17 +115,30 @@ def _quant_score(game: dict, stats: dict, lineups: dict, weather: dict) -> dict:
     }
 
 
+_MAX_PITCHER_RUN_DELTA = 1.5   # no single starter shifts the total by more than ±1.5 runs
+_FIP_FULL_TRUST_IP     = 60.0  # regress toward league avg below this IP threshold
+
+
 def _pitcher_run_delta(stats: dict) -> float:
     """
     How many more/fewer runs the opposing team scores vs a league-avg pitcher.
     Negative = pitcher is better than avg (suppresses runs).
+    Extreme FIPs from small samples are regressed toward league avg below 60 IP.
+    Output capped at ±1.5 runs to prevent single-game noise from dominating totals.
     """
     if not stats:
         return 0.0
     fip  = stats.get("fip")  or LEAGUE_AVG_FIP
     xfip = stats.get("xfip") or fip
     blended = fip * 0.35 + xfip * 0.65
-    return (blended - LEAGUE_AVG_FIP) * RUNS_PER_FIP
+
+    # Regress toward league avg proportionally to sample size
+    ip     = stats.get("innings_pitched") or 0.0
+    weight = min(ip / _FIP_FULL_TRUST_IP, 1.0)
+    blended = blended * weight + LEAGUE_AVG_FIP * (1.0 - weight)
+
+    delta = (blended - LEAGUE_AVG_FIP) * RUNS_PER_FIP
+    return max(-_MAX_PITCHER_RUN_DELTA, min(_MAX_PITCHER_RUN_DELTA, delta))
 
 
 def _match_game(game: dict, probable: dict) -> dict | None:
