@@ -31,14 +31,14 @@ def fetch_stats() -> dict:
         stats.update(hr_fb.get(str(pid), {}))
 
     standings = fetch_standings(year)
-    wrc_plus  = fetch_team_wrc_plus(year)
+    offense   = fetch_team_offense(year)
 
     result = {
         "date": date_str,
         "probable_pitchers": probable,
         "pitcher_stats": pitcher_stats,
         "standings": standings,
-        "wrc_plus": wrc_plus,
+        "offense": offense,
     }
 
     _save(result, date_str)
@@ -241,93 +241,98 @@ def fetch_standings(year: str) -> dict:
         return {}
 
 
-_FG_ABBR_TO_TEAM: dict[str, str] = {
-    "LAA": "Los Angeles Angels",
-    "HOU": "Houston Astros",
-    "OAK": "Oakland Athletics",
-    "ATH": "Oakland Athletics",
-    "TOR": "Toronto Blue Jays",
-    "ATL": "Atlanta Braves",
-    "MIL": "Milwaukee Brewers",
-    "STL": "St. Louis Cardinals",
-    "CHC": "Chicago Cubs",
-    "ARI": "Arizona Diamondbacks",
-    "LAD": "Los Angeles Dodgers",
-    "SF":  "San Francisco Giants",
-    "SFG": "San Francisco Giants",
-    "CLE": "Cleveland Guardians",
-    "MIA": "Miami Marlins",
-    "NYM": "New York Mets",
-    "WSH": "Washington Nationals",
-    "WSN": "Washington Nationals",
-    "BAL": "Baltimore Orioles",
-    "SD":  "San Diego Padres",
-    "SDP": "San Diego Padres",
-    "PHI": "Philadelphia Phillies",
-    "PIT": "Pittsburgh Pirates",
-    "TEX": "Texas Rangers",
-    "TB":  "Tampa Bay Rays",
-    "TBR": "Tampa Bay Rays",
-    "BOS": "Boston Red Sox",
-    "CIN": "Cincinnati Reds",
-    "COL": "Colorado Rockies",
-    "KC":  "Kansas City Royals",
-    "KCR": "Kansas City Royals",
-    "SEA": "Seattle Mariners",
-    "DET": "Detroit Tigers",
-    "MIN": "Minnesota Twins",
-    "CWS": "Chicago White Sox",
-    "CHW": "Chicago White Sox",
-    "NYY": "New York Yankees",
-}
+
+_WOBA_W = {"bb": 0.690, "hbp": 0.722, "1b": 0.881, "2b": 1.254, "3b": 1.569, "hr": 2.058}
+_WOBA_SCALE = 1.157  # converts wOBA to runs per PA; stable across recent seasons
 
 
-def fetch_team_wrc_plus(year: str) -> dict:
+def fetch_team_offense(year: str) -> dict:
     """
-    Fetches team wRC+ from FanGraphs dashboard leaderboard.
-    wRC+ is park and league adjusted: 100 = league avg, 110 = 10% above avg.
+    Computes team wRC+ from MLB Stats API batting stats.
+    wRC+ = 100 × wRC / (lgR/PA × BPF × PA)
+    100 = league avg, 115 = 15% above avg.
     Returns {team_full_name: wrc_plus (float)}.
-    Falls back to empty dict on failure.
+    Falls back to empty dict on failure — quality_adj uses run_diff + win% only.
     """
-    url = "https://www.fangraphs.com/leaders.aspx"
-    params = {
-        "pos":     "all",
-        "stats":   "bat",
-        "lg":      "all",
-        "qual":    "0",
-        "type":    "8",
-        "season":  year,
-        "season1": year,
-        "ind":     "0",
-        "team":    "0,ts",
-        "wal":     "0",
-        "csv":     "1",
-    }
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; mlb-research-tool/1.0)"}
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
+    from model.factors.park_factors import get_runs_factor
 
-        # FanGraphs CSV column is "wRC+" — find it case-insensitively
-        wrc_col = next((c for c in df.columns if c.strip().lower() == "wrc+"), None)
-        team_col = next((c for c in df.columns if c.strip().lower() == "team"), None)
-        if not wrc_col or not team_col:
-            print(f"[stats_fetcher] FanGraphs wRC+ columns not found. Got: {list(df.columns[:10])}")
+    url = f"{MLB_API}/teams/stats"
+    params = {"stats": "season", "group": "hitting", "season": year, "sportId": "1"}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        splits = resp.json().get("stats", [{}])[0].get("splits", [])
+        if not splits:
             return {}
 
-        result = {}
-        for _, row in df.iterrows():
-            abbr    = str(row[team_col]).strip()
-            full    = _FG_ABBR_TO_TEAM.get(abbr)
-            wrc_val = _safe_float(row[wrc_col])
-            if full and wrc_val is not None:
-                result[full] = wrc_val
+        rows = []
+        for s in splits:
+            st = s.get("stat", {})
+            pa = st.get("plateAppearances", 0)
+            ab = st.get("atBats", 0)
+            bb = st.get("baseOnBalls", 0)
+            ibb = st.get("intentionalWalks", 0)
+            hbp = st.get("hitByPitch", 0)
+            h   = st.get("hits", 0)
+            dbl = st.get("doubles", 0)
+            trp = st.get("triples", 0)
+            hr  = st.get("homeRuns", 0)
+            sf  = st.get("sacFlies", 0)
+            runs = st.get("runs", 0)
+            singles = max(h - dbl - trp - hr, 0)
+            denom = ab + (bb - ibb) + sf + hbp
+            woba = (
+                _WOBA_W["bb"] * (bb - ibb)
+                + _WOBA_W["hbp"] * hbp
+                + _WOBA_W["1b"] * singles
+                + _WOBA_W["2b"] * dbl
+                + _WOBA_W["3b"] * trp
+                + _WOBA_W["hr"] * hr
+            ) / denom if denom > 0 else 0.0
+            rows.append({
+                "name": s["team"]["name"], "pa": pa, "woba": woba, "runs": runs,
+                "ab": ab, "bb": bb, "ibb": ibb, "hbp": hbp,
+                "singles": singles, "dbl": dbl, "trp": trp, "hr": hr, "sf": sf,
+            })
 
-        print(f"[stats_fetcher] FanGraphs wRC+: {len(result)} teams loaded")
+        # League totals
+        lg_pa   = sum(r["pa"] for r in rows)
+        lg_runs = sum(r["runs"] for r in rows)
+        lg_denom = sum(
+            r["ab"] + (r["bb"] - r["ibb"]) + r["sf"] + r["hbp"] for r in rows
+        )
+        lg_woba_num = sum(
+            _WOBA_W["bb"] * (r["bb"] - r["ibb"])
+            + _WOBA_W["hbp"] * r["hbp"]
+            + _WOBA_W["1b"] * r["singles"]
+            + _WOBA_W["2b"] * r["dbl"]
+            + _WOBA_W["3b"] * r["trp"]
+            + _WOBA_W["hr"] * r["hr"]
+            for r in rows
+        )
+        lg_woba = lg_woba_num / lg_denom if lg_denom > 0 else 0.315
+        lg_r_per_pa = lg_runs / lg_pa if lg_pa > 0 else 0.112
+
+        result = {}
+        for r in rows:
+            name = r["name"]
+            pa   = r["pa"]
+            if pa == 0:
+                continue
+            woba  = r["woba"]
+            wraa  = ((woba - lg_woba) / _WOBA_SCALE) * pa
+            wrc   = wraa + (lg_r_per_pa * pa)
+            # BPF: teams play ~half home, half away; home park factor blended with neutral away
+            park_factor = get_runs_factor(name)
+            bpf = (park_factor + 1.0) / 2.0
+            denom = lg_r_per_pa * bpf * pa
+            wrc_plus = round((wrc / denom) * 100, 1) if denom > 0 else 100.0
+            result[name] = wrc_plus
+
+        print(f"[stats_fetcher] Team wRC+: {len(result)} teams computed")
         return result
     except Exception as e:
-        print(f"[stats_fetcher] fetch_team_wrc_plus: {e}")
+        print(f"[stats_fetcher] fetch_team_offense: {e}")
         return {}
 
 
