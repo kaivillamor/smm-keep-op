@@ -1,6 +1,6 @@
 HR_GATE_THRESHOLD    = 65.0   # threshold for sweet spot, hard contact, zone fit
-BARREL_THRESHOLD     = 8.0    # barrel rate % that qualifies alone (league avg ~7%)
-BARREL_SOFT          = 6.0    # lower barrel threshold when facing a homer-prone pitcher
+BARREL_THRESHOLD     = 11.0   # barrel rate % that qualifies alone (top ~20% of MLB; avg ~7%)
+BARREL_SOFT          = 8.0    # lower barrel threshold when facing a homer-prone pitcher
 HR_FB_THRESHOLD      = 15.0   # pitcher HR/FB rate % — above this is homer-prone (league avg ~11%)
 RECENT_DAYS          = 14
 
@@ -152,3 +152,32 @@ def _check_gate(scores: dict) -> bool:
         return True
 
     return False
+
+
+def rank_score(scores: dict) -> float:
+    """
+    Composite ranking score (0–100) for sorting candidates after gate filtering.
+    Barrel rate carries the most weight — it's the best single HR predictor.
+    Hard contact and sweet spot add signal; zone fit and pitcher_hrfb are bonuses.
+    """
+    barrel       = scores.get("barrel_rate")      or 0.0
+    sweet_spot   = scores.get("sweet_spot")        or 0.0
+    hard_contact = scores.get("recent_hard_contact") or 0.0
+    zone_fit     = scores.get("zone_fit")          or 0.0
+    pitcher_hrfb = scores.get("pitcher_hr_fb")     or 0.0
+
+    # Normalize each metric to a 0–1 scale before weighting
+    barrel_n  = min(barrel / 20.0,       1.0)   # 20% barrel ≈ elite ceiling
+    sweet_n   = min(sweet_spot / 75.0,   1.0)
+    hard_n    = min(hard_contact / 75.0, 1.0)
+    zone_n    = min(zone_fit / 100.0,    1.0)
+    hrfb_n    = min(max(pitcher_hrfb - 10.0, 0.0) / 15.0, 1.0)  # bonus above 10%
+
+    score = (
+        barrel_n  * 0.40 +
+        hard_n    * 0.25 +
+        sweet_n   * 0.20 +
+        zone_n    * 0.10 +
+        hrfb_n    * 0.05
+    ) * 100
+    return round(score, 1)

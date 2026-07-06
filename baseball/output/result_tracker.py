@@ -217,8 +217,13 @@ def _roll_up_hit_parlays(db_path: str) -> None:
             result, payout = "void", row["stake"]
         elif "loss" in (o1, o2):
             result, payout = "loss", 0.0
+        elif o1 == "win" and o2 == "win":
+            result = "win"
+            # Auto-compute payout when bet-slip odds were recorded at placement
+            odds   = row["odds"] if "odds" in row.keys() else None
+            payout = round(row["stake"] * _american_to_decimal(odds), 2) if odds else None
         else:
-            # both win, or one void + one win (collapses to single-leg — payout TBD)
+            # one void + one win — collapses to single-leg, combined odds no longer apply
             result, payout = "win", None
 
         conn = _connect(db_path)
@@ -227,7 +232,7 @@ def _roll_up_hit_parlays(db_path: str) -> None:
         conn.commit()
         conn.close()
 
-        payout_str = f"${payout:.2f}" if payout is not None else "enter with --record-hit-win"
+        payout_str = f"${payout:.2f}" if payout is not None else "unknown — enter with --record-hit-win"
         print(f"[result_tracker] Hit parlay #{row['parlay_num']} ({row['date']}) "
               f"→ {result}  (payout: {payout_str})")
         resolved += 1

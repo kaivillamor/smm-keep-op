@@ -1,5 +1,5 @@
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from pipeline.odds_fetcher import fetch_odds, check_usage
 from pipeline.stats_fetcher import fetch_stats, fetch_batter_statcast_season
@@ -10,11 +10,12 @@ from pipeline.hit_pipeline import analyze_hit_props
 from model.probability_model import build_probabilities
 from model.edge_detector import detect_edges
 from model.factors.hr_prop_model import RECENT_DAYS
+from model.factors.hit_model import HIT_PARLAY_STAKE
 from parlay.leg_selector import select_legs
 from parlay.parlay_builder import build_parlay
 from llm.context_analyzer import analyze_context
 from output.daily_slip import print_slip
-from output.backtest import log_parlay, log_hit_parlay, log_hit_parlays, log_hr_candidates, record_hit_payout
+from output.backtest import log_parlay, log_hit_parlay, log_hit_parlays, log_hr_candidates, record_hit_payout, record_hit_odds
 from output.result_tracker import resolve_pending
 
 
@@ -82,7 +83,12 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
         pairs = _pair_hit_legs(hit_legs)
         _print_hit_parlay_split(pairs)
         leg_ids = log_hit_parlay(hit_legs)
-        log_hit_parlays(leg_ids)
+        log_hit_parlays(leg_ids, stake=HIT_PARLAY_STAKE)
+        if leg_ids:
+            today = str(date.today())
+            print("\n  When you place these, record the bet-slip odds so payouts auto-compute:")
+            for n in range(1, len(leg_ids) // 2 + 1):
+                print(f"    python main.py --record-hit-placed {today} {n} <ODDS e.g. +130>")
 
 
 def _print_usage() -> None:
@@ -222,19 +228,22 @@ def _print_hr_candidates(candidates: list[dict]) -> None:
         return
 
     print(f"\n{'=' * 50}")
-    print(f"  HR PROP CANDIDATES — {len(candidates)} passed 65/65/65 gate")
+    print(f"  HR PROP CANDIDATES — top {len(candidates)} by rank score")
     print(f"{'=' * 50}")
-    for c in candidates:
+    for i, c in enumerate(candidates, 1):
         s = c["scores"]
-        hrfb_str = f"{s['pitcher_hr_fb']}%" if s.get("pitcher_hr_fb") is not None else "N/A"
+        hrfb_str = f"{s['pitcher_hr_fb']}%*" if s.get("pitcher_hr_fb") is not None else "N/A"
+        gate_str = s.get("gate_triggered") or "?"
+        rank     = c.get("rank_score", 0.0)
         print(
-            f"  {c['batter_name']} ({c['team']})\n"
+            f"  #{i} {c['batter_name']} ({c['team']})  [score: {rank}  gate: {gate_str}]\n"
             f"    Barrel Rate:        {s['barrel_rate']}%\n"
             f"    Sweet Spot:         {s['sweet_spot']}%\n"
             f"    Hard Contact (L{RECENT_DAYS}d): {s['recent_hard_contact']}%\n"
             f"    Zone Fit:           {s['zone_fit']}\n"
             f"    Pitcher HR/FB:      {hrfb_str}\n"
         )
+    print("  * Pitcher HR/FB estimated from FIP-xFIP gap")
     print("=" * 50)
 
 
@@ -283,6 +292,13 @@ if __name__ == "__main__":
         metavar=("DATE", "PARLAY_NUM", "PAYOUT"),
         help="Record actual payout for a winning hit parlay, e.g. --record-hit-win 2026-06-22 1 127.50",
     )
+    parser.add_argument(
+        "--record-hit-placed",
+        nargs=3,
+        metavar=("DATE", "PARLAY_NUM", "ODDS"),
+        help="Record combined odds from the bet slip when placing a hit parlay, "
+             "e.g. --record-hit-placed 2026-07-06 1 +120 — payout then auto-computes on a win",
+    )
     args = parser.parse_args()
 
     if args.usage:
@@ -292,6 +308,9 @@ if __name__ == "__main__":
     elif args.record_hit_win:
         date_str, parlay_num, payout = args.record_hit_win
         record_hit_payout(date_str, int(parlay_num), float(payout))
+    elif args.record_hit_placed:
+        date_str, parlay_num, odds = args.record_hit_placed
+        record_hit_odds(date_str, int(parlay_num), int(odds))
     else:
         run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits,
             run_hits_2=args.hits_2, run_all=args.all)

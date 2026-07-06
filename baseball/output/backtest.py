@@ -72,7 +72,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             parlay_num  INTEGER NOT NULL,
             leg1_id     INTEGER REFERENCES hit_legs(id),
             leg2_id     INTEGER REFERENCES hit_legs(id),
-            stake       REAL    NOT NULL DEFAULT 50.0,
+            stake       REAL    NOT NULL DEFAULT 10.0,
+            odds        INTEGER DEFAULT NULL,  -- combined American odds from the bet slip
             outcome     TEXT    DEFAULT NULL,  -- 'win' | 'loss' | 'void'
             payout      REAL    DEFAULT NULL,  -- actual dollars returned (stake + profit)
             created_at  TEXT    NOT NULL
@@ -97,6 +98,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             created_at      TEXT    NOT NULL
         );
     """)
+    # Migration: existing DBs created before the odds column was added
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(hit_parlays)").fetchall()}
+    if "odds" not in cols:
+        conn.execute("ALTER TABLE hit_parlays ADD COLUMN odds INTEGER DEFAULT NULL")
     conn.commit()
 
 
@@ -209,18 +214,28 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> None:
 
 def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
     """Persists hit parlay legs so result_tracker can grade them later.
-    Skips insertion if already logged today. Always returns today's leg IDs in order."""
+    Re-runs on the same day are allowed if the batter set changed (new lineups confirmed).
+    If the batter IDs are identical to what's already logged, skips silently.
+    Always returns today's leg IDs in order."""
     if not legs:
         return []
     conn  = _connect(db_path)
     today = str(date.today())
 
-    existing = conn.execute(
-        "SELECT id FROM hit_legs WHERE date=? LIMIT 1", (today,)
-    ).fetchone()
-    if existing:
-        print(f"[backtest] Hit legs already logged for {today} — skipping.")
+    new_ids  = sorted(str(leg.get("batter_id", "")) for leg in legs)
+    existing_rows = conn.execute(
+        "SELECT id, batter_id FROM hit_legs WHERE date=? ORDER BY id", (today,)
+    ).fetchall()
+    existing_ids = sorted(str(r["batter_id"]) for r in existing_rows)
+
+    if existing_ids == new_ids:
+        print(f"[backtest] Hit legs already logged for {today} (same batters) — skipping.")
     else:
+        if existing_rows:
+            # Lineups updated since first run — replace stale legs
+            old_ids = tuple(r["id"] for r in existing_rows)
+            conn.execute(f"DELETE FROM hit_legs WHERE id IN ({','.join('?'*len(old_ids))})", old_ids)
+            print(f"[backtest] Lineup update detected — replacing {len(existing_rows)} stale hit leg(s).")
         now = datetime.now(timezone.utc).isoformat()
         for leg in legs:
             conn.execute(
@@ -242,7 +257,7 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
                 ),
             )
         conn.commit()
-        print(f"[backtest] Logged {len(legs)} hit parlay leg(s) for {today}")
+        print(f"[backtest] Logged {len(legs)} hit leg(s) for {today} (individual batter rows)")
 
     rows = conn.execute(
         "SELECT id FROM hit_legs WHERE date=? ORDER BY id", (today,)
@@ -251,7 +266,7 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
     return [r["id"] for r in rows]
 
 
-def log_hit_parlays(leg_ids: list[int], stake: float = 50.0,
+def log_hit_parlays(leg_ids: list[int], stake: float = 10.0,
                     db_path: str = DB_PATH) -> None:
     """Logs the 2-leg parlay structure (interleaved pairs) for a --hits-2 run.
     Requires leg_ids to already be in the DB (call log_hit_parlay first)."""
@@ -292,6 +307,41 @@ def record_hit_payout(date_str: str, parlay_num: int, payout_dollars: float,
     conn.commit()
     conn.close()
     print(f"[backtest] Recorded ${payout_dollars:.2f} payout for hit parlay #{parlay_num} on {date_str}")
+
+
+def record_hit_odds(date_str: str, parlay_num: int, odds: int,
+                    db_path: str = DB_PATH) -> None:
+    """Records the combined American odds from the bet slip at placement time.
+    If the parlay already resolved as a win with no payout entered, the payout
+    is computed immediately; otherwise the roll-up computes it on grading."""
+    conn = _connect(db_path)
+    row  = conn.execute(
+        "SELECT id, stake, outcome, payout FROM hit_parlays WHERE date=? AND parlay_num=?",
+        (date_str, parlay_num),
+    ).fetchone()
+    if not row:
+        conn.close()
+        print(f"[backtest] No hit parlay #{parlay_num} found for {date_str}.")
+        return
+
+    conn.execute("UPDATE hit_parlays SET odds=? WHERE id=?", (odds, row["id"]))
+
+    odds_str = f"+{odds}" if odds > 0 else str(odds)
+    print(f"[backtest] Recorded {odds_str} odds for hit parlay #{parlay_num} on {date_str}")
+
+    if row["outcome"] == "win" and row["payout"] is None:
+        payout = round(row["stake"] * _american_to_decimal(odds), 2)
+        conn.execute("UPDATE hit_parlays SET payout=? WHERE id=?", (payout, row["id"]))
+        print(f"[backtest] Parlay already won — payout auto-computed: ${payout:.2f}")
+
+    conn.commit()
+    conn.close()
+
+
+def _american_to_decimal(odds: int) -> float:
+    if odds > 0:
+        return odds / 100.0 + 1.0
+    return 100.0 / abs(odds) + 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +518,26 @@ def _fmt_odds(odds: int) -> str:
     return f"+{odds}" if odds > 0 else str(odds)
 
 
+def _print_pending_payouts(db_path: str = DB_PATH) -> None:
+    conn = _connect(db_path)
+    rows = conn.execute("""
+        SELECT hp.date, hp.parlay_num,
+               hl1.batter_name AS leg1, hl2.batter_name AS leg2
+        FROM hit_parlays hp
+        JOIN hit_legs hl1 ON hl1.id = hp.leg1_id
+        JOIN hit_legs hl2 ON hl2.id = hp.leg2_id
+        WHERE hp.outcome = 'win' AND hp.payout IS NULL
+        ORDER BY hp.date, hp.parlay_num
+    """).fetchall()
+    conn.close()
+    for r in rows:
+        print(f"    {r['date']}  #{r['parlay_num']}  "
+              f"({r['leg1']} + {r['leg2']})")
+        print(f"    → python main.py --record-hit-win {r['date']} {r['parlay_num']} <AMOUNT>")
+    if rows:
+        print("    (tip: record odds at bet time with --record-hit-placed and this step disappears)")
+
+
 def _print_summary(s: dict) -> None:
     w = 40
     print(f"\n{'=' * w}")
@@ -492,7 +562,7 @@ def _print_summary(s: dict) -> None:
 
     # ── Hit parlays ───────────────────────────────────────────────────────────
     print(f"{'─' * w}")
-    print(f"  HIT PARLAYS  ({s['hp_tracked']} tracked, $50/bet)")
+    print(f"  HIT PARLAYS  ({s['hp_tracked']} tracked)")
     print(f"{'─' * w}")
     if s["hp_tracked"]:
         print(f"  Won/Lost:   {s['hp_wins']}/{s['hp_losses']}  "
@@ -503,8 +573,9 @@ def _print_summary(s: dict) -> None:
         else:
             returned_str = f"${s['hp_returned']:.2f} confirmed" if s["hp_returned"] else "—"
             print(f"  Returned:   {returned_str}")
-            print(f"  Note: {s['hp_wins_no_payout']} win(s) need payout — "
-                  f"use --record-hit-win DATE NUM AMOUNT")
+            if s["hp_wins_no_payout"]:
+                print(f"  Note: {s['hp_wins_no_payout']} win(s) need payout entered:")
+                _print_pending_payouts()
     if s["hit_leg_win_rate"] is not None:
         print(f"  Leg rate:   {s['hit_leg_win_rate'] * 100:.1f}%  ({s['hit_legs_graded']} legs)")
 

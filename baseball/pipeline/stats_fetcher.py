@@ -9,6 +9,13 @@ from datetime import datetime, timezone, timedelta
 MLB_API = "https://statsapi.mlb.com/api/v1"
 SAVANT_BASE = "https://baseballsavant.mlb.com"
 
+_SAVANT_TIMEOUT_CODES = {"502", "503", "524"}
+
+def _is_savant_timeout(e: Exception) -> bool:
+    """True for transient Savant gateway errors (502/503/524) — not code bugs."""
+    msg = str(e)
+    return any(code in msg for code in _SAVANT_TIMEOUT_CODES)
+
 
 def fetch_stats() -> dict:
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -53,7 +60,7 @@ def _fetch_probable_pitchers(date_str: str) -> dict:
         "date": date_str,
         "hydrate": "probablePitcher,team",
     }
-    resp = requests.get(url, params=params)
+    resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
 
@@ -103,7 +110,7 @@ def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
         "season": year,
         "gameType": "R",
     }
-    resp = requests.get(url, params=params)
+    resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
 
@@ -146,7 +153,7 @@ def _fetch_savant_pitcher_leaderboard(year: str) -> dict:
         "team": "",
         "csv": "true",
     }
-    resp = requests.get(url, params=params)
+    resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
 
     df = pd.read_csv(io.StringIO(resp.text))
@@ -340,8 +347,18 @@ def fetch_batter_statcast_season(year: str) -> dict:
     """
     Bulk-fetches Sweet Spot % and Hard Hit % for all batters from Baseball Savant leaderboard.
     One call for the whole season — use this to pre-filter before making per-batter calls.
+    Cached to disk daily so repeated --props runs don't re-download 575 rows.
     Returns dict keyed by player_id (str).
     """
+    date_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cache_path = f"data/stats/batter_season_{date_str}.json"
+
+    if os.path.exists(cache_path):
+        with open(cache_path) as f:
+            result = json.load(f)
+        print(f"[stats_fetcher] Season batter Statcast: {len(result)} batters loaded (cache)")
+        return result
+
     url = f"{SAVANT_BASE}/leaderboard/custom"
     params = {
         "year": year,
@@ -354,7 +371,7 @@ def fetch_batter_statcast_season(year: str) -> dict:
         "player_type": "batter",
         "csv": "true",
     }
-    resp = requests.get(url, params=params)
+    resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
     df = pd.read_csv(io.StringIO(resp.text))
 
@@ -368,6 +385,10 @@ def fetch_batter_statcast_season(year: str) -> dict:
             "xwoba": _safe_float(row.get("xwoba")),
             "barrel_batted_rate": _safe_float(row.get("barrel_batted_rate")),
         }
+
+    os.makedirs("data/stats", exist_ok=True)
+    with open(cache_path, "w") as f:
+        json.dump(result, f)
 
     print(f"[stats_fetcher] Season batter Statcast: {len(result)} batters loaded")
     return result
@@ -396,7 +417,7 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
         "min_results": "0",
         "min_pas": "0",
     }
-    resp = requests.get(url, params=params)
+    resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
 
     try:
@@ -418,7 +439,8 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
 
         return result
     except Exception as e:
-        print(f"[stats_fetcher] fetch_batter_recent_stats({batter_id}): {e}")
+        if not _is_savant_timeout(e):
+            print(f"[stats_fetcher] fetch_batter_recent_stats({batter_id}): {e}")
         return {}
 
 
@@ -445,10 +467,9 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
         "min_results": "0",
         "min_pas": "0",
     }
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-
     try:
+        resp = requests.get(url, params=params, timeout=20)
+        resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
         if df.empty or "zone" not in df.columns:
             return {}
@@ -464,7 +485,8 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
         valid["zone"] = valid["zone"].astype(int)
         return valid.groupby("zone")[col].mean().round(3).to_dict()
     except Exception as e:
-        print(f"[stats_fetcher] fetch_batter_zone_stats({batter_id}): {e}")
+        if not _is_savant_timeout(e):
+            print(f"[stats_fetcher] fetch_batter_zone_stats({batter_id}): {e}")
         return {}
 
 
@@ -488,10 +510,9 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
         "min_results": "0",
         "min_pas": "0",
     }
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-
     try:
+        resp = requests.get(url, params=params, timeout=20)
+        resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
         if df.empty or "zone" not in df.columns:
             return {}
@@ -505,7 +526,8 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
         total = counts.sum()
         return {int(z): round(count / total, 4) for z, count in counts.items()}
     except Exception as e:
-        print(f"[stats_fetcher] fetch_pitcher_zone_tendencies({pitcher_id}): {e}")
+        if not _is_savant_timeout(e):
+            print(f"[stats_fetcher] fetch_pitcher_zone_tendencies({pitcher_id}): {e}")
         return {}
 
 
@@ -601,7 +623,7 @@ def fetch_batter_venue_stats(batter_id: int, venue_id: int) -> dict:
         "venueId": venue_id,
     }
     try:
-        resp = requests.get(url, params=params)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         stat = resp.json()["stats"][0]["splits"][0]["stat"]
         return {
@@ -627,7 +649,7 @@ def fetch_pitcher_recent_form(pitcher_id: int, num_starts: int = 3) -> dict:
         "gameType": "R",
     }
     try:
-        resp = requests.get(url, params=params)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         splits = resp.json()["stats"][0]["splits"]
 
@@ -673,7 +695,7 @@ def fetch_team_recent_hitting(team_id: int, days: int = 14) -> dict:
         "gameType":  "R",
     }
     try:
-        resp = requests.get(url, params=params)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         stat = resp.json()["stats"][0]["splits"][0]["stat"]
         return {"avg": _safe_float(stat.get("avg"))}
@@ -694,7 +716,7 @@ def fetch_batter_vs_pitcher(batter_id: int, pitcher_id: int) -> dict:
         "gameType": "R",
     }
     try:
-        resp = requests.get(url, params=params)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         stat = resp.json()["stats"][0]["splits"][0]["stat"]
         return {
@@ -724,7 +746,7 @@ def fetch_batter_recent_ba(batter_id: int, days: int = 14) -> dict:
         "gameType": "R",
     }
     try:
-        resp = requests.get(url, params=params)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         stat = resp.json()["stats"][0]["splits"][0]["stat"]
         return {
@@ -747,7 +769,7 @@ def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
         "season": year,
         "gameType": "R",
     }
-    resp = requests.get(url, params=params)
+    resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
 

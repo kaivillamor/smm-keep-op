@@ -12,6 +12,7 @@ from model.factors.hit_model import (
     score_batter_hit_prob,
     HIT_PARLAY_LEGS,
     MAX_LINEUP_DEPTH,
+    MIN_HIT_PROB,
 )
 from model.factors.park_factors import get_park_factor
 from model.factors.owner_logic import apply_hit_owner_logic
@@ -154,16 +155,23 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
 
 
 def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
-    """Pick the top max_legs candidates with at most 1 leg per team."""
+    """Pick the top max_legs candidates ≥ MIN_HIT_PROB with at most 1 leg per team."""
     seen_teams: set[str] = set()
     legs = []
+    below_gate = 0
     for c in candidates:
+        if c["hit_probability"] < MIN_HIT_PROB:
+            below_gate += 1
+            continue
         if c["team"] in seen_teams:
             continue
         seen_teams.add(c["team"])
         legs.append(c)
         if len(legs) >= max_legs:
             break
+    if below_gate and len(legs) < max_legs:
+        print(f"[hit_pipeline] Thin slate: only {len(legs)} leg(s) clear the "
+              f"{MIN_HIT_PROB:.0%} probability gate — not padding with weaker legs.")
     return legs
 
 

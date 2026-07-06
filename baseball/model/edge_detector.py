@@ -13,7 +13,7 @@ def detect_edges(probabilities: list[dict]) -> list[dict]:
         ml_edge, ml_side, ml_bet = _moneyline_edge(game)
         total_edge, total_side, total_bet = _total_edge(game)
 
-        has_ml_edge    = abs(ml_edge)    >= MIN_WIN_PROB_EDGE
+        has_ml_edge    = ml_edge          >= MIN_WIN_PROB_EDGE
         has_total_edge = abs(total_edge) >= MIN_TOTAL_EDGE
 
         if not has_ml_edge and not has_total_edge:
@@ -74,7 +74,7 @@ def _moneyline_edge(game: dict) -> tuple[float, str, dict]:
     home_edge = our_home_win_pct - book_home_prob
     away_edge = (1 - our_home_win_pct) - book_away_prob
 
-    if abs(home_edge) >= abs(away_edge):
+    if home_edge >= away_edge:
         side = "home"
         edge = home_edge
         bet  = home_ml

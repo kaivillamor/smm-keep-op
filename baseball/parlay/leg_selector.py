@@ -21,7 +21,7 @@ def select_legs(edges: list[dict]) -> list[dict]:
             if leg and _passes_filters(leg):
                 legs.append(leg)
 
-    legs.sort(key=lambda x: abs(x["edge"]), reverse=True)
+    legs.sort(key=lambda x: x["edge"], reverse=True)
     legs = _remove_correlated(legs)
     legs = _remove_same_game_duplicates(legs)
 
@@ -80,7 +80,7 @@ def _build_total_leg(game: dict) -> dict | None:
 
 
 def _passes_filters(leg: dict) -> bool:
-    edge = abs(leg.get("edge", 0))
+    edge = leg.get("edge", 0)
     odds = leg.get("odds", 0)
     return edge >= MIN_EDGE and MIN_ODDS <= odds <= MAX_ODDS
 
