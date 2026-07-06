@@ -19,8 +19,10 @@ REST_ADJ_PER_DAY      = 0.01  # ±1% quality factor per day away from 4-day norm
 # Situational:
 DAY_GAME_BA_PENALTY = 0.010  # flat BA reduction — batters hit slightly worse in day games
 
-HIT_PARLAY_LEGS  = 8   # legs surfaced in the daily hit parlay
-MAX_LINEUP_DEPTH = 6   # only score batters in positions 1–6 (most plate appearances)
+HIT_PARLAY_LEGS   = 4     # legs surfaced in the daily hit parlay (2 pairs × 2 legs)
+HIT_PARLAY_STAKE  = 10.0  # $ per parlay — kept low until recorded odds confirm positive EV
+MIN_HIT_PROB      = 0.68  # legs below this P(1+ hit) can't cover typical parlay pricing
+MAX_LINEUP_DEPTH  = 6     # only score batters in positions 1–6 (most plate appearances)
 
 # Historical expected PAs per game by batting order position.
 _PA_BY_POS = {
