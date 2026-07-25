@@ -1,7 +1,7 @@
 from datetime import date
 
 
-def print_slip(parlay: dict) -> None:
+def print_slip(parlay: dict, num: int | None = None) -> None:
     if not parlay:
         print("\nNo value legs found today.")
         return
@@ -14,7 +14,8 @@ def print_slip(parlay: dict) -> None:
     combined_str = f"+{combined}" if combined > 0 else str(combined)
 
     print()
-    print("=== TODAY'S VALUE PARLAY ===")
+    header = f"=== TODAY'S VALUE PARLAY #{num} ===" if num else "=== TODAY'S VALUE PARLAY ==="
+    print(header)
     print(f"Date: {date.today()}")
     print()
 

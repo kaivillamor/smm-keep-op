@@ -2,6 +2,7 @@ import io
 import json
 import math
 import os
+import time
 import requests
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -11,10 +12,74 @@ SAVANT_BASE = "https://baseballsavant.mlb.com"
 
 _SAVANT_TIMEOUT_CODES = {"502", "503", "524"}
 
+# Savant's season-long CSV queries are slow enough to graze a fixed timeout.
+# Escalate the read timeout across attempts and back off between them so one
+# slow response doesn't drop a pitcher/batter's zone data for the whole run.
+_SAVANT_RETRY_TIMEOUTS = (25, 40)  # seconds, one per attempt
+_SAVANT_RETRY_BACKOFF  = 2.0       # seconds between attempts
+
 def _is_savant_timeout(e: Exception) -> bool:
     """True for transient Savant gateway errors (502/503/524) — not code bugs."""
     msg = str(e)
     return any(code in msg for code in _SAVANT_TIMEOUT_CODES)
+
+
+def _is_transient_savant_error(e: Exception) -> bool:
+    """True for anything worth retrying: read/connect timeouts, dropped
+    connections, or gateway 502/503/524 — as opposed to a real code bug."""
+    if isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    return _is_savant_timeout(e)
+
+
+def _day_cache_path(kind: str, player_id: int) -> str:
+    """Per-player, per-day cache path. Zone/recent inputs are stable within a day,
+    so this makes repeated --props runs on the same slate near-instant."""
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"data/stats/{kind}_{player_id}_{date_str}.json"
+
+
+def _read_day_cache(path: str, int_keys: bool = False) -> dict | None:
+    """Returns the cached dict, or None if absent/corrupt (→ caller re-fetches)."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+        return {int(k): v for k, v in raw.items()} if int_keys else raw
+    except Exception:
+        return None
+
+
+def _write_day_cache(path: str, data: dict) -> None:
+    """Atomic write so a concurrent reader never sees a half-written file.
+    Only call after a SUCCESSFUL fetch — never cache a transient failure."""
+    os.makedirs("data/stats", exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def _savant_csv_get(url: str, params: dict) -> str | None:
+    """
+    GET a Savant CSV with retries on transient errors (timeouts, gateway 5xx).
+    Returns the response text, or None if every attempt hit a transient failure.
+    Re-raises non-transient errors so the caller can log a genuine bug.
+    """
+    last_exc = None
+    for attempt, timeout in enumerate(_SAVANT_RETRY_TIMEOUTS):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            if not _is_transient_savant_error(e):
+                raise
+            last_exc = e
+            if attempt < len(_SAVANT_RETRY_TIMEOUTS) - 1:
+                time.sleep(_SAVANT_RETRY_BACKOFF)
+    return None  # exhausted retries on a transient error — caller returns empty
 
 
 def fetch_stats() -> dict:
@@ -401,6 +466,11 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
     to avoid column name uncertainty in Statcast's group_by aggregation.
     Returns empty dict if the batter had no batted balls in the window.
     """
+    cache_path = _day_cache_path(f"batter_recent{days}d", batter_id)
+    cached = _read_day_cache(cache_path)
+    if cached is not None:
+        return cached
+
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=days)
 
@@ -417,29 +487,28 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
         "min_results": "0",
         "min_pas": "0",
     }
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-
     try:
-        df = pd.read_csv(io.StringIO(resp.text))
-        if df.empty:
-            return {}
+        text = _savant_csv_get(url, params)
+        if text is None:
+            return {}  # transient failure — don't cache, retry next run
 
-        result: dict = {"batted_balls": len(df)}
+        df = pd.read_csv(io.StringIO(text))
+        result: dict = {}
+        if not df.empty:
+            result["batted_balls"] = len(df)
+            if "launch_speed" in df.columns:
+                ev = df["launch_speed"].dropna()
+                if len(ev) > 0:
+                    result["hard_hit_percent"] = float(round((ev >= 95).sum() / len(ev) * 100, 1))
+            if "launch_angle" in df.columns:
+                la = df["launch_angle"].dropna()
+                if len(la) > 0:
+                    result["sweet_spot_percent"] = float(round(((la >= 8) & (la <= 32)).sum() / len(la) * 100, 1))
 
-        if "launch_speed" in df.columns:
-            ev = df["launch_speed"].dropna()
-            if len(ev) > 0:
-                result["hard_hit_percent"] = round((ev >= 95).sum() / len(ev) * 100, 1)
-
-        if "launch_angle" in df.columns:
-            la = df["launch_angle"].dropna()
-            if len(la) > 0:
-                result["sweet_spot_percent"] = round(((la >= 8) & (la <= 32)).sum() / len(la) * 100, 1)
-
+        _write_day_cache(cache_path, result)
         return result
     except Exception as e:
-        if not _is_savant_timeout(e):
+        if not _is_transient_savant_error(e):
             print(f"[stats_fetcher] fetch_batter_recent_stats({batter_id}): {e}")
         return {}
 
@@ -452,6 +521,11 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
     Returns {zone_id (int): xwoba (float)} for zones 1-14.
     Uses start_dt/end_dt instead of hfSea — hfSea is unreliable in the statcast_search endpoint.
     """
+    cache_path = _day_cache_path("batter_zone", batter_id)
+    cached = _read_day_cache(cache_path, int_keys=True)
+    if cached is not None:
+        return cached
+
     today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
     params = {
@@ -468,24 +542,24 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
         "min_pas": "0",
     }
     try:
-        resp = requests.get(url, params=params, timeout=20)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
-        if df.empty or "zone" not in df.columns:
-            return {}
+        text = _savant_csv_get(url, params)
+        if text is None:
+            return {}  # transient failure — don't cache, retry next run
 
+        df = pd.read_csv(io.StringIO(text))
+        result: dict = {}
         col = "estimated_woba_using_speedangle"
-        if col not in df.columns:
-            return {}
+        if not df.empty and "zone" in df.columns and col in df.columns:
+            valid = df[df["zone"].notna() & df[col].notna()].copy()
+            if not valid.empty:
+                valid["zone"] = valid["zone"].astype(int)
+                means = valid.groupby("zone")[col].mean().round(3).to_dict()
+                result = {int(z): float(v) for z, v in means.items()}
 
-        valid = df[df["zone"].notna() & df[col].notna()].copy()
-        if valid.empty:
-            return {}
-
-        valid["zone"] = valid["zone"].astype(int)
-        return valid.groupby("zone")[col].mean().round(3).to_dict()
+        _write_day_cache(cache_path, result)
+        return result
     except Exception as e:
-        if not _is_savant_timeout(e):
+        if not _is_transient_savant_error(e):
             print(f"[stats_fetcher] fetch_batter_zone_stats({batter_id}): {e}")
         return {}
 
@@ -496,6 +570,11 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
     Returns {zone_id (int): fraction_of_total_pitches (float)}.
     Uses start_dt/end_dt instead of hfSea — hfSea is unreliable in the statcast_search endpoint.
     """
+    cache_path = _day_cache_path("pitcher_zone", pitcher_id)
+    cached = _read_day_cache(cache_path, int_keys=True)
+    if cached is not None:
+        return cached
+
     today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
     params = {
@@ -511,22 +590,24 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
         "min_pas": "0",
     }
     try:
-        resp = requests.get(url, params=params, timeout=20)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
-        if df.empty or "zone" not in df.columns:
-            return {}
+        text = _savant_csv_get(url, params)
+        if text is None:
+            return {}  # transient failure — don't cache, retry next run
 
-        df_zones = df[df["zone"].notna()].copy()
-        if df_zones.empty:
-            return {}
+        df = pd.read_csv(io.StringIO(text))
+        result: dict = {}
+        if not df.empty and "zone" in df.columns:
+            df_zones = df[df["zone"].notna()].copy()
+            if not df_zones.empty:
+                df_zones["zone"] = df_zones["zone"].astype(int)
+                counts = df_zones["zone"].value_counts()
+                total = counts.sum()
+                result = {int(z): float(round(count / total, 4)) for z, count in counts.items()}
 
-        df_zones["zone"] = df_zones["zone"].astype(int)
-        counts = df_zones["zone"].value_counts()
-        total = counts.sum()
-        return {int(z): round(count / total, 4) for z, count in counts.items()}
+        _write_day_cache(cache_path, result)
+        return result
     except Exception as e:
-        if not _is_savant_timeout(e):
+        if not _is_transient_savant_error(e):
             print(f"[stats_fetcher] fetch_pitcher_zone_tendencies({pitcher_id}): {e}")
         return {}
 

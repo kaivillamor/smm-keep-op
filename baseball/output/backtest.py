@@ -109,6 +109,31 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 # Logging
 # ---------------------------------------------------------------------------
 
+def log_parlays(parlays: list[dict], db_path: str = DB_PATH) -> list[int]:
+    """
+    Saves the day's generated parlays (2-leg pairs) and their legs to the database.
+    Returns the parlay IDs. Skips if any parlay was already saved today.
+    """
+    if not parlays:
+        return []
+    conn  = _connect(db_path)
+    today = str(date.today())
+
+    existing = conn.execute(
+        "SELECT id FROM parlays WHERE date=? LIMIT 1", (today,)
+    ).fetchone()
+    if existing:
+        print(f"[backtest] Parlay(s) already logged for {today} — skipping.")
+        conn.close()
+        return []
+
+    now = datetime.now(timezone.utc).isoformat()
+    ids = [_insert_parlay(conn, p, now) for p in parlays]
+    conn.commit()
+    conn.close()
+    return ids
+
+
 def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
     """
     Saves a generated parlay and its legs to the database.
@@ -127,7 +152,14 @@ def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
         return existing["id"]
 
     now = datetime.now(timezone.utc).isoformat()
+    parlay_id = _insert_parlay(conn, parlay, now)
+    conn.commit()
+    conn.close()
+    return parlay_id
 
+
+def _insert_parlay(conn: sqlite3.Connection, parlay: dict, now: str) -> int:
+    today = str(date.today())
     cur = conn.execute(
         """INSERT INTO parlays (date, num_legs, combined_odds, total_edge, created_at)
            VALUES (?, ?, ?, ?, ?)""",
@@ -160,8 +192,6 @@ def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
             ),
         )
 
-    conn.commit()
-    conn.close()
     print(f"[backtest] Logged parlay #{parlay_id} ({parlay['num_legs']} legs, {_fmt_odds(parlay['combined_odds'])})")
     return parlay_id
 
