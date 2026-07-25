@@ -1,5 +1,8 @@
 MIN_WIN_PROB_EDGE = 0.03   # 3% edge on moneyline
-MIN_TOTAL_EDGE   = 0.5    # 0.5 runs on totals
+MIN_TOTAL_EDGE   = 0.5    # 0.5 runs on totals (after shrinkage — see TOTAL_SHRINK)
+TOTAL_SHRINK     = 0.5    # our_implied_total runs hot vs book lines (16 of 19 legs were
+                          # OVER through 2026-07-06, hitting 45%) — trust the book's line
+                          # halfway until the run model is recalibrated
 
 
 def detect_edges(probabilities: list[dict]) -> list[dict]:
@@ -105,7 +108,7 @@ def _total_edge(game: dict) -> tuple[float, str, dict]:
     if book_total is None:
         return 0.0, "", {}
 
-    run_edge = our_total - book_total   # positive = we think OVER
+    run_edge = (our_total - book_total) * TOTAL_SHRINK   # positive = we think OVER
 
     if run_edge >= 0:
         return run_edge, "over", over_bet

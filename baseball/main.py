@@ -15,7 +15,7 @@ from parlay.leg_selector import select_legs
 from parlay.parlay_builder import build_parlay
 from llm.context_analyzer import analyze_context
 from output.daily_slip import print_slip
-from output.backtest import log_parlay, log_hit_parlay, log_hit_parlays, log_hr_candidates, record_hit_payout, record_hit_odds
+from output.backtest import log_parlays, log_hit_parlay, log_hit_parlays, log_hr_candidates, record_hit_payout, record_hit_odds
 from output.result_tracker import resolve_pending
 
 
@@ -56,9 +56,11 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
             else:
                 print("[main] Skipping LLM layer.")
 
-            parlay = build_parlay(legs)
-            print_slip(parlay)
-            log_parlay(parlay)
+            game_pairs = _pair_game_legs(legs)
+            parlays = [build_parlay(pair) for pair in game_pairs]
+            for i, parlay in enumerate(parlays, 1):
+                print_slip(parlay, num=i if len(parlays) > 1 else None)
+            log_parlays(parlays)
 
     # ── HR props (65/65/65 gate) ──────────────────────────────────────────────
     if run_props:
@@ -175,6 +177,21 @@ def _print_hit_parlay(legs: list[dict]) -> None:
     print(f"  Note: Book odds not shown — requires player props API tier.")
     print(f"        Cross-check lines at DraftKings / FanDuel before placing.")
     print(f"{'=' * width}")
+
+
+def _pair_game_legs(legs: list[dict]) -> list[list[dict]]:
+    """
+    Splits game legs (sorted by edge desc) into 2-leg parlays instead of one
+    4-leg parlay — legs at ~55% only win a 4-leg ~9% of the time, which buries
+    the edge under variance. Interleaved (1&3, 2&4) so pairs are balanced.
+    A lone qualifying leg is bet straight; an odd lowest-edge leg is dropped.
+    """
+    if len(legs) == 1:
+        return [legs]
+    if len(legs) % 2:
+        legs = legs[:-1]
+    half = len(legs) // 2
+    return [[legs[i], legs[i + half]] for i in range(half)]
 
 
 def _pair_hit_legs(legs: list[dict]) -> list[list[dict]]:

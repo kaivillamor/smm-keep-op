@@ -11,7 +11,7 @@ from model.factors.hr_prop_model import score_batter_hr_props, rank_score, RECEN
 # Slightly under the final gate thresholds
 _SEASON_PREFILTER        = 55.0
 _BARREL_PREFILTER        = BARREL_THRESHOLD - 3.0  # catches borderline barrel + pitcher_hrfb gate guys
-_TOP_N                   = 8    # max candidates to surface after gate + ranking
+_TOP_N                   = 5    # max candidates to surface after gate + ranking (2/18 hit at top-8 vs ~20% break-even)
 
 # Savant's p_home_run_pct leaderboard returns all NaN in 2026. Proxy HR/FB from
 # FIP-xFIP gap instead: a pitcher allowing more HRs than expected has FIP > xFIP.
@@ -54,8 +54,34 @@ def analyze_hr_props(
     prefilter_passed = 0
     print(f"[prop_pipeline] {confirmed_games}/{len(lineups)} games have confirmed lineups")
 
+    # Collect the unique probable-pitcher IDs across confirmed games (no network).
+    pitcher_ids: set[int] = set()
+    for game_pk, lineup_entry in lineups.items():
+        if not lineup_entry.get("confirmed"):
+            continue
+        probable = _match_probable(game_pk, probable_pitchers)
+        for pid, batters in (
+            (probable.get("away_pitcher_id"), lineup_entry.get("home_lineup", [])),
+            (probable.get("home_pitcher_id"), lineup_entry.get("away_lineup", [])),
+        ):
+            if pid and batters:
+                pitcher_ids.add(pid)
+
+    # Fetch pitcher zone tendencies in parallel — sequentially these can stall the
+    # whole run when Savant is slow (each retry is up to ~65s). Cached by pitcher_id.
+    print(f"[prop_pipeline] Fetching zone tendencies for {len(pitcher_ids)} pitcher(s)...")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(fetch_pitcher_zone_tendencies, pid, year): pid
+                   for pid in pitcher_ids}
+        for future in as_completed(futures):
+            pid = futures[future]
+            try:
+                pitcher_zone_cache[pid] = future.result()
+            except Exception as e:
+                print(f"[prop_pipeline] pitcher zone fetch error ({pid}): {e}")
+                pitcher_zone_cache[pid] = {}
+
     # Build the work queue: one entry per (batter, pitcher, side, game) that passes pre-filter.
-    # Pitcher zone data is fetched sequentially first (small N, cached by pitcher_id).
     work_items = []
     for game_pk, lineup_entry in lineups.items():
         if not lineup_entry.get("confirmed"):
@@ -71,9 +97,7 @@ def analyze_hr_props(
             if not pitcher_id or not batters:
                 continue
 
-            if pitcher_id not in pitcher_zone_cache:
-                pitcher_zone_cache[pitcher_id] = fetch_pitcher_zone_tendencies(pitcher_id, year)
-            pitcher_zones = pitcher_zone_cache[pitcher_id]
+            pitcher_zones = pitcher_zone_cache.get(pitcher_id, {})
             p_stats       = (pitcher_stats or {}).get(str(pitcher_id), {})
             hr_fb_rate    = _pitcher_hrfb_proxy(p_stats)
 
@@ -105,14 +129,19 @@ def analyze_hr_props(
         batter_zones = fetch_batter_zone_stats(bid, year)
         return {**item, "recent_stats": recent_stats, "batter_zones": batter_zones}
 
+    print(f"[prop_pipeline] Fetching recent/zone data for {len(work_items)} batter(s)...")
     fetched = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    done = 0
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_fetch_batter_data, w): w for w in work_items}
         for future in as_completed(futures):
+            done += 1
             try:
                 fetched.append(future.result())
             except Exception as e:
                 print(f"[prop_pipeline] batter fetch error: {e}")
+            if done % 10 == 0 or done == len(work_items):
+                print(f"[prop_pipeline]   ...{done}/{len(work_items)} batters fetched")
 
     for item in fetched:
         scores = score_batter_hr_props(
