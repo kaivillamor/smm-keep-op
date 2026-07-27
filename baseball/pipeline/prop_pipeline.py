@@ -7,7 +7,7 @@ from pipeline.stats_fetcher import (
     fetch_pitcher_zone_tendencies,
 )
 from model.factors.hr_prop_model import score_batter_hr_props, rank_score, RECENT_DAYS, BARREL_THRESHOLD
-from pipeline.sharp_odds import fetch_hr_prop_odds, normalize_name
+from pipeline.prop_odds import fetch_hr_prop_odds, normalize_name
 
 # Slightly under the final gate thresholds
 _SEASON_PREFILTER        = 55.0
@@ -175,7 +175,7 @@ def analyze_hr_props(
 
 
 def _attach_hr_odds(cands: list[dict]) -> None:
-    """Attach each candidate's 1+ HR odds (SharpAPI player_home_runs) by name,
+    """Attach each candidate's 1+ HR odds (player_home_runs market) by name,
     setting book_odds / book_implied / book in place. Unmatched → None."""
     if not cands:
         return

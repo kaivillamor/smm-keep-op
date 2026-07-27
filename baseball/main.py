@@ -188,7 +188,7 @@ def _print_hit_parlay(legs: list[dict]) -> None:
     book_combined = combine_odds([leg.get("book_odds") for leg in legs])
     if book_combined is not None:
         odds_str = f"+{book_combined}" if book_combined > 0 else str(book_combined)
-        print(f"  Book parlay odds:     {odds_str}  (SharpAPI, FanDuel)")
+        print(f"  Book parlay odds:     {odds_str}  (FanDuel)")
     else:
         print(f"  Book parlay odds:     — (one or more legs had no posted line)")
     print(f"{'=' * width}")
@@ -274,7 +274,7 @@ def _print_hit_parlay_split(pairs: list[list[dict]]) -> None:
                 f"{leg['hit_probability'] * 100:.1f}%   {_fmt_leg_odds(leg)}"
             )
 
-    print(f"\n  Odds auto-recorded from SharpAPI (FanDuel, 60s delayed).")
+    print(f"\n  Odds auto-recorded from the prop-odds API (FanDuel, 60s delayed).")
     print(f"  If your slip differs, override: python main.py --record-hit-placed <date> <#> <odds>")
     print(f"{'=' * width}")
 
@@ -305,7 +305,7 @@ def _print_hr_parlays(pairs: list[list[dict]]) -> None:
             leg_str = (f"{'+' if o > 0 else ''}{o}") if o is not None else "no line posted"
             print(f"  {c['batter_name']} ({c['team']}) 1+ HR   {leg_str}")
 
-    print(f"\n  Odds auto-recorded from SharpAPI (FanDuel, 60s delayed).")
+    print(f"\n  Odds auto-recorded from the prop-odds API (FanDuel, 60s delayed).")
     print(f"{'=' * width}")
 
 
