@@ -16,6 +16,7 @@ from model.factors.hit_model import (
 )
 from model.factors.park_factors import get_park_factor
 from model.factors.owner_logic import apply_hit_owner_logic
+from pipeline.sharp_odds import fetch_hit_prop_odds, normalize_name
 
 
 def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
@@ -147,11 +148,42 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
     candidates.sort(key=lambda c: c["hit_probability"], reverse=True)
     top = _select_legs(candidates, HIT_PARLAY_LEGS)
 
+    # Attach real book odds (SharpAPI) and compute EV = our prob − book implied.
+    # No legs are dropped for negative EV — we surface the same picks, ranked by edge.
+    _attach_hit_odds(top)
+    # Rank by EV descending; legs with no posted line (ev=None) sort to the bottom.
+    # Use -inf rather than `or -1` so an EV of exactly 0.0 isn't mis-sorted as negative.
+    top.sort(key=lambda c: c["ev"] if c.get("ev") is not None else float("-inf"),
+             reverse=True)
+
     print(
         f"[hit_pipeline] {len(candidates)} batters scored | "
         f"{len(top)} surfaced as hit parlay legs"
     )
     return top
+
+
+def _attach_hit_odds(legs: list[dict]) -> None:
+    """Look up each leg's 1+ hit odds from SharpAPI by player name and attach
+    book_odds / book_implied / book / ev in place. Legs with no posted line keep
+    ev=None and sort to the bottom."""
+    if not legs:
+        return
+    board = fetch_hit_prop_odds()
+    matched = 0
+    for leg in legs:
+        entry = board.get(normalize_name(leg.get("batter_name", "")))
+        if not entry:
+            leg["book_odds"] = leg["book_implied"] = leg["book"] = leg["ev"] = None
+            continue
+        matched += 1
+        leg["book_odds"]    = entry["odds"]
+        leg["book_implied"] = entry["implied"]
+        leg["book"]         = entry["book"]
+        # EV as a probability edge: how much higher our estimate is than the book's
+        leg["ev"] = (round(leg["hit_probability"] - entry["implied"], 4)
+                     if entry["implied"] is not None else None)
+    print(f"[hit_pipeline] matched book odds for {matched}/{len(legs)} legs")
 
 
 def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:

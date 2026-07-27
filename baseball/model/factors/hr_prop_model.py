@@ -3,6 +3,7 @@ BARREL_THRESHOLD     = 11.0   # barrel rate % that qualifies alone (top ~20% of 
 BARREL_SOFT          = 8.0    # lower barrel threshold when facing a homer-prone pitcher
 HR_FB_THRESHOLD      = 15.0   # pitcher HR/FB rate % — above this is homer-prone (league avg ~11%)
 RECENT_DAYS          = 14
+HR_PARLAY_STAKE      = 10.0   # flat $ per 2-leg HR parlay (both batters to hit 1+ HR)
 
 # xwOBA normalization bounds: floor → 0 pts, ceiling → 100 pts
 _XWOBA_FLOOR = 0.150

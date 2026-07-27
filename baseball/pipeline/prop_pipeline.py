@@ -7,6 +7,7 @@ from pipeline.stats_fetcher import (
     fetch_pitcher_zone_tendencies,
 )
 from model.factors.hr_prop_model import score_batter_hr_props, rank_score, RECENT_DAYS, BARREL_THRESHOLD
+from pipeline.sharp_odds import fetch_hr_prop_odds, normalize_name
 
 # Slightly under the final gate thresholds
 _SEASON_PREFILTER        = 55.0
@@ -165,10 +166,31 @@ def analyze_hr_props(
     candidates.sort(key=lambda c: c["rank_score"], reverse=True)
     top = candidates[:_TOP_N]
 
+    _attach_hr_odds(top)
+
     print(f"[prop_pipeline] Batters checked: {total_batters_checked} | "
           f"Passed pre-filter: {prefilter_passed} | "
           f"Passed gate: {len(candidates)} | Surfaced: {len(top)}")
     return top
+
+
+def _attach_hr_odds(cands: list[dict]) -> None:
+    """Attach each candidate's 1+ HR odds (SharpAPI player_home_runs) by name,
+    setting book_odds / book_implied / book in place. Unmatched → None."""
+    if not cands:
+        return
+    board = fetch_hr_prop_odds()
+    matched = 0
+    for c in cands:
+        entry = board.get(normalize_name(c.get("batter_name", "")))
+        if entry:
+            matched += 1
+            c["book_odds"]    = entry["odds"]
+            c["book_implied"] = entry["implied"]
+            c["book"]         = entry["book"]
+        else:
+            c["book_odds"] = c["book_implied"] = c["book"] = None
+    print(f"[prop_pipeline] matched HR odds for {matched}/{len(cands)} candidates")
 
 
 def _match_probable(game_pk, probable_pitchers: dict) -> dict:

@@ -1,5 +1,11 @@
 from datetime import date
 
+from parlay.parlay_builder import recommended_stake, profit_for_stake
+
+# "Double-up, else $25 floor" staking (see parlay_builder.recommended_stake).
+BASE_STAKE   = 25.0
+PROFIT_FLOOR = 25.0
+
 
 def print_slip(parlay: dict, num: int | None = None) -> None:
     if not parlay:
@@ -12,6 +18,8 @@ def print_slip(parlay: dict, num: int | None = None) -> None:
     num_legs     = parlay.get("num_legs", 0)
 
     combined_str = f"+{combined}" if combined > 0 else str(combined)
+    stake        = recommended_stake(combined, BASE_STAKE, PROFIT_FLOOR)
+    to_win       = profit_for_stake(combined, stake)
 
     print()
     header = f"=== TODAY'S VALUE PARLAY #{num} ===" if num else "=== TODAY'S VALUE PARLAY ==="
@@ -25,6 +33,7 @@ def print_slip(parlay: dict, num: int | None = None) -> None:
     print(f"Combined Odds:    {combined_str}")
     print(f"Legs:             {num_legs}")
     print(f"Total Edge Score: {total_edge * 100:.1f}%")  # sum of normalized edges per leg
+    print(f"Recommended stake: ${stake:.2f} → win ${to_win:.2f}  (double-up / ${PROFIT_FLOOR:.0f} floor)")
     print("=" * 28)
     print()
 

@@ -9,13 +9,13 @@ from pipeline.prop_pipeline import analyze_hr_props
 from pipeline.hit_pipeline import analyze_hit_props
 from model.probability_model import build_probabilities
 from model.edge_detector import detect_edges
-from model.factors.hr_prop_model import RECENT_DAYS
-from model.factors.hit_model import HIT_PARLAY_STAKE
+from model.factors.hr_prop_model import RECENT_DAYS, HR_PARLAY_STAKE
+from model.factors.hit_model import HIT_BASE_STAKE, HIT_PROFIT_FLOOR, HIT_MAX_STAKE
 from parlay.leg_selector import select_legs
-from parlay.parlay_builder import build_parlay
+from parlay.parlay_builder import build_parlay, stake_to_win, profit_for_stake, combine_odds, recommended_stake
 from llm.context_analyzer import analyze_context
 from output.daily_slip import print_slip
-from output.backtest import log_parlays, log_hit_parlay, log_hit_parlays, log_hr_candidates, record_hit_payout, record_hit_odds
+from output.backtest import log_parlays, log_hit_parlay, log_hit_parlays, log_hr_candidates, log_hr_parlays, record_hit_payout, record_hit_odds
 from output.result_tracker import resolve_pending
 
 
@@ -70,7 +70,10 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
         season_batter_stats = fetch_batter_statcast_season(year)
         candidates = analyze_hr_props(lineups, season_batter_stats, stats["probable_pitchers"], stats["pitcher_stats"])
         _print_hr_candidates(candidates)
-        log_hr_candidates(candidates)
+        cand_ids = log_hr_candidates(candidates)
+        hr_pairs = _pair_hit_legs(candidates)   # same interleaved pairing as hit parlays
+        _print_hr_parlays(hr_pairs)
+        log_hr_parlays(cand_ids, stake=HR_PARLAY_STAKE)
 
     # ── Hit parlay (1+ hit, top-6 lineup spots) ───────────────────────────────
     if run_hits:
@@ -85,12 +88,8 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
         pairs = _pair_hit_legs(hit_legs)
         _print_hit_parlay_split(pairs)
         leg_ids = log_hit_parlay(hit_legs)
-        log_hit_parlays(leg_ids, stake=HIT_PARLAY_STAKE)
-        if leg_ids:
-            today = str(date.today())
-            print("\n  When you place these, record the bet-slip odds so payouts auto-compute:")
-            for n in range(1, len(leg_ids) // 2 + 1):
-                print(f"    python main.py --record-hit-placed {today} {n} <ODDS e.g. +130>")
+        log_hit_parlays(leg_ids, base_stake=HIT_BASE_STAKE,
+                        profit_floor=HIT_PROFIT_FLOOR, max_stake=HIT_MAX_STAKE)
 
 
 def _print_usage() -> None:
@@ -112,6 +111,18 @@ def _print_usage() -> None:
     print(f"  Remaining: {remaining:>5} / {total}")
     print(f"  Reset:     {usage['reset_date']}  ({usage['days_until_reset']} days)")
     print(f"{'=' * 40}\n")
+
+
+def _fmt_leg_odds(leg: dict) -> str:
+    """Formats a leg's book odds + EV edge for display, or a fallback if unposted."""
+    odds = leg.get("book_odds")
+    if odds is None:
+        return "book: no line posted"
+    odds_str = f"+{odds}" if odds > 0 else str(odds)
+    book     = (leg.get("book") or "").title()
+    ev       = leg.get("ev")
+    ev_str   = f"  EV {ev * 100:+.1f}%" if ev is not None else ""
+    return f"{odds_str} @ {book}{ev_str}"
 
 
 def _print_hit_parlay(legs: list[dict]) -> None:
@@ -167,16 +178,35 @@ def _print_hit_parlay(legs: list[dict]) -> None:
         print(
             f"  LEG {i}: {leg['batter_name']} ({leg['team']})\n"
             f"          1+ Hit vs {leg['pitcher_name']} ({hand_label})\n"
-            f"          Model Prob: {leg['hit_probability'] * 100:.1f}%{note_str}"
+            f"          Model Prob: {leg['hit_probability'] * 100:.1f}%   {_fmt_leg_odds(leg)}{note_str}"
         )
 
     combined = 1.0
     for leg in legs:
         combined *= leg["hit_probability"]
     print(f"\n  Combined (if indep.): {combined * 100:.1f}%")
-    print(f"  Note: Book odds not shown — requires player props API tier.")
-    print(f"        Cross-check lines at DraftKings / FanDuel before placing.")
+    book_combined = combine_odds([leg.get("book_odds") for leg in legs])
+    if book_combined is not None:
+        odds_str = f"+{book_combined}" if book_combined > 0 else str(book_combined)
+        print(f"  Book parlay odds:     {odds_str}  (SharpAPI, FanDuel)")
+    else:
+        print(f"  Book parlay odds:     — (one or more legs had no posted line)")
     print(f"{'=' * width}")
+
+
+def _print_stake_calc(combined_odds: int, target_win: float) -> None:
+    odds_str = f"+{combined_odds}" if combined_odds > 0 else str(combined_odds)
+    stake    = stake_to_win(combined_odds, target_win)
+    total    = round(stake + target_win, 2)
+    print(f"\n{'=' * 40}")
+    print(f"  STAKE-TO-WIN CALCULATOR")
+    print(f"{'=' * 40}")
+    print(f"  Combined odds:   {odds_str}")
+    print(f"  Target winnings: ${target_win:.2f}")
+    print(f"{'─' * 40}")
+    print(f"  → Stake:         ${stake:.2f}")
+    print(f"  → Total payout:  ${total:.2f}  (stake + winnings)")
+    print(f"{'=' * 40}\n")
 
 
 def _pair_game_legs(legs: list[dict]) -> list[list[dict]]:
@@ -211,9 +241,8 @@ def _pair_hit_legs(legs: list[dict]) -> list[list[dict]]:
 
 def _print_hit_parlay_split(pairs: list[list[dict]]) -> None:
     width = 54
-    stake = 50
     print(f"\n{'=' * width}")
-    print(f"  HIT PARLAY SPLIT — {len(pairs)} × 2-leg  |  ${stake} each  |  ${stake * len(pairs)} total")
+    print(f"  HIT PARLAY SPLIT — {len(pairs)} × 2-leg  |  double-up / ${HIT_PROFIT_FLOOR:.0f} floor")
     print(f"{'=' * width}")
 
     if not pairs:
@@ -225,17 +254,58 @@ def _print_hit_parlay_split(pairs: list[list[dict]]) -> None:
         combined = 1.0
         for leg in pair:
             combined *= leg["hit_probability"]
-        print(f"\n  PARLAY {p_idx}  —  combined: {combined * 100:.1f}%  |  stake: ${stake}")
+        book_combined = combine_odds([leg.get("book_odds") for leg in pair])
+        if book_combined is not None:
+            odds_str  = f"+{book_combined}" if book_combined > 0 else str(book_combined)
+            stake     = recommended_stake(book_combined, HIT_BASE_STAKE,
+                                          HIT_PROFIT_FLOOR, HIT_MAX_STAKE)
+            to_win    = round(profit_for_stake(book_combined, stake), 2)
+            capped    = "  [capped @ $%.0f]" % HIT_MAX_STAKE if stake >= HIT_MAX_STAKE else ""
+            price_str = f"book {odds_str} → stake ${stake:.2f} to win ${to_win:.2f}{capped}"
+        else:
+            price_str = "book: incomplete lines (stake base once priced)"
+        print(f"\n  PARLAY {p_idx}  —  model: {combined * 100:.1f}%  |  {price_str}")
         print(f"  {'─' * (width - 2)}")
         for leg in pair:
             hand_label = "RHP" if leg["pitcher_hand"] == "R" else "LHP"
             print(
                 f"  {leg['batter_name']} ({leg['team']}) 1+ Hit "
                 f"vs {leg['pitcher_name']} ({hand_label})  "
-                f"{leg['hit_probability'] * 100:.1f}%"
+                f"{leg['hit_probability'] * 100:.1f}%   {_fmt_leg_odds(leg)}"
             )
 
-    print(f"\n  Note: Book odds required to place — check FanDuel/DK for 1+ hit lines.")
+    print(f"\n  Odds auto-recorded from SharpAPI (FanDuel, 60s delayed).")
+    print(f"  If your slip differs, override: python main.py --record-hit-placed <date> <#> <odds>")
+    print(f"{'=' * width}")
+
+
+def _print_hr_parlays(pairs: list[list[dict]]) -> None:
+    width = 54
+    print(f"\n{'=' * width}")
+    print(f"  HR PARLAY — {len(pairs)} × 2-leg  |  ${HR_PARLAY_STAKE:.0f} each  |  both to hit 1+ HR")
+    print(f"{'=' * width}")
+
+    if not pairs:
+        print("  No HR pairs generated (need 2+ candidates).")
+        print(f"{'=' * width}")
+        return
+
+    for p_idx, pair in enumerate(pairs, 1):
+        combined = combine_odds([c.get("book_odds") for c in pair])
+        if combined is not None:
+            odds_str  = f"+{combined}" if combined > 0 else str(combined)
+            to_win    = round(profit_for_stake(combined, HR_PARLAY_STAKE), 2)
+            price_str = f"book {odds_str} → win ${to_win:.2f} on ${HR_PARLAY_STAKE:.0f}"
+        else:
+            price_str = "book: no HR line for one+ leg"
+        print(f"\n  PARLAY {p_idx}  —  {price_str}")
+        print(f"  {'─' * (width - 2)}")
+        for c in pair:
+            o = c.get("book_odds")
+            leg_str = (f"{'+' if o > 0 else ''}{o}") if o is not None else "no line posted"
+            print(f"  {c['batter_name']} ({c['team']}) 1+ HR   {leg_str}")
+
+    print(f"\n  Odds auto-recorded from SharpAPI (FanDuel, 60s delayed).")
     print(f"{'=' * width}")
 
 
@@ -316,6 +386,13 @@ if __name__ == "__main__":
         help="Record combined odds from the bet slip when placing a hit parlay, "
              "e.g. --record-hit-placed 2026-07-06 1 +120 — payout then auto-computes on a win",
     )
+    parser.add_argument(
+        "--stake-calc",
+        nargs="+",
+        metavar="ODDS [TARGET_WIN]",
+        help="Given combined American odds, show the stake needed to win a target "
+             "profit (default $50). E.g. --stake-calc +198  or  --stake-calc -120 30",
+    )
     args = parser.parse_args()
 
     if args.usage:
@@ -328,6 +405,10 @@ if __name__ == "__main__":
     elif args.record_hit_placed:
         date_str, parlay_num, odds = args.record_hit_placed
         record_hit_odds(date_str, int(parlay_num), int(odds))
+    elif args.stake_calc:
+        odds       = int(args.stake_calc[0].lstrip("+"))
+        target_win = float(args.stake_calc[1]) if len(args.stake_calc) > 1 else 50.0
+        _print_stake_calc(odds, target_win)
     else:
         run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits,
             run_hits_2=args.hits_2, run_all=args.all)
