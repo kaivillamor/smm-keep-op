@@ -14,6 +14,7 @@ def resolve_pending(db_path: str = DB_PATH) -> None:
     _resolve_hr_prop_legs(db_path)
     _roll_up_parlays(db_path)
     _roll_up_hit_parlays(db_path)
+    _roll_up_hr_parlays(db_path)
 
 
 # ── Moneyline / total legs ────────────────────────────────────────────────────
@@ -213,15 +214,16 @@ def _roll_up_hit_parlays(db_path: str) -> None:
         if o1 is None or o2 is None:
             continue  # leg(s) not graded yet
 
+        # payout column = PROFIT (winnings), not total return: void refunds → 0 profit,
+        # loss → 0, win → stake × (decimal_odds − 1) when bet-slip odds were recorded.
         if o1 == "void" and o2 == "void":
-            result, payout = "void", row["stake"]
+            result, payout = "void", 0.0
         elif "loss" in (o1, o2):
             result, payout = "loss", 0.0
         elif o1 == "win" and o2 == "win":
             result = "win"
-            # Auto-compute payout when bet-slip odds were recorded at placement
             odds   = row["odds"] if "odds" in row.keys() else None
-            payout = round(row["stake"] * _american_to_decimal(odds), 2) if odds else None
+            payout = round(row["stake"] * (_american_to_decimal(odds) - 1.0), 2) if odds else None
         else:
             # one void + one win — collapses to single-leg, combined odds no longer apply
             result, payout = "win", None
@@ -239,6 +241,50 @@ def _roll_up_hit_parlays(db_path: str) -> None:
 
     if resolved:
         print(f"[result_tracker] {resolved} hit parlay(s) graded.")
+
+
+def _roll_up_hr_parlays(db_path: str) -> None:
+    """Grades 2-leg HR parlays once both legs are graded: win only if BOTH batters
+    homered. Payout is profit from the stored combined odds (profit convention)."""
+    conn    = _connect(db_path)
+    pending = conn.execute("SELECT * FROM hr_parlays WHERE outcome IS NULL").fetchall()
+    conn.close()
+
+    if not pending:
+        return
+
+    resolved = 0
+    for row in pending:
+        conn = _connect(db_path)
+        l1 = conn.execute("SELECT outcome FROM hr_prop_candidates WHERE id=?", (row["leg1_id"],)).fetchone()
+        l2 = conn.execute("SELECT outcome FROM hr_prop_candidates WHERE id=?", (row["leg2_id"],)).fetchone()
+        conn.close()
+
+        o1 = l1["outcome"] if l1 else None
+        o2 = l2["outcome"] if l2 else None
+        if o1 is None or o2 is None:
+            continue  # leg(s) not graded yet
+
+        if o1 == "hr" and o2 == "hr":
+            result = "win"
+            odds   = row["odds"] if "odds" in row.keys() else None
+            payout = round(row["stake"] * (_american_to_decimal(odds) - 1.0), 2) if odds else None
+        else:
+            result, payout = "loss", 0.0
+
+        conn = _connect(db_path)
+        conn.execute("UPDATE hr_parlays SET outcome=?, payout=? WHERE id=?",
+                     (result, payout, row["id"]))
+        conn.commit()
+        conn.close()
+
+        payout_str = f"${payout:.2f}" if payout is not None else "unknown (no stored odds)"
+        print(f"[result_tracker] HR parlay #{row['parlay_num']} ({row['date']}) "
+              f"→ {result}  (payout: {payout_str})")
+        resolved += 1
+
+    if resolved:
+        print(f"[result_tracker] {resolved} HR parlay(s) graded.")
 
 
 # ── MLB Stats API helpers ─────────────────────────────────────────────────────

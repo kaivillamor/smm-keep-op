@@ -20,9 +20,15 @@ REST_ADJ_PER_DAY      = 0.01  # ±1% quality factor per day away from 4-day norm
 DAY_GAME_BA_PENALTY = 0.010  # flat BA reduction — batters hit slightly worse in day games
 
 HIT_PARLAY_LEGS   = 4     # legs surfaced in the daily hit parlay (2 pairs × 2 legs)
-HIT_PARLAY_STAKE  = 10.0  # $ per parlay — kept low until recorded odds confirm positive EV
 MIN_HIT_PROB      = 0.68  # legs below this P(1+ hit) can't cover typical parlay pricing
 MAX_LINEUP_DEPTH  = 6     # only score batters in positions 1–6 (most plate appearances)
+
+# "Double-up, else $25 floor" staking (see parlay_builder.recommended_stake):
+#   plus-money parlay → stake the base unit (win 2x+);
+#   minus-money "safe" parlay → stake enough to clear the profit floor.
+HIT_BASE_STAKE    = 25.0  # base unit staked on a plus-money (double-up) parlay
+HIT_PROFIT_FLOOR  = 25.0  # minimum profit to guarantee on a minus-money parlay
+HIT_MAX_STAKE     = 50.0  # never stake more than this, even to hit the floor
 
 # Historical expected PAs per game by batting order position.
 _PA_BY_POS = {
