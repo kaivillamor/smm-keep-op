@@ -16,7 +16,7 @@ from model.factors.hit_model import (
 )
 from model.factors.park_factors import get_park_factor
 from model.factors.owner_logic import apply_hit_owner_logic
-from pipeline.sharp_odds import fetch_hit_prop_odds, normalize_name
+from pipeline.prop_odds import fetch_hit_prop_odds, normalize_name
 
 
 def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
@@ -148,7 +148,7 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
     candidates.sort(key=lambda c: c["hit_probability"], reverse=True)
     top = _select_legs(candidates, HIT_PARLAY_LEGS)
 
-    # Attach real book odds (SharpAPI) and compute EV = our prob − book implied.
+    # Attach real book odds (prop-odds API) and compute EV = our prob − book implied.
     # No legs are dropped for negative EV — we surface the same picks, ranked by edge.
     _attach_hit_odds(top)
     # Rank by EV descending; legs with no posted line (ev=None) sort to the bottom.
@@ -164,7 +164,7 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
 
 
 def _attach_hit_odds(legs: list[dict]) -> None:
-    """Look up each leg's 1+ hit odds from SharpAPI by player name and attach
+    """Look up each leg's 1+ hit odds from the prop-odds API by player name and attach
     book_odds / book_implied / book / ev in place. Legs with no posted line keep
     ev=None and sort to the bottom."""
     if not legs:

@@ -66,7 +66,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             pitcher_name    TEXT,
             lineup_pos      INTEGER,
             hit_probability REAL,
-            book_odds       INTEGER DEFAULT NULL,  -- 1+ hit American odds from SharpAPI
+            book_odds       INTEGER DEFAULT NULL,  -- 1+ hit American odds from the prop-odds API
             book_implied    REAL    DEFAULT NULL,  -- book's implied prob (vig included)
             ev              REAL    DEFAULT NULL,  -- our prob − book implied (edge)
             outcome         TEXT    DEFAULT NULL,  -- 'win' | 'loss'
@@ -101,7 +101,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             zone_fit        REAL,
             pitcher_hr_fb   REAL,
             gate_triggered  TEXT,               -- 'barrel' | 'sweet_hc' | 'zone_hc' | 'pitcher_hrfb'
-            book_odds       INTEGER DEFAULT NULL,  -- 1+ HR American odds from SharpAPI
+            book_odds       INTEGER DEFAULT NULL,  -- 1+ HR American odds from the prop-odds API
             book_implied    REAL    DEFAULT NULL,  -- book's implied prob (vig included)
             outcome         TEXT    DEFAULT NULL,  -- 'hr' | 'no_hr'
             actual_hrs      INTEGER DEFAULT NULL,

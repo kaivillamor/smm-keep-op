@@ -1,11 +1,12 @@
 """
-SharpAPI (sharpapi.io) client — real sportsbook odds for player props.
+Player-prop odds API client — real sportsbook odds for player props.
 
-Free tier: 12 requests/min, 60s data delay, DraftKings + FanDuel only.
-We space requests to stay under the rate limit and paginate the odds feed.
+Endpoint base URL and key are read from `.env` (PROP_ODDS_BASE_URL / PROP_ODDS_API_KEY)
+so the provider isn't hard-coded in source. Free tier is rate-limited and slightly
+delayed; we space requests under the limit and paginate the odds feed.
 
-Primary use: fetch 1+ hit odds (player_hits market, Over 0.5) so the hit
-pipeline can price legs on real book-implied probability instead of manual entry.
+Primary use: fetch 1+ hit odds (player_hits market, Over 0.5) so the hit pipeline
+can price legs on real book-implied probability instead of manual entry.
 """
 import os
 import time
@@ -16,10 +17,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SHARPAPI_KEY = os.getenv("SHARPAPI_KEY")
-_BASE = "https://api.sharpapi.io/api/v1"
+PROP_ODDS_API_KEY = os.getenv("PROP_ODDS_API_KEY")
+_BASE = os.getenv("PROP_ODDS_BASE_URL", "").rstrip("/")
 
-# Free tier is 12 req/min → one request every 5s. Add margin so bursts never trip it.
+# Free tier is ~12 req/min → one request every 5s. Add margin so bursts never trip it.
 _MIN_INTERVAL = 5.2
 _PAGE_SIZE    = 50
 _MAX_PAGES    = 20          # safety cap; a full MLB slate of props is well under this
@@ -38,7 +39,7 @@ def _throttle() -> None:
 
 def _get(path: str, params: dict) -> dict:
     _throttle()
-    headers = {"X-API-Key": SHARPAPI_KEY, "Accept": "application/json"}
+    headers = {"X-API-Key": PROP_ODDS_API_KEY, "Accept": "application/json"}
     resp = requests.get(f"{_BASE}/{path}", params=params, headers=headers, timeout=_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
@@ -84,14 +85,14 @@ def _fetch_over05(market: str, label: str, book: str | None,
     for the price we couldn't scrape, so we call it FanDuel and move on.
     `book=None` keeps the best price across all books.
     """
-    if not SHARPAPI_KEY:
-        print(f"[sharp_odds] No SHARPAPI_KEY set — skipping {label} odds")
+    if not PROP_ODDS_API_KEY or not _BASE:
+        print(f"[prop_odds] PROP_ODDS_API_KEY / PROP_ODDS_BASE_URL not set — skipping {label} odds")
         return {}
 
     try:
         rows = _paginate("odds", {"league": "mlb", "market": market})
     except Exception as e:
-        print(f"[sharp_odds] {label} fetch failed: {e}")
+        print(f"[prop_odds] {label} fetch failed: {e}")
         return {}
 
     allowed = {book, fallback} - {None} if book else None  # None ⇒ all books
@@ -134,7 +135,7 @@ def _fetch_over05(market: str, label: str, book: str | None,
         book_label = f"{book}, {fallback} fallback" if fallback else book
     else:
         book_label = "best-of-all-books"
-    print(f"[sharp_odds] {len(result)} players with 1+ {label} odds "
+    print(f"[prop_odds] {len(result)} players with 1+ {label} odds "
           f"[{book_label}] ({len(rows)} rows scanned)")
     return result
 
