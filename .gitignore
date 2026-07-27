@@ -1,7 +1,4 @@
-MLB_BETTING_SYSTEM.md
-CODEBASE_GUIDE.md
-README.md
-checkpoints/
+PROJECT.md
 venv/
 .env
 __pycache__/
