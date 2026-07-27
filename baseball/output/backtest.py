@@ -537,9 +537,10 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
     conn.close()
 
     # ── Game parlays ──────────────────────────────────────────────────────────
-    parlay_wins  = sum(1 for p in parlays if p["outcome"] == "win")
-    parlay_total = len(parlays)
-    hit_rate     = parlay_wins / parlay_total if parlay_total else 0
+    parlay_wins   = sum(1 for p in parlays if p["outcome"] == "win")
+    parlay_losses = sum(1 for p in parlays if p["outcome"] == "loss")
+    parlay_total  = len(parlays)
+    hit_rate      = parlay_wins / parlay_total if parlay_total else 0
 
     gp_staked    = parlay_total * 10.0
     gp_returned  = sum((p["payout"] or 0) * 10.0 for p in parlays if p["outcome"] == "win")
@@ -600,6 +601,9 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
         # game parlays
         "parlays_tracked":      parlay_total,
         "parlay_hit_rate":      round(hit_rate, 4),
+        "gp_wins":              parlay_wins,
+        "gp_losses":            parlay_losses,
+        "gp_staked":            round(gp_staked, 2),
         "gp_net":               round(gp_net, 2),
         "roi":                  round(roi, 4),
         "avg_clv":              round(avg_clv, 4) if avg_clv is not None else None,
@@ -617,6 +621,7 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
         "hp_staked":            round(hp_staked, 2),
         "hp_profit":            round(hp_profit, 2),
         "hp_net":               round(hp_net, 2) if hp_net is not None else None,
+        "hp_roi":               round(hp_net / hp_staked, 4) if (hp_net is not None and hp_staked) else None,
         "hp_wins_no_payout":    hp_wins_no_payout,
         # hr props
         "hr_cands_graded":      len(hr_cands),
@@ -628,6 +633,7 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
         "hrp_staked":           round(hrp_staked, 2),
         "hrp_profit":           round(hrp_profit, 2),
         "hrp_net":              round(hrp_net, 2) if hrp_net is not None else None,
+        "hrp_roi":              round(hrp_net / hrp_staked, 4) if (hrp_net is not None and hrp_staked) else None,
         "hrp_wins_no_payout":   hrp_wins_no_payout,
         # combined
         "combined_net":         round(combined_net, 2),
@@ -710,10 +716,13 @@ def _print_summary(s: dict) -> None:
     print(f"{'─' * w}")
 
     # ── Game parlays ──────────────────────────────────────────────────────────
-    print(f"  GAME PARLAYS  ({s['parlays_tracked']} tracked, $10/bet)")
+    print(f"  GAME PARLAYS  ({s['parlays_tracked']} tracked)")
     print(f"{'─' * w}")
-    print(f"  Hit rate:   {s['parlay_hit_rate'] * 100:.1f}%")
-    print(f"  Net P&L:    ${s['gp_net']:+.2f}  ({s['roi']*100:+.1f}% ROI)")
+    if s["parlays_tracked"]:
+        print(f"  Won/Lost:   {s['gp_wins']}/{s['gp_losses']}  "
+              f"({s['gp_wins'] / max(s['gp_wins'] + s['gp_losses'], 1) * 100:.0f}%)")
+        print(f"  Staked:     ${s['gp_staked']:.2f}")
+        print(f"  Net P&L:    ${s['gp_net']:+.2f}  ({s['roi']*100:+.1f}% ROI)")
     if s["avg_clv"] is not None:
         print(f"  Avg CLV:    {s['avg_clv'] * 100:+.2f}%")
     if s["ml_win_rate"] is not None:
@@ -730,7 +739,8 @@ def _print_summary(s: dict) -> None:
               f"({s['hp_wins'] / max(s['hp_wins'] + s['hp_losses'], 1) * 100:.0f}%)")
         print(f"  Staked:     ${s['hp_staked']:.2f}")
         if s["hp_net"] is not None:
-            print(f"  Net P&L:    ${s['hp_net']:+.2f}")
+            roi_str = f"  ({s['hp_roi']*100:+.1f}% ROI)" if s["hp_roi"] is not None else ""
+            print(f"  Net P&L:    ${s['hp_net']:+.2f}{roi_str}")
         else:
             profit_str = f"${s['hp_profit']:.2f} confirmed" if s["hp_profit"] else "—"
             print(f"  Profit:     {profit_str}")
@@ -752,12 +762,14 @@ def _print_summary(s: dict) -> None:
     # ── HR parlays (2-leg, both to homer) ─────────────────────────────────────
     if s["hrp_tracked"]:
         print(f"{'─' * w}")
-        print(f"  HR PARLAYS  ({s['hrp_tracked']} tracked, $10/bet)")
+        print(f"  HR PARLAYS  ({s['hrp_tracked']} tracked)")
         print(f"{'─' * w}")
-        print(f"  Won/Lost:   {s['hrp_wins']}/{s['hrp_losses']}")
+        print(f"  Won/Lost:   {s['hrp_wins']}/{s['hrp_losses']}  "
+              f"({s['hrp_wins'] / max(s['hrp_wins'] + s['hrp_losses'], 1) * 100:.0f}%)")
         print(f"  Staked:     ${s['hrp_staked']:.2f}")
         if s["hrp_net"] is not None:
-            print(f"  Net P&L:    ${s['hrp_net']:+.2f}")
+            roi_str = f"  ({s['hrp_roi']*100:+.1f}% ROI)" if s["hrp_roi"] is not None else ""
+            print(f"  Net P&L:    ${s['hrp_net']:+.2f}{roi_str}")
         elif s["hrp_wins_no_payout"]:
             print(f"  Net P&L:    pending ({s['hrp_wins_no_payout']} win payout(s) unpriced)")
     print(f"{'=' * w}\n")
