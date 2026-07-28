@@ -8,13 +8,61 @@ def resolve_pending(db_path: str = DB_PATH) -> None:
     """
     Grades all unresolved parlay legs, hit legs, and HR prop candidates, then rolls up parlay outcomes.
     Run after games finish (e.g. next morning with --results).
+    Finishes with a summary spelling out exactly what hit and the net for the run.
     """
     _resolve_parlay_legs(db_path)
     _resolve_hit_legs(db_path)
     _resolve_hr_prop_legs(db_path)
-    _roll_up_parlays(db_path)
-    _roll_up_hit_parlays(db_path)
-    _roll_up_hr_parlays(db_path)
+    graded  = _roll_up_parlays(db_path)
+    graded += _roll_up_hit_parlays(db_path)
+    graded += _roll_up_hr_parlays(db_path)
+    _print_results_summary(graded)
+
+
+def _print_results_summary(graded: list[dict]) -> None:
+    """Spells out what hit this run — winners with their legs and payout, losers in one
+    line each, then the net. Without this a win is just one flat log line among dozens."""
+    w = 58
+    if not graded:
+        print(f"\n{'═' * w}\n  RESULTS — nothing newly graded this run\n{'═' * w}\n")
+        return
+
+    wins   = [g for g in graded if g["outcome"] == "win"]
+    losses = [g for g in graded if g["outcome"] == "loss"]
+    voids  = [g for g in graded if g["outcome"] in ("void", "push")]
+    net    = sum(g["profit"] for g in graded if g["profit"] is not None)
+    unknown = [g for g in graded if g["profit"] is None]
+
+    print(f"\n{'═' * w}")
+    print(f"  RESULTS — what hit")
+    print(f"{'═' * w}")
+
+    if wins:
+        for g in wins:
+            amt = f"+${g['profit']:.2f}" if g["profit"] is not None else "payout TBD"
+            print(f"\n  ✓✓ {g['kind']} {g['label']}  ({g['date']})".ljust(w - len(amt)) + amt)
+            for leg in g["legs"]:
+                print(f"       • {leg}")
+            odds_str = f"{g['odds']:+}" if g.get("odds") is not None else "—"
+            print(f"       {odds_str}  |  ${g['stake']:.2f} staked"
+                  + (f" → ${g['stake'] + g['profit']:.2f} back" if g["profit"] is not None else ""))
+    else:
+        print(f"\n  No winners this run.")
+
+    if losses or voids:
+        print()
+        for g in losses:
+            amt = f"-${g['stake']:.2f}"
+            print(f"  ✗  {g['kind']} {g['label']}  ({g['date']})".ljust(w - len(amt)) + amt)
+        for g in voids:
+            print(f"  –  {g['kind']} {g['label']}  ({g['date']})".ljust(w - 8) + "voided")
+
+    print(f"\n{'─' * w}")
+    print(f"  Graded this run:  {len(wins)} won / {len(losses)} lost"
+          + (f" / {len(voids)} void" if voids else ""))
+    print(f"  Net:              ${net:+.2f}"
+          + ("  (+ payouts still TBD)" if unknown else ""))
+    print(f"{'═' * w}\n")
 
 
 # ── Moneyline / total legs ────────────────────────────────────────────────────
@@ -65,7 +113,8 @@ def _resolve_parlay_legs(db_path: str) -> None:
                 conn.execute("UPDATE legs SET outcome=? WHERE id=?", (outcome, leg["id"]))
                 conn.commit()
                 conn.close()
-                print(f"[result_tracker] Leg {leg['id']} ({leg['display']}) → {outcome}")
+                mark = " ✓" if outcome == "win" else ""
+                print(f"[result_tracker] Leg {leg['id']} ({leg['display']}) → {outcome.upper() if outcome == 'win' else outcome}{mark}")
                 resolved += 1
 
     print(f"[result_tracker] {resolved} parlay leg(s) graded.")
@@ -132,7 +181,7 @@ def _resolve_hit_legs(db_path: str) -> None:
                      (outcome, hits, row["id"]))
         conn.commit()
         conn.close()
-        print(f"[result_tracker] Hit leg — {row['batter_name']}: {hits} hit(s) → {outcome}")
+        print(f"[result_tracker] Hit leg — {row['batter_name']}: {hits} hit(s) → {outcome.upper() + ' ✓' if outcome == 'win' else outcome}")
         resolved += 1
 
     print(f"[result_tracker] {resolved} hit leg(s) graded.")
@@ -177,7 +226,7 @@ def _resolve_hr_prop_legs(db_path: str) -> None:
                      (outcome, hrs, row["id"]))
         conn.commit()
         conn.close()
-        print(f"[result_tracker] HR prop — {row['batter_name']}: {hrs} HR(s) → {outcome}")
+        print(f"[result_tracker] HR prop — {row['batter_name']}: {hrs} HR(s) → {outcome.upper() + ' ✓' if outcome == 'hr' else outcome}")
         resolved += 1
 
     print(f"[result_tracker] {resolved} HR prop candidate(s) graded.")
@@ -185,16 +234,18 @@ def _resolve_hr_prop_legs(db_path: str) -> None:
 
 # ── Parlay roll-up ────────────────────────────────────────────────────────────
 
-def _roll_up_parlays(db_path: str) -> None:
+def _roll_up_parlays(db_path: str) -> list[dict]:
+    """Rolls up game parlays. Returns a record per newly-graded parlay for the summary."""
     conn = _connect(db_path)
     pending = conn.execute(
-        "SELECT id, combined_odds FROM parlays WHERE outcome IS NULL"
+        "SELECT id, date, combined_odds FROM parlays WHERE outcome IS NULL"
     ).fetchall()
 
+    graded: list[dict] = []
     for row in pending:
         pid = row["id"]
         legs = conn.execute(
-            "SELECT outcome, odds FROM legs WHERE parlay_id=?", (pid,)
+            "SELECT outcome, odds, display FROM legs WHERE parlay_id=?", (pid,)
         ).fetchall()
         outcomes = [l["outcome"] for l in legs]
 
@@ -223,10 +274,22 @@ def _roll_up_parlays(db_path: str) -> None:
 
         conn.execute("UPDATE parlays SET outcome=?, payout=? WHERE id=?",
                      (result, payout, pid))
-        print(f"[result_tracker] Parlay #{pid} → {result} (payout: {payout:.2f}x)")
+        print(f"[result_tracker] Parlay #{pid} → {result.upper() if result == 'win' else result}"
+              f" (payout: {payout:.2f}x)")
+
+        # Game parlays are flat $10 and store payout as a decimal multiplier.
+        stake  = 10.0
+        profit = (payout * stake - stake) if result == "win" else (-stake if result == "loss" else 0.0)
+        graded.append({
+            "kind":   "GAME PARLAY", "label": f"#{pid}", "date": row["date"],
+            "outcome": result, "stake": stake, "profit": profit,
+            "odds":   row["combined_odds"],
+            "legs":   [l["display"] for l in legs if l["outcome"] != "push"],
+        })
 
     conn.commit()
     conn.close()
+    return graded
 
 
 def _american_to_decimal(odds: int) -> float:
@@ -237,7 +300,8 @@ def _american_to_decimal(odds: int) -> float:
 
 # ── Hit parlay roll-up ────────────────────────────────────────────────────────
 
-def _roll_up_hit_parlays(db_path: str) -> None:
+def _roll_up_hit_parlays(db_path: str) -> list[dict]:
+    """Rolls up hit parlays. Returns a record per newly-graded parlay for the summary."""
     conn    = _connect(db_path)
     pending = conn.execute(
         "SELECT * FROM hit_parlays WHERE outcome IS NULL"
@@ -245,13 +309,14 @@ def _roll_up_hit_parlays(db_path: str) -> None:
     conn.close()
 
     if not pending:
-        return
+        return []
 
+    graded: list[dict] = []
     resolved = 0
     for row in pending:
         conn = _connect(db_path)
-        l1 = conn.execute("SELECT outcome, book_odds FROM hit_legs WHERE id=?", (row["leg1_id"],)).fetchone()
-        l2 = conn.execute("SELECT outcome, book_odds FROM hit_legs WHERE id=?", (row["leg2_id"],)).fetchone()
+        l1 = conn.execute("SELECT outcome, book_odds, batter_name FROM hit_legs WHERE id=?", (row["leg1_id"],)).fetchone()
+        l2 = conn.execute("SELECT outcome, book_odds, batter_name FROM hit_legs WHERE id=?", (row["leg2_id"],)).fetchone()
         conn.close()
 
         o1 = l1["outcome"] if l1 else None
@@ -287,28 +352,46 @@ def _roll_up_hit_parlays(db_path: str) -> None:
 
         payout_str = f"${payout:.2f}" if payout is not None else "unknown — enter with --record-hit-win"
         print(f"[result_tracker] Hit parlay #{row['parlay_num']} ({row['date']}) "
-              f"→ {result}  (payout: {payout_str})")
+              f"→ {result.upper() if result == 'win' else result}  (payout: {payout_str})")
         resolved += 1
+
+        def _leg_label(leg, outcome):
+            if not leg:
+                return "?"
+            odds = f" ({leg['book_odds']:+})" if leg["book_odds"] is not None else ""
+            tag  = "" if outcome == "win" else f" [{outcome}]"
+            return f"{leg['batter_name']} 1+ Hit{odds}{tag}"
+
+        profit = payout if result == "win" else (-row["stake"] if result == "loss" else 0.0)
+        graded.append({
+            "kind":   "HIT PARLAY", "label": f"#{row['parlay_num']}", "date": row["date"],
+            "outcome": result, "stake": row["stake"], "profit": profit,
+            "odds":   row["odds"] if "odds" in row.keys() else None,
+            "legs":   [_leg_label(l1, o1), _leg_label(l2, o2)],
+        })
 
     if resolved:
         print(f"[result_tracker] {resolved} hit parlay(s) graded.")
+    return graded
 
 
-def _roll_up_hr_parlays(db_path: str) -> None:
+def _roll_up_hr_parlays(db_path: str) -> list[dict]:
     """Grades 2-leg HR parlays once both legs are graded: win only if BOTH batters
-    homered. Payout is profit from the stored combined odds (profit convention)."""
+    homered. Payout is profit from the stored combined odds (profit convention).
+    Returns a record per newly-graded parlay for the summary."""
     conn    = _connect(db_path)
     pending = conn.execute("SELECT * FROM hr_parlays WHERE outcome IS NULL").fetchall()
     conn.close()
 
     if not pending:
-        return
+        return []
 
+    graded: list[dict] = []
     resolved = 0
     for row in pending:
         conn = _connect(db_path)
-        l1 = conn.execute("SELECT outcome, book_odds FROM hr_prop_candidates WHERE id=?", (row["leg1_id"],)).fetchone()
-        l2 = conn.execute("SELECT outcome, book_odds FROM hr_prop_candidates WHERE id=?", (row["leg2_id"],)).fetchone()
+        l1 = conn.execute("SELECT outcome, book_odds, batter_name FROM hr_prop_candidates WHERE id=?", (row["leg1_id"],)).fetchone()
+        l2 = conn.execute("SELECT outcome, book_odds, batter_name FROM hr_prop_candidates WHERE id=?", (row["leg2_id"],)).fetchone()
         conn.close()
 
         o1 = l1["outcome"] if l1 else None
@@ -341,11 +424,27 @@ def _roll_up_hr_parlays(db_path: str) -> None:
 
         payout_str = f"${payout:.2f}" if payout is not None else "unknown (no stored odds)"
         print(f"[result_tracker] HR parlay #{row['parlay_num']} ({row['date']}) "
-              f"→ {result}  (payout: {payout_str})")
+              f"→ {result.upper() if result == 'win' else result}  (payout: {payout_str})")
         resolved += 1
+
+        def _leg_label(leg, outcome):
+            if not leg:
+                return "?"
+            odds = f" ({leg['book_odds']:+})" if leg["book_odds"] is not None else ""
+            tag  = "" if outcome == "hr" else f" [{outcome}]"
+            return f"{leg['batter_name']} 1+ HR{odds}{tag}"
+
+        profit = payout if result == "win" else (-row["stake"] if result == "loss" else 0.0)
+        graded.append({
+            "kind":   "HR PARLAY", "label": f"#{row['parlay_num']}", "date": row["date"],
+            "outcome": result, "stake": row["stake"], "profit": profit,
+            "odds":   row["odds"] if "odds" in row.keys() else None,
+            "legs":   [_leg_label(l1, o1), _leg_label(l2, o2)],
+        })
 
     if resolved:
         print(f"[result_tracker] {resolved} HR parlay(s) graded.")
+    return graded
 
 
 # ── MLB Stats API helpers ─────────────────────────────────────────────────────
