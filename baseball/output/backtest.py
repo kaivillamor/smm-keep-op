@@ -238,11 +238,24 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> list[in
     conn  = _connect(db_path)
     today = str(date.today())
 
-    existing = conn.execute(
-        "SELECT id FROM hr_prop_candidates WHERE date=? LIMIT 1", (today,)
-    ).fetchone()
-    if existing:
-        print(f"[backtest] HR candidates already logged for {today} — skipping.")
+    existing_rows = conn.execute(
+        "SELECT id, batter_id, book_odds FROM hr_prop_candidates WHERE date=?", (today,)
+    ).fetchall()
+    if existing_rows:
+        # Backfill odds we have now but didn't before (recover from a failed odds fetch).
+        by_bid = {str(c.get("batter_id")): c for c in candidates}
+        backfilled = 0
+        for r in existing_rows:
+            c = by_bid.get(str(r["batter_id"]))
+            if c and c.get("book_odds") is not None and r["book_odds"] is None:
+                conn.execute("UPDATE hr_prop_candidates SET book_odds=?, book_implied=? WHERE id=?",
+                             (c["book_odds"], c.get("book_implied"), r["id"]))
+                backfilled += 1
+        if backfilled:
+            conn.commit()
+            print(f"[backtest] Backfilled odds on {backfilled} previously-unpriced HR candidate(s).")
+        else:
+            print(f"[backtest] HR candidates already logged for {today} — skipping.")
     else:
         now = datetime.now(timezone.utc).isoformat()
         for c in candidates:
@@ -290,16 +303,32 @@ def log_hr_parlays(cand_ids: list[int], stake: float = 10.0,
         return
     conn  = _connect(db_path)
     today = str(date.today())
+    from parlay.parlay_builder import combine_odds
 
     existing = conn.execute(
-        "SELECT id FROM hr_parlays WHERE date=? LIMIT 1", (today,)
-    ).fetchone()
+        "SELECT id, leg1_id, leg2_id, odds FROM hr_parlays WHERE date=? ORDER BY parlay_num", (today,)
+    ).fetchall()
     if existing:
-        print(f"[backtest] HR parlays already logged for {today} — skipping.")
+        # Already logged today — re-price any parlay still missing odds (recover once the
+        # candidate legs have been backfilled). Priced ones untouched.
+        repriced = 0
+        for row in existing:
+            if row["odds"] is not None:
+                continue
+            pair = conn.execute(
+                "SELECT book_odds FROM hr_prop_candidates WHERE id IN (?, ?)", (row["leg1_id"], row["leg2_id"])
+            ).fetchall()
+            combined = combine_odds([r["book_odds"] for r in pair])
+            if combined is not None:
+                conn.execute("UPDATE hr_parlays SET odds=? WHERE id=?", (combined, row["id"]))
+                repriced += 1
+        conn.commit()
         conn.close()
+        if repriced:
+            print(f"[backtest] Re-priced {repriced} previously-unpriced HR parlay(s) for {today}.")
+        else:
+            print(f"[backtest] HR parlays already logged for {today} — skipping.")
         return
-
-    from parlay.parlay_builder import combine_odds
 
     half = len(cand_ids) // 2
     now  = datetime.now(timezone.utc).isoformat()
@@ -340,13 +369,41 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
     existing_ids = sorted(str(r["batter_id"]) for r in existing_rows)
 
     if existing_ids == new_ids:
-        print(f"[backtest] Hit legs already logged for {today} (same batters) — skipping.")
+        # Same batters already logged. Backfill odds we have now but didn't before
+        # (e.g. the prop-odds API failed on the first run, succeeded on this re-run).
+        by_bid = {str(leg.get("batter_id")): leg for leg in legs}
+        backfilled = 0
+        for r in existing_rows:
+            leg = by_bid.get(str(r["batter_id"]))
+            if not leg or leg.get("book_odds") is None:
+                continue
+            cur = conn.execute("SELECT book_odds FROM hit_legs WHERE id=?", (r["id"],)).fetchone()
+            if cur["book_odds"] is None:
+                conn.execute(
+                    "UPDATE hit_legs SET book_odds=?, book_implied=?, ev=? WHERE id=?",
+                    (leg["book_odds"], leg.get("book_implied"), leg.get("ev"), r["id"]),
+                )
+                backfilled += 1
+        if backfilled:
+            conn.commit()
+            print(f"[backtest] Backfilled odds on {backfilled} previously-unpriced hit leg(s).")
+        else:
+            print(f"[backtest] Hit legs already logged for {today} (same batters) — skipping.")
     else:
         if existing_rows:
-            # Lineups updated since first run — replace stale legs
+            # Lineups updated since first run — replace stale legs. Any hit_parlays rows
+            # built on those legs must go too: they reference leg IDs that are about to be
+            # deleted, and an orphaned parlay can never roll up (its legs never resolve).
             old_ids = tuple(r["id"] for r in existing_rows)
-            conn.execute(f"DELETE FROM hit_legs WHERE id IN ({','.join('?'*len(old_ids))})", old_ids)
-            print(f"[backtest] Lineup update detected — replacing {len(existing_rows)} stale hit leg(s).")
+            placeholders = ",".join("?" * len(old_ids))
+            orphaned = conn.execute(
+                f"DELETE FROM hit_parlays WHERE date=? AND (leg1_id IN ({placeholders}) "
+                f"OR leg2_id IN ({placeholders}))",
+                (today, *old_ids, *old_ids),
+            ).rowcount
+            conn.execute(f"DELETE FROM hit_legs WHERE id IN ({placeholders})", old_ids)
+            print(f"[backtest] Lineup update detected — replacing {len(existing_rows)} stale hit leg(s)"
+                  + (f" and {orphaned} dependent parlay row(s)." if orphaned else "."))
         now = datetime.now(timezone.utc).isoformat()
         for leg in legs:
             conn.execute(
@@ -392,16 +449,34 @@ def log_hit_parlays(leg_ids: list[int], base_stake: float = 25.0,
         return
     conn  = _connect(db_path)
     today = str(date.today())
+    from parlay.parlay_builder import combine_odds, recommended_stake
 
     existing = conn.execute(
-        "SELECT id FROM hit_parlays WHERE date=? LIMIT 1", (today,)
-    ).fetchone()
+        "SELECT id, leg1_id, leg2_id, odds FROM hit_parlays WHERE date=? ORDER BY parlay_num", (today,)
+    ).fetchall()
     if existing:
-        print(f"[backtest] Hit parlays already logged for {today} — skipping.")
+        # Already logged today — re-price any parlay still missing odds (recover from a
+        # prior failed odds fetch once the legs have been backfilled). Priced ones untouched.
+        repriced = 0
+        for row in existing:
+            if row["odds"] is not None:
+                continue
+            pair = conn.execute(
+                "SELECT book_odds FROM hit_legs WHERE id IN (?, ?)", (row["leg1_id"], row["leg2_id"])
+            ).fetchall()
+            combined = combine_odds([r["book_odds"] for r in pair])
+            if combined is not None:
+                stake = recommended_stake(combined, base_stake, profit_floor, max_stake)
+                conn.execute("UPDATE hit_parlays SET odds=?, stake=? WHERE id=?",
+                             (combined, stake, row["id"]))
+                repriced += 1
+        conn.commit()
         conn.close()
+        if repriced:
+            print(f"[backtest] Re-priced {repriced} previously-unpriced hit parlay(s) for {today}.")
+        else:
+            print(f"[backtest] Hit parlays already logged for {today} — skipping.")
         return
-
-    from parlay.parlay_builder import combine_odds, recommended_stake
 
     half = len(leg_ids) // 2
     now  = datetime.now(timezone.utc).isoformat()
@@ -542,8 +617,11 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
     parlay_total  = len(parlays)
     hit_rate      = parlay_wins / parlay_total if parlay_total else 0
 
-    gp_staked    = parlay_total * 10.0
-    gp_returned  = sum((p["payout"] or 0) * 10.0 for p in parlays if p["outcome"] == "win")
+    # Pushed parlays (every leg voided) refund the stake — excluded from staked/returned
+    # so they land at net 0 instead of counting as a loss.
+    gp_counted   = [p for p in parlays if p["outcome"] in ("win", "loss")]
+    gp_staked    = len(gp_counted) * 10.0
+    gp_returned  = sum((p["payout"] or 0) * 10.0 for p in gp_counted if p["outcome"] == "win")
     gp_net       = gp_returned - gp_staked
     roi          = gp_net / gp_staked if gp_staked else 0
 
@@ -576,8 +654,10 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
     hp_net       = (hp_profit - hp_loss_lost) if hp_resolved and not hp_wins_no_payout else None
 
     # ── HR prop candidates ────────────────────────────────────────────────────
-    hr_hits  = sum(1 for r in hr_cands if r["outcome"] == "hr")
-    hr_rate  = round(hr_hits / len(hr_cands), 4) if hr_cands else None
+    # Voids (game never played) are excluded — they aren't a miss.
+    hr_graded = [r for r in hr_cands if r["outcome"] in ("hr", "no_hr")]
+    hr_hits   = sum(1 for r in hr_graded if r["outcome"] == "hr")
+    hr_rate   = round(hr_hits / len(hr_graded), 4) if hr_graded else None
 
     # ── HR parlays (2-leg, both to hit 1+ HR) ─────────────────────────────────
     hrp_resolved  = [p for p in hr_parlays if p["outcome"] in ("win", "loss")]
@@ -624,7 +704,7 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
         "hp_roi":               round(hp_net / hp_staked, 4) if (hp_net is not None and hp_staked) else None,
         "hp_wins_no_payout":    hp_wins_no_payout,
         # hr props
-        "hr_cands_graded":      len(hr_cands),
+        "hr_cands_graded":      len(hr_graded),
         "hr_hit_rate":          hr_rate,
         # hr parlays
         "hrp_tracked":          len(hrp_resolved),
@@ -750,20 +830,11 @@ def _print_summary(s: dict) -> None:
     if s["hit_leg_win_rate"] is not None:
         print(f"  Leg rate:   {s['hit_leg_win_rate'] * 100:.1f}%  ({s['hit_legs_graded']} legs)")
 
-    # ── HR props ──────────────────────────────────────────────────────────────
-    print(f"{'─' * w}")
-    print(f"  HR PROPS  ({s['hr_cands_graded']} graded)")
-    print(f"{'─' * w}")
-    if s["hr_hit_rate"] is not None:
-        print(f"  HR rate:    {s['hr_hit_rate'] * 100:.1f}%  ({s['hr_cands_graded']} candidates)")
-    else:
-        print(f"  HR rate:    — (no resolved candidates yet)")
-
     # ── HR parlays (2-leg, both to homer) ─────────────────────────────────────
+    print(f"{'─' * w}")
+    print(f"  HR PARLAYS  ({s['hrp_tracked']} tracked)")
+    print(f"{'─' * w}")
     if s["hrp_tracked"]:
-        print(f"{'─' * w}")
-        print(f"  HR PARLAYS  ({s['hrp_tracked']} tracked)")
-        print(f"{'─' * w}")
         print(f"  Won/Lost:   {s['hrp_wins']}/{s['hrp_losses']}  "
               f"({s['hrp_wins'] / max(s['hrp_wins'] + s['hrp_losses'], 1) * 100:.0f}%)")
         print(f"  Staked:     ${s['hrp_staked']:.2f}")
@@ -772,6 +843,10 @@ def _print_summary(s: dict) -> None:
             print(f"  Net P&L:    ${s['hrp_net']:+.2f}{roi_str}")
         elif s["hrp_wins_no_payout"]:
             print(f"  Net P&L:    pending ({s['hrp_wins_no_payout']} win payout(s) unpriced)")
+    if s["hr_hit_rate"] is not None:
+        print(f"  HR rate:    {s['hr_hit_rate'] * 100:.1f}%  ({s['hr_cands_graded']} candidates)")
+    else:
+        print(f"  HR rate:    — (no resolved candidates yet)")
     print(f"{'=' * w}\n")
 
 
