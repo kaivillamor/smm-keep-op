@@ -27,6 +27,12 @@ _MAX_PAGES    = 20          # safety cap; a full MLB slate of props is well unde
 _TIMEOUT      = 20
 _last_call    = 0.0
 
+# Transient failures worth retrying — gateway/upstream blips (a single 502 on page 0
+# would otherwise kill the whole fetch) and rate-limit/timeout hiccups.
+_RETRY_STATUS   = {500, 502, 503, 504, 429}
+_MAX_RETRIES    = 3
+_RETRY_BACKOFF  = 2.0       # seconds, escalates per attempt (on top of the throttle)
+
 
 def _throttle() -> None:
     """Block just long enough to keep requests under the free-tier rate limit."""
@@ -38,18 +44,46 @@ def _throttle() -> None:
 
 
 def _get(path: str, params: dict) -> dict:
-    _throttle()
-    headers = {"X-API-Key": PROP_ODDS_API_KEY, "Accept": "application/json"}
-    resp = requests.get(f"{_BASE}/{path}", params=params, headers=headers, timeout=_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
+    """GET one page, retrying transient gateway/timeout/rate-limit errors.
+    Real errors (401 auth, 400 bad param, 404) fail fast without retrying."""
+    headers  = {"X-API-Key": PROP_ODDS_API_KEY, "Accept": "application/json"}
+    last_exc = None
+    for attempt in range(_MAX_RETRIES):
+        _throttle()
+        try:
+            resp = requests.get(f"{_BASE}/{path}", params=params,
+                                 headers=headers, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status not in _RETRY_STATUS:
+                raise                      # non-transient — don't waste retries
+            last_exc = e
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exc = e
+        if attempt < _MAX_RETRIES - 1:
+            time.sleep(_RETRY_BACKOFF * (attempt + 1))
+    raise last_exc                          # exhausted retries — caller returns {}
 
 
 def _paginate(path: str, params: dict) -> list[dict]:
-    """Walk the paginated odds feed via offset until has_more is false."""
+    """Walk the paginated odds feed via offset until has_more is false.
+
+    A mid-walk failure keeps the rows already collected instead of discarding
+    them — the API 400s past a deep offset (~free-tier cap) even when
+    `has_more` said otherwise, and 550 good rows beat zero. Only a first-page
+    failure propagates (nothing fetched ⇒ caller reports the fetch as failed)."""
     rows, offset = [], 0
     for _ in range(_MAX_PAGES):
-        page = _get(path, {**params, "offset": offset, "limit": _PAGE_SIZE})
+        try:
+            page = _get(path, {**params, "offset": offset, "limit": _PAGE_SIZE})
+        except Exception as e:
+            if not rows:
+                raise
+            print(f"[prop_odds] pagination stopped at offset {offset} ({e}) — "
+                  f"keeping {len(rows)} rows already fetched")
+            break
         rows += page.get("data", [])
         pg = page.get("pagination", {})
         if not pg.get("has_more"):
