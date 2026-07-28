@@ -475,12 +475,16 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
     start = today - timedelta(days=days)
 
     url = f"{SAVANT_BASE}/statcast_search/csv"
+    # `start_dt/end_dt` are ignored by this endpoint — they returned the batter's whole
+    # career, so "recent form" was really a career average. `game_date_gt/lt` is the
+    # filter that applies, and `batters_lookup[]` is the one that scopes to the player.
     params = {
+        "all": "true",
         "type": "batter",
-        "player_id": batter_id,
+        "batters_lookup[]": batter_id,
         "hfBBT": "ground_ball|line_drive|fly_ball|popup|",
-        "start_dt": start.strftime("%Y-%m-%d"),
-        "end_dt": today.strftime("%Y-%m-%d"),
+        "game_date_gt": start.strftime("%Y-%m-%d"),
+        "game_date_lt": today.strftime("%Y-%m-%d"),
         "hfGT": "R|",
         "sort_col": "game_date",
         "sort_order": "desc",
@@ -528,12 +532,16 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
 
     today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
+    # NOTE on params: statcast_search ignores `player_id` when `all=true` (it returns a
+    # league-wide 25k-row dump — this silently made zone xwOBA identical for every
+    # batter). The player filter that actually works is `batters_lookup[]`, and the date
+    # filter is `game_date_gt/lt` — `start_dt/end_dt` are ignored and return career data.
     params = {
         "all": "true",
         "type": "batter",
-        "player_id": batter_id,
-        "start_dt": f"{year}-01-01",
-        "end_dt": today.strftime("%Y-%m-%d"),
+        "batters_lookup[]": batter_id,
+        "game_date_gt": f"{year}-01-01",
+        "game_date_lt": today.strftime("%Y-%m-%d"),
         "hfBBT": "ground_ball|line_drive|fly_ball|popup|",
         "hfGT": "R|",
         "sort_col": "game_date",
@@ -577,12 +585,15 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
 
     today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
+    # Same endpoint quirk as the batter queries: `player_id` is ignored under `all=true`
+    # (returned a league-wide dump, making every pitcher's zone profile identical), and
+    # `start_dt/end_dt` don't filter. Use `pitchers_lookup[]` + `game_date_gt/lt`.
     params = {
         "all": "true",
         "type": "pitcher",
-        "player_id": pitcher_id,
-        "start_dt": f"{year}-01-01",
-        "end_dt": today.strftime("%Y-%m-%d"),
+        "pitchers_lookup[]": pitcher_id,
+        "game_date_gt": f"{year}-01-01",
+        "game_date_lt": today.strftime("%Y-%m-%d"),
         "hfGT": "R|",
         "sort_col": "game_date",
         "sort_order": "desc",

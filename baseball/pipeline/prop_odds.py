@@ -22,7 +22,10 @@ _BASE = os.getenv("PROP_ODDS_BASE_URL", "").rstrip("/")
 
 # Free tier is ~12 req/min → one request every 5s. Add margin so bursts never trip it.
 _MIN_INTERVAL = 5.2
-_PAGE_SIZE    = 50
+# The API caps a page at 200 rows (larger limits are silently clamped). Requesting the
+# max matters a lot here: every extra page costs a full throttle interval, so 50/page
+# turned one board into ~11 requests (~57s) where 200/page needs ~3 (~16s).
+_PAGE_SIZE    = 200
 _MAX_PAGES    = 20          # safety cap; a full MLB slate of props is well under this
 _TIMEOUT      = 20
 _last_call    = 0.0
