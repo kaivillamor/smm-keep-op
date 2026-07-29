@@ -8,6 +8,7 @@ from pipeline.stats_fetcher import (
 )
 from model.factors.hr_prop_model import score_batter_hr_props, rank_score, RECENT_DAYS, BARREL_THRESHOLD
 from pipeline.prop_odds import fetch_hr_prop_odds, normalize_name
+from pipeline.stats_fetcher import game_has_started
 
 # Slightly under the final gate thresholds
 _SEASON_PREFILTER        = 55.0
@@ -22,11 +23,15 @@ _HRFB_PER_FIP_UNIT = 4.0
 
 
 def _pitcher_hrfb_proxy(p_stats: dict) -> float | None:
+    """Estimate HR/FB from the FIP−xFIP gap. Clamped at 0: a pitcher massively
+    outperforming his xFIP (e.g. 2.00 vs 5.00) produced a negative rate, which is
+    impossible and silently failed the gate for the wrong reason."""
     fip  = p_stats.get("fip")
     xfip = p_stats.get("xfip")
     if fip is None or xfip is None:
         return None
-    return round(_LEAGUE_AVG_HRFB + (fip - xfip) * _HRFB_PER_FIP_UNIT, 1)
+    proxy = _LEAGUE_AVG_HRFB + (fip - xfip) * _HRFB_PER_FIP_UNIT
+    return round(max(proxy, 0.0), 1)
 
 
 def analyze_hr_props(
@@ -53,13 +58,20 @@ def analyze_hr_props(
     confirmed_games = sum(1 for v in lineups.values() if v.get("confirmed"))
     total_batters_checked = 0
     prefilter_passed = 0
-    print(f"[prop_pipeline] {confirmed_games}/{len(lineups)} games have confirmed lineups")
 
-    # Collect the unique probable-pitcher IDs across confirmed games (no network).
+    # Narrow to games that are both confirmed and still bettable. A game already
+    # underway is dropped, not a reason to stop — the rest of the slate still counts.
+    eligible = {
+        pk: entry for pk, entry in lineups.items()
+        if entry.get("confirmed") and not game_has_started(entry.get("commence_time"))
+    }
+    started = confirmed_games - len(eligible)
+    print(f"[prop_pipeline] {confirmed_games}/{len(lineups)} games have confirmed lineups"
+          + (f" | {started} already started → {len(eligible)} bettable" if started else ""))
+
+    # Collect the unique probable-pitcher IDs across eligible games (no network).
     pitcher_ids: set[int] = set()
-    for game_pk, lineup_entry in lineups.items():
-        if not lineup_entry.get("confirmed"):
-            continue
+    for game_pk, lineup_entry in eligible.items():
         probable = _match_probable(game_pk, probable_pitchers)
         for pid, batters in (
             (probable.get("away_pitcher_id"), lineup_entry.get("home_lineup", [])),
@@ -84,10 +96,7 @@ def analyze_hr_props(
 
     # Build the work queue: one entry per (batter, pitcher, side, game) that passes pre-filter.
     work_items = []
-    for game_pk, lineup_entry in lineups.items():
-        if not lineup_entry.get("confirmed"):
-            continue
-
+    for game_pk, lineup_entry in eligible.items():
         probable = _match_probable(game_pk, probable_pitchers)
         batter_groups = [
             (lineup_entry.get("home_lineup", []), probable.get("away_pitcher_id"), "home"),

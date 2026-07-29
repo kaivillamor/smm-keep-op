@@ -64,8 +64,15 @@ def _sweet_spot_score(season_stats: dict) -> float | None:
 
 
 def _hard_contact_score(recent_stats: dict, season_stats: dict) -> float | None:
-    # Prefer 14-day recent window; fall back to season if recent data is unavailable
-    pct = recent_stats.get("hard_hit_percent") or season_stats.get("hard_hit_percent")
+    """Prefer the 14-day window; fall back to season only when recent is genuinely absent.
+
+    Must test `is None`, not falsiness: a batter who made contact but hit nothing hard
+    scores a legitimate 0.0, and `or` treated that as missing and substituted the season
+    figure — erasing exactly the cold streak this metric exists to catch.
+    """
+    pct = recent_stats.get("hard_hit_percent")
+    if pct is None:
+        pct = season_stats.get("hard_hit_percent")
     if pct is None:
         return None
     return round(float(pct), 1)
@@ -123,11 +130,11 @@ def _which_gate(scores: dict) -> str | None:
 
 def _check_gate(scores: dict) -> bool:
     """
-    Four ways to pass:
-      1. Barrel rate alone >= 8%          (elite contact quality)
-      2. Sweet Spot >= 65% AND Hard Contact >= 65%   (angle + power)
-      3. Zone Fit >= 65% AND Hard Contact >= 65%     (matchup + power)
-      4. Pitcher HR/FB >= 15% AND Barrel >= 6%       (homer-prone pitcher + decent pop)
+    Four ways to pass (thresholds are the module constants, not hardcoded):
+      1. Barrel >= BARREL_THRESHOLD (11%)                      elite contact quality alone
+      2. Sweet Spot >= 65% AND Hard Contact >= 65%             angle + power
+      3. Zone Fit >= 65% AND Hard Contact >= 65%               matchup + power
+      4. Pitcher HR/FB >= 15% AND Barrel >= BARREL_SOFT (8%)   homer-prone pitcher + pop
     """
     barrel       = scores.get("barrel_rate")
     sweet_spot   = scores.get("sweet_spot")
@@ -160,25 +167,36 @@ def rank_score(scores: dict) -> float:
     Composite ranking score (0–100) for sorting candidates after gate filtering.
     Barrel rate carries the most weight — it's the best single HR predictor.
     Hard contact and sweet spot add signal; zone fit and pitcher_hrfb are bonuses.
+
+    Missing metrics are EXCLUDED and the remaining weights renormalized, rather than
+    scored as 0. Treating an unavailable zone fit or HR/FB proxy as zero made it the
+    worst possible value, so candidates ranked lower for having incomplete data instead
+    of for being worse hitters — a data-availability bias, not a skill signal.
     """
-    barrel       = scores.get("barrel_rate")      or 0.0
-    sweet_spot   = scores.get("sweet_spot")        or 0.0
-    hard_contact = scores.get("recent_hard_contact") or 0.0
-    zone_fit     = scores.get("zone_fit")          or 0.0
-    pitcher_hrfb = scores.get("pitcher_hr_fb")     or 0.0
+    # (normalized 0–1 value, weight) — only for metrics we actually have
+    parts: list[tuple[float, float]] = []
 
-    # Normalize each metric to a 0–1 scale before weighting
-    barrel_n  = min(barrel / 20.0,       1.0)   # 20% barrel ≈ elite ceiling
-    sweet_n   = min(sweet_spot / 75.0,   1.0)
-    hard_n    = min(hard_contact / 75.0, 1.0)
-    zone_n    = min(zone_fit / 100.0,    1.0)
-    hrfb_n    = min(max(pitcher_hrfb - 10.0, 0.0) / 15.0, 1.0)  # bonus above 10%
+    barrel = scores.get("barrel_rate")
+    if barrel is not None:
+        parts.append((min(barrel / 20.0, 1.0), 0.40))        # 20% barrel ≈ elite ceiling
 
-    score = (
-        barrel_n  * 0.40 +
-        hard_n    * 0.25 +
-        sweet_n   * 0.20 +
-        zone_n    * 0.10 +
-        hrfb_n    * 0.05
-    ) * 100
-    return round(score, 1)
+    hard_contact = scores.get("recent_hard_contact")
+    if hard_contact is not None:
+        parts.append((min(hard_contact / 75.0, 1.0), 0.25))
+
+    sweet_spot = scores.get("sweet_spot")
+    if sweet_spot is not None:
+        parts.append((min(sweet_spot / 75.0, 1.0), 0.20))
+
+    zone_fit = scores.get("zone_fit")
+    if zone_fit is not None:
+        parts.append((min(zone_fit / 100.0, 1.0), 0.10))
+
+    pitcher_hrfb = scores.get("pitcher_hr_fb")
+    if pitcher_hrfb is not None:
+        parts.append((min(max(pitcher_hrfb - 10.0, 0.0) / 15.0, 1.0), 0.05))  # bonus above 10%
+
+    total_weight = sum(w for _, w in parts)
+    if not total_weight:
+        return 0.0
+    return round(sum(v * w for v, w in parts) / total_weight * 100, 1)

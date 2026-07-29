@@ -91,7 +91,12 @@ def _paginate(path: str, params: dict) -> list[dict]:
         pg = page.get("pagination", {})
         if not pg.get("has_more"):
             break
-        offset = pg.get("next_offset", offset + _PAGE_SIZE)
+        # `next_offset` can come back explicitly null even with has_more=true, and
+        # dict.get()'s default only covers a *missing* key — taking it verbatim put
+        # None into offset and blew up the next iteration on None + _PAGE_SIZE,
+        # discarding every row already fetched. Fall back to a computed offset.
+        next_offset = pg.get("next_offset")
+        offset = next_offset if isinstance(next_offset, int) else offset + _PAGE_SIZE
     return rows
 
 

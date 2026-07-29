@@ -353,10 +353,15 @@ def log_hr_parlays(cand_ids: list[int], stake: float = 10.0,
 
 
 def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
-    """Persists hit parlay legs so result_tracker can grade them later.
-    Re-runs on the same day are allowed if the batter set changed (new lineups confirmed).
-    If the batter IDs are identical to what's already logged, skips silently.
-    Always returns today's leg IDs in order."""
+    """Persists a BATCH of hit parlay legs and returns that batch's leg IDs.
+
+    Same-day re-runs append rather than overwrite. Once games start, a later run
+    legitimately covers a different set of games, and those earlier legs are bets
+    that may already be placed — deleting them would erase a live wager from the
+    record. The only skip case is an exact repeat: every batter in this batch is
+    already logged today, in which case we backfill any odds we didn't have before
+    and reuse the existing rows.
+    """
     if not legs:
         return []
     conn  = _connect(db_path)
@@ -366,22 +371,27 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
     existing_rows = conn.execute(
         "SELECT id, batter_id FROM hit_legs WHERE date=? ORDER BY id", (today,)
     ).fetchall()
-    existing_ids = sorted(str(r["batter_id"]) for r in existing_rows)
+    # Match against *any* batch logged today, not just the most recent one.
+    existing_by_bid = {str(r["batter_id"]): r["id"] for r in existing_rows}
+    is_exact_repeat = all(bid in existing_by_bid for bid in new_ids)
 
-    if existing_ids == new_ids:
+    if is_exact_repeat:
         # Same batters already logged. Backfill odds we have now but didn't before
         # (e.g. the prop-odds API failed on the first run, succeeded on this re-run).
         by_bid = {str(leg.get("batter_id")): leg for leg in legs}
         backfilled = 0
-        for r in existing_rows:
-            leg = by_bid.get(str(r["batter_id"]))
+        batch_ids  = []
+        for bid in new_ids:
+            row_id = existing_by_bid[bid]
+            batch_ids.append(row_id)
+            leg = by_bid.get(bid)
             if not leg or leg.get("book_odds") is None:
                 continue
-            cur = conn.execute("SELECT book_odds FROM hit_legs WHERE id=?", (r["id"],)).fetchone()
+            cur = conn.execute("SELECT book_odds FROM hit_legs WHERE id=?", (row_id,)).fetchone()
             if cur["book_odds"] is None:
                 conn.execute(
                     "UPDATE hit_legs SET book_odds=?, book_implied=?, ev=? WHERE id=?",
-                    (leg["book_odds"], leg.get("book_implied"), leg.get("ev"), r["id"]),
+                    (leg["book_odds"], leg.get("book_implied"), leg.get("ev"), row_id),
                 )
                 backfilled += 1
         if backfilled:
@@ -389,24 +399,16 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
             print(f"[backtest] Backfilled odds on {backfilled} previously-unpriced hit leg(s).")
         else:
             print(f"[backtest] Hit legs already logged for {today} (same batters) — skipping.")
+        conn.close()
+        return sorted(batch_ids)
     else:
         if existing_rows:
-            # Lineups updated since first run — replace stale legs. Any hit_parlays rows
-            # built on those legs must go too: they reference leg IDs that are about to be
-            # deleted, and an orphaned parlay can never roll up (its legs never resolve).
-            old_ids = tuple(r["id"] for r in existing_rows)
-            placeholders = ",".join("?" * len(old_ids))
-            orphaned = conn.execute(
-                f"DELETE FROM hit_parlays WHERE date=? AND (leg1_id IN ({placeholders}) "
-                f"OR leg2_id IN ({placeholders}))",
-                (today, *old_ids, *old_ids),
-            ).rowcount
-            conn.execute(f"DELETE FROM hit_legs WHERE id IN ({placeholders})", old_ids)
-            print(f"[backtest] Lineup update detected — replacing {len(existing_rows)} stale hit leg(s)"
-                  + (f" and {orphaned} dependent parlay row(s)." if orphaned else "."))
+            print(f"[backtest] {len(existing_rows)} hit leg(s) already logged today — "
+                  f"appending this batch alongside them (earlier bets are preserved).")
         now = datetime.now(timezone.utc).isoformat()
+        batch_ids = []
         for leg in legs:
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO hit_legs
                    (date, game_pk, batter_id, batter_name, team, opponent_team,
                     pitcher_name, lineup_pos, hit_probability,
@@ -428,14 +430,13 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
                     now,
                 ),
             )
+            batch_ids.append(cur.lastrowid)
         conn.commit()
         print(f"[backtest] Logged {len(legs)} hit leg(s) for {today} (individual batter rows)")
 
-    rows = conn.execute(
-        "SELECT id FROM hit_legs WHERE date=? ORDER BY id", (today,)
-    ).fetchall()
     conn.close()
-    return [r["id"] for r in rows]
+    # Return only THIS batch — pairing must not mix legs across batches.
+    return batch_ids
 
 
 def log_hit_parlays(leg_ids: list[int], base_stake: float = 25.0,
@@ -454,29 +455,39 @@ def log_hit_parlays(leg_ids: list[int], base_stake: float = 25.0,
     existing = conn.execute(
         "SELECT id, leg1_id, leg2_id, odds FROM hit_parlays WHERE date=? ORDER BY parlay_num", (today,)
     ).fetchall()
-    if existing:
-        # Already logged today — re-price any parlay still missing odds (recover from a
-        # prior failed odds fetch once the legs have been backfilled). Priced ones untouched.
-        repriced = 0
-        for row in existing:
-            if row["odds"] is not None:
-                continue
-            pair = conn.execute(
-                "SELECT book_odds FROM hit_legs WHERE id IN (?, ?)", (row["leg1_id"], row["leg2_id"])
-            ).fetchall()
-            combined = combine_odds([r["book_odds"] for r in pair])
-            if combined is not None:
-                stake = recommended_stake(combined, base_stake, profit_floor, max_stake)
-                conn.execute("UPDATE hit_parlays SET odds=?, stake=? WHERE id=?",
-                             (combined, stake, row["id"]))
-                repriced += 1
+
+    # Always re-price anything still missing odds — recovers from a prior failed
+    # odds fetch once the legs have been backfilled. Priced parlays are untouched.
+    repriced = 0
+    for row in existing:
+        if row["odds"] is not None:
+            continue
+        pair = conn.execute(
+            "SELECT book_odds FROM hit_legs WHERE id IN (?, ?)", (row["leg1_id"], row["leg2_id"])
+        ).fetchall()
+        combined = combine_odds([r["book_odds"] for r in pair])
+        if combined is not None:
+            stake = recommended_stake(combined, base_stake, profit_floor, max_stake)
+            conn.execute("UPDATE hit_parlays SET odds=?, stake=? WHERE id=?",
+                         (combined, stake, row["id"]))
+            repriced += 1
+    if repriced:
         conn.commit()
+        print(f"[backtest] Re-priced {repriced} previously-unpriced hit parlay(s) for {today}.")
+
+    # If this batch's legs are already paired, there's nothing new to add.
+    already_paired = {r["leg1_id"] for r in existing} | {r["leg2_id"] for r in existing}
+    if set(leg_ids) <= already_paired:
         conn.close()
-        if repriced:
-            print(f"[backtest] Re-priced {repriced} previously-unpriced hit parlay(s) for {today}.")
-        else:
+        if not repriced:
             print(f"[backtest] Hit parlays already logged for {today} — skipping.")
         return
+
+    # New batch → append parlays, continuing the day's numbering rather than
+    # restarting at 1 (which would collide with the earlier batch).
+    next_num = (conn.execute(
+        "SELECT COALESCE(MAX(parlay_num), 0) m FROM hit_parlays WHERE date=?", (today,)
+    ).fetchone()["m"]) + 1
 
     half = len(leg_ids) // 2
     now  = datetime.now(timezone.utc).isoformat()
@@ -496,11 +507,12 @@ def log_hit_parlays(leg_ids: list[int], base_stake: float = 25.0,
         conn.execute(
             """INSERT INTO hit_parlays (date, parlay_num, leg1_id, leg2_id, stake, odds, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (today, i + 1, leg1_id, leg2_id, stake, combined, now),
+            (today, next_num + i, leg1_id, leg2_id, stake, combined, now),
         )
     conn.commit()
     conn.close()
-    print(f"[backtest] Logged {half} hit parlays for {today} "
+    nums = f"#{next_num}" if half == 1 else f"#{next_num}–#{next_num + half - 1}"
+    print(f"[backtest] Logged {half} hit parlays for {today} as {nums} "
           f"— {priced}/{half} auto-priced & staked from book odds")
 
 

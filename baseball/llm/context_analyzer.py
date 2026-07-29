@@ -1,23 +1,53 @@
 import os
 import json
-from openai import OpenAI
+import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL = "gpt-4o"
+MODEL = "claude-opus-5"
+
+# Thinking is on by default on Opus 5 and shares max_tokens with the response,
+# so this is sized for reasoning headroom — not for the small JSON payload.
+MAX_TOKENS = 16000
+
+# Structured outputs: the response is schema-validated, so a malformed-JSON
+# reply isn't a failure mode we have to handle. Note the schema can't express
+# numeric bounds — edge_multiplier is range-checked in _apply_llm_adjustments.
+_ACTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "actions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "game_id":         {"type": "string"},
+                    "bet_type":        {"type": "string", "enum": ["ml", "total"]},
+                    "action":          {"type": "string", "enum": ["remove", "downgrade"]},
+                    "edge_multiplier": {"type": "number"},
+                    "reason":          {"type": "string"},
+                },
+                "required": ["game_id", "bet_type", "action", "edge_multiplier", "reason"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["actions"],
+    "additionalProperties": False,
+}
 
 
 def analyze_context(legs: list[dict], news_summary: str = "") -> list[dict]:
     if not legs:
         return legs
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        print("[context_analyzer] No OPENAI_API_KEY set — returning legs unchanged")
+        print("[context_analyzer] No ANTHROPIC_API_KEY set — returning legs unchanged")
         return legs
 
-    client = OpenAI(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key)
 
     # Strip raw_odds before sending — keeps the prompt lean
     slim_legs = [
@@ -40,34 +70,34 @@ Review each leg for qualitative issues the statistical model cannot catch in rea
 - Weather update changed significantly since morning pull
 - Motivation spots or known situational factors
 
-Return ONLY valid JSON in this exact format:
-{{
-  "actions": [
-    {{
-      "game_id": "<game_id>",
-      "bet_type": "ml" or "total",
-      "action": "remove" or "downgrade",
-      "edge_multiplier": 0.5,
-      "reason": "<one sentence>"
-    }}
-  ]
-}}
-
 Rules:
 - Only include legs you are flagging. Legs not listed are approved as-is.
-- "remove" = drop the leg entirely.
+- "remove" = drop the leg entirely (set edge_multiplier to 0).
 - "downgrade" = reduce confidence; set edge_multiplier between 0.1 and 0.9.
 - Do not add new legs. The quantitative model is the source of truth for what qualifies.
-- If no legs need flagging, return {{"actions": []}}"""
+- If no legs need flagging, return an empty actions list.
+- game_id and bet_type must match a leg above exactly."""
 
     try:
-        response = client.chat.completions.create(
+        response = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=MAX_TOKENS,
+            thinking={"type": "adaptive"},
+            output_config={"format": {"type": "json_schema", "schema": _ACTIONS_SCHEMA}},
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
         )
-        return _apply_llm_adjustments(legs, response.choices[0].message.content)
+
+        if response.stop_reason == "refusal":
+            print("[context_analyzer] Model declined the request — returning legs unchanged")
+            return legs
+
+        # With thinking on, content may lead with thinking blocks — take the text one.
+        text = next((b.text for b in response.content if b.type == "text"), None)
+        if text is None:
+            print("[context_analyzer] No text block in response — returning legs unchanged")
+            return legs
+
+        return _apply_llm_adjustments(legs, text)
     except Exception as e:
         print(f"[context_analyzer] LLM call failed ({e}) — returning legs unchanged")
         return legs
@@ -80,7 +110,7 @@ def _apply_llm_adjustments(legs: list[dict], llm_response: str) -> list[dict]:
             (a["game_id"], a["bet_type"]): a
             for a in data.get("actions", [])
         }
-    except (json.JSONDecodeError, KeyError):
+    except (json.JSONDecodeError, KeyError, TypeError):
         print("[context_analyzer] Could not parse LLM response — returning legs unchanged")
         return legs
 
@@ -98,7 +128,8 @@ def _apply_llm_adjustments(legs: list[dict], llm_response: str) -> list[dict]:
             continue
 
         if action["action"] == "downgrade":
-            multiplier = float(action.get("edge_multiplier", 0.5))
+            # Schema can't bound numbers, so clamp to the documented range here.
+            multiplier = min(max(float(action.get("edge_multiplier", 0.5)), 0.1), 0.9)
             updated    = {
                 **leg,
                 "edge":           round(leg["edge"] * multiplier, 4),

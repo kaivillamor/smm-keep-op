@@ -7,17 +7,30 @@ MIN_VENUE_AB   = 20      # minimum career AB at this venue before applying venue
 
 # ── Signal weights ────────────────────────────────────────────────────────────
 # Batter BA blending (applied in order — each layer adjusts from the previous):
-H2H_WEIGHT         = 0.40   # career avg vs this specific pitcher replaces 40% of season split
+H2H_WEIGHT         = 0.40   # MAX weight on career avg vs this pitcher (see H2H_SHRINK_AB)
+# Batter-vs-pitcher samples are tiny and enormously noisy — 4-for-10 reads as ".400".
+# Giving that the full 40% was the single largest source of over-prediction, producing
+# implied batting averages north of .500. Weight now scales with sample size,
+#   weight = H2H_WEIGHT * ab / (ab + H2H_SHRINK_AB)
+# so 10 AB earns ~9% of the max, 50 AB ~33%, 200 AB ~67%. It never reaches 40%.
+H2H_SHRINK_AB      = 100    # AB at which H2H earns half its maximum weight
 RECENT_WEIGHT      = 0.20   # last-14d hot/cold ratio multiplier on blended BA
 VENUE_WEIGHT       = 0.05   # career avg at this ballpark — very light, just a nudge
 TEAM_RECENT_WEIGHT = 0.10   # team-level hot/cold multiplier (collective lineup rhythm)
 
 # Pitcher quality blending:
 PITCHER_RECENT_WEIGHT = 0.40  # last-3-starts H/9 blended with season H/9
-REST_ADJ_PER_DAY      = 0.01  # ±1% quality factor per day away from 4-day normal rest
+# (days-rest adjustment removed — see the note in score_batter_hit_prob)
 
 # Situational:
 DAY_GAME_BA_PENALTY = 0.010  # flat BA reduction — batters hit slightly worse in day games
+
+# Hard ceiling on the fully-adjusted single-PA hit probability. Six upward nudges
+# (H2H, recent form, venue, team form, pitcher quality, park) multiply together with
+# no regression to the mean, so the old .600 cap let predictions imply batting averages
+# of .500+. The modern single-season record is .426 and no one has hit .400 since 1941 —
+# any game-level estimate above .400 is the stack compounding, not a real matchup.
+MAX_ADJUSTED_BA     = 0.400
 
 HIT_PARLAY_LEGS   = 4     # legs surfaced in the daily hit parlay (2 pairs × 2 legs)
 MIN_HIT_PROB      = 0.68  # legs below this P(1+ hit) can't cover typical parlay pricing
@@ -29,6 +42,12 @@ MAX_LINEUP_DEPTH  = 6     # only score batters in positions 1–6 (most plate ap
 HIT_BASE_STAKE    = 25.0  # base unit staked on a plus-money (double-up) parlay
 HIT_PROFIT_FLOOR  = 25.0  # minimum profit to guarantee on a minus-money parlay
 HIT_MAX_STAKE     = 50.0  # never stake more than this, even to hit the floor
+
+# Batting average is hits per AT-BAT, but the lineup table below is PLATE APPEARANCES.
+# Roughly 11% of PA (walks, HBP, sacrifices) can never produce a hit, so exponentiating
+# by PA credited every batter ~0.5 extra chances and inflated every prediction by ~4 pts.
+# 2026 league ratio, measured from the MLB Stats API team totals (107,826 AB / 121,394 PA).
+AB_PER_PA = 0.888
 
 # Historical expected PAs per game by batting order position.
 _PA_BY_POS = {
@@ -73,10 +92,12 @@ def score_batter_hit_prob(
         season_ba = LEAGUE_AVG_BA
     batter_ba = season_ba
 
-    # ── 2. H2H blend ─────────────────────────────────────────────────────────
+    # ── 2. H2H blend (weight scales with sample size) ────────────────────────
     if h2h_stats and h2h_stats.get("ab", 0) >= MIN_H2H_AB:
+        h2h_ab    = h2h_stats.get("ab", 0)
         h2h_avg   = h2h_stats.get("avg") or 0.0
-        batter_ba = batter_ba * (1 - H2H_WEIGHT) + h2h_avg * H2H_WEIGHT
+        h2h_w     = H2H_WEIGHT * h2h_ab / (h2h_ab + H2H_SHRINK_AB)
+        batter_ba = batter_ba * (1 - h2h_w) + h2h_avg * h2h_w
 
     # ── 3. Recent form multiplier ─────────────────────────────────────────────
     if recent_ba_stats and recent_ba_stats.get("ab", 0) >= MIN_RECENT_AB:
@@ -113,17 +134,20 @@ def score_batter_hit_prob(
 
     quality_factor = pitcher_h9 / LEAGUE_H_PER_9
 
-    # Days rest: 4 days is normal. Short/long rest nudges quality factor.
-    if pitcher_recent and pitcher_recent.get("days_rest") is not None:
-        rest_delta     = pitcher_recent["days_rest"] - 4
-        quality_factor *= 1 + rest_delta * REST_ADJ_PER_DAY
+    # Days-rest adjustment REMOVED. It applied ±1%/day with the sign inverted (short
+    # rest predicted FEWER hits allowed, which is backwards for a fatigued pitcher),
+    # and the true effect is pitcher-specific rather than league-wide — some benefit
+    # from extra rest, others go rusty. Rather than apply a blanket adjustment whose
+    # direction we can't justify, apply none. `days_rest` is still fetched and stored
+    # on every research prediction, so the data can settle the direction empirically.
 
     # ── Park + final calculation ──────────────────────────────────────────────
     park_adj    = 1.0 + (park_factor - 1.0) * 0.3
     expected_pa = _PA_BY_POS.get(lineup_pos, 4.0)
-    adjusted_ba = min(batter_ba * quality_factor * park_adj, 0.600)
+    expected_ab = expected_pa * AB_PER_PA   # BA is per at-bat, not per plate appearance
+    adjusted_ba = min(batter_ba * quality_factor * park_adj, MAX_ADJUSTED_BA)
 
-    return round(1.0 - (1.0 - adjusted_ba) ** expected_pa, 4)
+    return round(1.0 - (1.0 - adjusted_ba) ** expected_ab, 4)
 
 
 def _pitcher_hits_per_9(pitcher_stats: dict) -> float:

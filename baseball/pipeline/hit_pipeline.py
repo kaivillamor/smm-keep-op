@@ -7,6 +7,8 @@ from pipeline.stats_fetcher import (
     fetch_pitcher_recent_form,
     fetch_team_recent_hitting,
     get_team_id,
+    game_has_started,
+    is_day_game,
 )
 from model.factors.hit_model import (
     score_batter_hit_prob,
@@ -19,7 +21,8 @@ from model.factors.owner_logic import apply_hit_owner_logic
 from pipeline.prop_odds import fetch_hit_prop_odds, normalize_name
 
 
-def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
+def analyze_hit_props(lineups: dict, stats: dict,
+                      all_candidates_out: list | None = None) -> list[dict]:
     """
     Scores batters in positions 1–MAX_LINEUP_DEPTH of every confirmed lineup
     on P(1+ hit) for today's matchup. Returns the top HIT_PARLAY_LEGS candidates.
@@ -31,7 +34,13 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
     pitcher_stats = stats.get("pitcher_stats", {})
 
     confirmed_count = sum(1 for v in lineups.values() if v.get("confirmed"))
-    print(f"[hit_pipeline] {confirmed_count}/{len(lineups)} games have confirmed lineups")
+    # Games already underway can't be bet — drop them and carry on with the rest of
+    # the slate rather than treating a started game as a reason to produce nothing.
+    started = sum(1 for v in lineups.values()
+                  if v.get("confirmed") and game_has_started(v.get("commence_time")))
+    bettable = confirmed_count - started
+    print(f"[hit_pipeline] {confirmed_count}/{len(lineups)} games have confirmed lineups"
+          + (f" | {started} already started → {bettable} bettable" if started else ""))
 
     candidates: list[dict] = []
     pitcher_recent_cache: dict[int, dict] = {}
@@ -39,6 +48,8 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
 
     for game_pk, lineup_entry in lineups.items():
         if not lineup_entry.get("confirmed"):
+            continue
+        if game_has_started(lineup_entry.get("commence_time")):
             continue
 
         probable_entry = _match_probable(game_pk, probable)
@@ -50,11 +61,7 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
         venue_id = get_venue_id(home_team)
 
         commence = lineup_entry.get("commence_time", "")
-        try:
-            utc_hour   = int(commence[11:13])
-            is_day_game = utc_hour < 22   # before 6pm ET (EDT = UTC-4)
-        except (ValueError, IndexError):
-            is_day_game = False
+        day_game = is_day_game(commence)
 
         away_team = lineup_entry.get("away_team", "")
 
@@ -115,7 +122,7 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
                     venue_stats=venue_stats,
                     pitcher_recent=pitcher_recent,
                     team_recent=team_recent,
-                    is_day_game=is_day_game,
+                    is_day_game=day_game,
                 )
 
                 owner_adj = apply_hit_owner_logic(batter_name, opponent_team, base_prob)
@@ -138,7 +145,7 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
                     "pitcher_recent_h9": pitcher_recent.get("h_per_9"),
                     "pitcher_days_rest": pitcher_recent.get("days_rest"),
                     "team_recent_avg":   team_recent.get("avg"),
-                    "is_day_game":       is_day_game,
+                    "is_day_game":       day_game,
                     "base_prob":       base_prob,
                     "owner_adj":       owner_adj,
                     "hit_probability": prob,
@@ -146,6 +153,13 @@ def analyze_hit_props(lineups: dict, stats: dict) -> list[dict]:
                 })
 
     candidates.sort(key=lambda c: c["hit_probability"], reverse=True)
+
+    # Optional hand-off of EVERY scored batter for calibration research. The surfaced
+    # legs alone are a biased sample (the ones the model already liked), which can't
+    # reveal whether the ranking works. Default None keeps existing callers unchanged.
+    if all_candidates_out is not None:
+        all_candidates_out.extend(candidates)
+
     top = _select_legs(candidates, HIT_PARLAY_LEGS)
 
     # Attach real book odds (prop-odds API) and compute EV = our prob − book implied.
@@ -208,11 +222,14 @@ def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
 
 
 def _match_probable(game_pk, probable: dict) -> dict | None:
-    return (
-        probable.get(int(game_pk))
-        or probable.get(str(game_pk))
-        or None
-    )
+    """Game IDs arrive as int from the schedule API and str from the saved lineup
+    JSON, so try both. A non-numeric ID returns None rather than raising — a lookup
+    miss should never take down the caller."""
+    try:
+        hit = probable.get(int(game_pk))
+    except (TypeError, ValueError):
+        hit = None
+    return hit or probable.get(str(game_pk)) or None
 
 
 def _normalize_batting_pos(batting_order, fallback_idx: int) -> int:
