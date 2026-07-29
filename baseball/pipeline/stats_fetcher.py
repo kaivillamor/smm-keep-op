@@ -3,12 +3,69 @@ import json
 import math
 import os
 import time
+import uuid
 import requests
 import pandas as pd
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
+# Real Eastern zone for wall-clock questions (day vs night game), where an hour of
+# DST error changes the answer. slate_date() below deliberately keeps its fixed
+# offset — it only needs the calendar day, and the extra hour of grace helps late games.
+_EASTERN = ZoneInfo("America/New_York")
 
 MLB_API = "https://statsapi.mlb.com/api/v1"
 SAVANT_BASE = "https://baseballsavant.mlb.com"
+
+# MLB schedules a "game day" in Eastern time — a 10pm ET game belongs to that day's
+# slate even though it's already tomorrow in UTC. lineup_fetcher already keys off ET,
+# so anything that must line up with it (probable pitchers, per-day caches) has to use
+# the same basis. Using UTC here silently fetched the NEXT day's probables after 8pm ET,
+# so no game_pk matched a lineup and every pipeline produced zero candidates.
+_ET_OFFSET = timedelta(hours=5)
+
+
+def slate_date() -> str:
+    """Today's MLB slate date (Eastern), as YYYY-MM-DD."""
+    return (datetime.now(timezone.utc) - _ET_OFFSET).strftime("%Y-%m-%d")
+
+
+def is_day_game(commence_time: str | None) -> bool:
+    """True if first pitch is before 6pm Eastern.
+
+    Uses a real DST-aware zone rather than arithmetic on the UTC hour. Slicing the
+    hour out of the timestamp and testing `utc_hour < 22` wrapped past midnight, so
+    a 9:40pm ET game (01:40 UTC) read as hour 1 and was classified a DAY game —
+    misflagging every game after 8pm ET and applying the day-game penalty to it.
+    """
+    if not commence_time:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_EASTERN).hour < 18
+
+
+def game_has_started(commence_time: str | None) -> bool:
+    """True once first pitch has passed — you can no longer place a pregame bet.
+
+    Used to filter a slate down to still-bettable games rather than to abort:
+    an early game being underway says nothing about the 7pm cluster. An unknown
+    or unparseable start time returns False so a missing field never silently
+    drops a game we could still bet.
+    """
+    if not commence_time:
+        return False
+    try:
+        start = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) >= start
 
 _SAVANT_TIMEOUT_CODES = {"502", "503", "524"}
 
@@ -35,7 +92,7 @@ def _is_transient_savant_error(e: Exception) -> bool:
 def _day_cache_path(kind: str, player_id: int) -> str:
     """Per-player, per-day cache path. Zone/recent inputs are stable within a day,
     so this makes repeated --props runs on the same slate near-instant."""
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = slate_date()
     return f"data/stats/{kind}_{player_id}_{date_str}.json"
 
 
@@ -53,12 +110,27 @@ def _read_day_cache(path: str, int_keys: bool = False) -> dict | None:
 
 def _write_day_cache(path: str, data: dict) -> None:
     """Atomic write so a concurrent reader never sees a half-written file.
-    Only call after a SUCCESSFUL fetch — never cache a transient failure."""
+    Only call after a SUCCESSFUL fetch — never cache a transient failure.
+
+    The temp name must be unique per *call*, not per process: these run in a
+    thread pool, so a pid-based name collides whenever two threads write the
+    same cache path (e.g. a batter appearing in both games of a doubleheader).
+    The first os.replace consumes the shared temp file and the second fails
+    with ENOENT, losing that batter's data."""
     os.makedirs("data/stats", exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        # A cache-write problem must never discard data we already fetched — warn,
+        # clean up the stray temp file, and let the caller return its result.
+        print(f"[stats_fetcher] cache write skipped ({path}): {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _savant_csv_get(url: str, params: dict) -> str | None:
@@ -83,7 +155,7 @@ def _savant_csv_get(url: str, params: dict) -> str | None:
 
 
 def fetch_stats() -> dict:
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = slate_date()
     year = date_str[:4]
 
     probable = _fetch_probable_pitchers(date_str)
@@ -415,7 +487,7 @@ def fetch_batter_statcast_season(year: str) -> dict:
     Cached to disk daily so repeated --props runs don't re-download 575 rows.
     Returns dict keyed by player_id (str).
     """
-    date_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str  = slate_date()
     cache_path = f"data/stats/batter_season_{date_str}.json"
 
     if os.path.exists(cache_path):

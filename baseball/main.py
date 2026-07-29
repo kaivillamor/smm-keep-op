@@ -92,6 +92,119 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
                         profit_floor=HIT_PROFIT_FLOOR, max_stake=HIT_MAX_STAKE)
 
 
+def _collect_predictions() -> None:
+    """Research-only run: score every batter on the slate and record the predictions.
+
+    Deliberately does NOT call any log_* function from backtest.py — no legs, no
+    parlays, no stakes. Simulated results stay in research.db and can never appear
+    in the P&L.
+
+    Run it EARLY in the day: the pipeline only scores games that haven't started,
+    so a late run captures just the remaining slate (~60 batters) instead of the
+    full one (~180). Book odds are recorded for the surfaced legs only, since that
+    is where the pipeline attaches them; the calibration question needs just
+    model_prob and outcome, both of which are captured for every batter.
+    """
+    from output.research import log_predictions, report
+    print("\n[main] Research collection — no bets logged, bets.db untouched.")
+    stats   = fetch_stats()
+    lineups = fetch_lineups()
+
+    all_candidates: list[dict] = []
+    analyze_hit_props(lineups, stats, all_candidates_out=all_candidates)
+    log_predictions(all_candidates)
+    report()
+
+
+def _already_collected(slate: str) -> set[str]:
+    """game_pks already recorded for this slate — makes the watcher resumable."""
+    from output.research import _connect
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT DISTINCT game_pk FROM predictions WHERE date=?", (slate,)
+    ).fetchall()
+    conn.close()
+    return {str(r["game_pk"]) for r in rows}
+
+
+def _watch_lineups(interval_min: int = 10, max_hours: float = 14.0) -> None:
+    """Poll for lineup confirmations and collect each game the moment it's ready.
+
+    Lineups post in waves 1–3h before first pitch, so a single daily run always
+    misses part of the slate. This watches instead: every cycle it scores any game
+    that is newly confirmed and hasn't started, then sleeps. Already-collected games
+    are skipped (state lives in research.db, so restarting resumes cleanly), and it
+    exits once every game is either collected or underway.
+
+    Research only — logs predictions, never bets.
+    """
+    import time
+    from output.research import log_predictions
+    from pipeline.stats_fetcher import game_has_started, slate_date
+    from pipeline.hit_pipeline import _match_probable
+
+    slate     = slate_date()
+    collected = _already_collected(slate)
+    started   = time.time()
+    print(f"\n[watch] slate {slate} | polling every {interval_min} min | Ctrl-C to stop")
+    if collected:
+        print(f"[watch] resuming — {len(collected)} game(s) already collected")
+
+    stats = fetch_stats()
+    try:
+        while True:
+            if slate_date() != slate:
+                print("[watch] slate rolled over to a new day — stopping.")
+                break
+            if time.time() - started > max_hours * 3600:
+                print(f"[watch] hit the {max_hours}h limit — stopping.")
+                break
+
+            lineups = fetch_lineups()
+            ready = {
+                pk: v for pk, v in lineups.items()
+                if v.get("confirmed")
+                and not game_has_started(v.get("commence_time"))
+                and str(pk) not in collected
+            }
+
+            if ready:
+                names = ", ".join(f"{v.get('away_team')} @ {v.get('home_team')}"
+                                  for v in list(ready.values())[:3])
+                more  = f" (+{len(ready) - 3} more)" if len(ready) > 3 else ""
+                print(f"[watch] {len(ready)} newly confirmed: {names}{more}")
+                # A game whose probable pitcher appeared after startup needs fresh stats.
+                # Test for None, not falsiness — an empty-but-present entry is a real
+                # match, and treating it as missing triggers a needless 30+ call refetch.
+                if any(_match_probable(pk, stats.get("probable_pitchers", {})) is None
+                       for pk in ready):
+                    print("[watch] refreshing probable pitchers...")
+                    stats = fetch_stats()
+                bucket: list[dict] = []
+                analyze_hit_props(ready, stats, all_candidates_out=bucket)
+                if bucket:
+                    log_predictions(bucket)
+                collected |= {str(pk) for pk in ready}
+
+            waiting = [
+                v for pk, v in lineups.items()
+                if not game_has_started(v.get("commence_time")) and str(pk) not in collected
+            ]
+            if not waiting:
+                print("[watch] every game collected or underway — done for today.")
+                break
+
+            unconfirmed = sum(1 for v in waiting if not v.get("confirmed"))
+            print(f"[watch] {len(waiting)} game(s) still upcoming "
+                  f"({unconfirmed} awaiting lineups) — next check in {interval_min} min")
+            time.sleep(interval_min * 60)
+    except KeyboardInterrupt:
+        print("\n[watch] stopped by user.")
+
+    print(f"[watch] collected {len(collected)} game(s) for {slate}. "
+          f"Run 'python main.py --collect-grade' tomorrow morning.")
+
+
 def _print_usage() -> None:
     usage = check_usage()
     if not usage:
@@ -246,7 +359,9 @@ def _print_hit_parlay_split(pairs: list[list[dict]]) -> None:
     print(f"{'=' * width}")
 
     if not pairs:
-        print("  No pairs generated (no confirmed lineups?).")
+        # Don't guess at the cause — the pipeline prints the real reason above
+        # (unconfirmed lineups, games already started, or the probability gate).
+        print("  No pairs generated — see the [hit_pipeline] lines above for why.")
         print(f"{'=' * width}")
         return
 
@@ -286,7 +401,7 @@ def _print_hr_parlays(pairs: list[list[dict]]) -> None:
     print(f"{'=' * width}")
 
     if not pairs:
-        print("  No HR pairs generated (need 2+ candidates).")
+        print("  No HR pairs generated — see the [prop_pipeline] lines above for why.")
         print(f"{'=' * width}")
         return
 
@@ -387,6 +502,30 @@ if __name__ == "__main__":
              "e.g. --record-hit-placed 2026-07-06 1 +120 — payout then auto-computes on a win",
     )
     parser.add_argument(
+        "--collect",
+        action="store_true",
+        help="Research mode: score every batter and log predictions to the SEPARATE "
+             "research DB. Places/logs no bets and never touches bets.db or the P&L.",
+    )
+    parser.add_argument(
+        "--collect-grade",
+        action="store_true",
+        help="Grade pending research predictions against box scores (research DB only)",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Run --collect continuously: poll for lineup confirmations and collect each "
+             "game as it becomes ready, until the whole slate is collected or underway",
+    )
+    parser.add_argument(
+        "--watch-interval",
+        type=int,
+        default=10,
+        metavar="MIN",
+        help="Minutes between --watch polls (default 10)",
+    )
+    parser.add_argument(
         "--stake-calc",
         nargs="+",
         metavar="ODDS [TARGET_WIN]",
@@ -397,6 +536,14 @@ if __name__ == "__main__":
 
     if args.usage:
         _print_usage()
+    elif args.watch:
+        _watch_lineups(interval_min=args.watch_interval)
+    elif args.collect:
+        _collect_predictions()
+    elif args.collect_grade:
+        from output.research import grade_predictions, report
+        grade_predictions()
+        report()
     elif args.results:
         resolve_pending()
     elif args.record_hit_win:
