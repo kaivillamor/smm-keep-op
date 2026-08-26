@@ -1,5 +1,13 @@
-requests
-pandas
-python-dotenv
-openai
-streamlit
+# Pinned to keep `pip install -r` reproducible and to make dependency CVE scans
+# meaningful — an unpinned file resolves differently on every machine, so a clean
+# `pip-audit` today says nothing about what the next install will pull.
+# Re-scan after any bump:  pip-audit
+requests==2.34.2
+pandas==3.0.3
+python-dotenv==1.2.2
+anthropic==0.120.2
+
+# streamlit was listed but never imported anywhere in the codebase. It pulled in
+# gitpython, pillow, and starlette, which together accounted for every known CVE
+# in the environment (21 advisories). Removed 2026-08-26. If a dashboard gets built
+# later, re-add it pinned and re-run pip-audit.

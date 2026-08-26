@@ -25,7 +25,7 @@ local database so performance can be measured over time.
 - **Player-prop odds API** — hit/HR prop pricing
 - **MLB Stats API** & **Baseball Savant** — stats, lineups, Statcast
 - **OpenWeather** — ballpark conditions
-- **OpenAI** — optional qualitative leg review
+- **AnthropicAI** — optional qualitative leg review
 
 ## Setup
 

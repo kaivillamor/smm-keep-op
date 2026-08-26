@@ -126,6 +126,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     if "odds" not in cols:
         conn.execute("ALTER TABLE hit_parlays ADD COLUMN odds INTEGER DEFAULT NULL")
     # Migration: hit_legs gained book odds / implied / ev columns
+    #
+    # The two ALTER TABLE statements below interpolate `col`/`decl` into the SQL string.
+    # That is safe and unavoidable, not an oversight: both values come from the literal
+    # tuples on the `for` lines — never from user input, a file, or an API — and SQLite
+    # cannot bind a column name or type as a parameter (`?` placeholders work only for
+    # values, not identifiers). Every other statement in this module is parameterized.
     leg_cols = {r[1] for r in conn.execute("PRAGMA table_info(hit_legs)").fetchall()}
     for col, decl in (("book_odds", "INTEGER"), ("book_implied", "REAL"), ("ev", "REAL")):
         if col not in leg_cols:
