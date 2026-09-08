@@ -3,7 +3,6 @@ LEAGUE_H_PER_9 = 8.5     # hits allowed per 9 innings, league-average pitcher
 MIN_SPLIT_AB   = 30      # minimum AB before trusting a L/R split
 MIN_H2H_AB     = 10      # minimum career AB vs this pitcher before applying H2H blend
 MIN_RECENT_AB  = 10      # minimum AB in recent window before applying form adjustment
-MIN_VENUE_AB   = 20      # minimum career AB at this venue before applying venue blend
 
 # ── Signal weights ────────────────────────────────────────────────────────────
 # Batter BA blending (applied in order — each layer adjusts from the previous):
@@ -15,7 +14,6 @@ H2H_WEIGHT         = 0.40   # MAX weight on career avg vs this pitcher (see H2H_
 # so 10 AB earns ~9% of the max, 50 AB ~33%, 200 AB ~67%. It never reaches 40%.
 H2H_SHRINK_AB      = 100    # AB at which H2H earns half its maximum weight
 RECENT_WEIGHT      = 0.20   # last-14d hot/cold ratio multiplier on blended BA
-VENUE_WEIGHT       = 0.05   # career avg at this ballpark — very light, just a nudge
 TEAM_RECENT_WEIGHT = 0.10   # team-level hot/cold multiplier (collective lineup rhythm)
 
 # Pitcher quality blending:
@@ -64,7 +62,7 @@ def score_batter_hit_prob(
     park_factor: float = 1.0,
     h2h_stats: dict | None = None,
     recent_ba_stats: dict | None = None,
-    venue_stats: dict | None = None,
+    venue_stats: dict | None = None,   # accepted but IGNORED — see §4 below
     pitcher_recent: dict | None = None,
     team_recent: dict | None = None,
     is_day_game: bool = False,
@@ -106,11 +104,16 @@ def score_batter_hit_prob(
             hot_cold   = recent_avg / (season_ba or LEAGUE_AVG_BA)
             batter_ba *= 1 + (hot_cold - 1) * RECENT_WEIGHT
 
-    # ── 4. Venue blend (very light) ───────────────────────────────────────────
-    if venue_stats and venue_stats.get("ab", 0) >= MIN_VENUE_AB:
-        venue_avg = venue_stats.get("avg")
-        if venue_avg is not None:
-            batter_ba = batter_ba * (1 - VENUE_WEIGHT) + venue_avg * VENUE_WEIGHT
+    # ── 4. Venue blend REMOVED (2026-09-08) ───────────────────────────────────
+    # fetch_batter_venue_stats never returned park-specific data: the MLB Stats API
+    # silently ignores the `venueId` parameter on career stats, so it handed back the
+    # batter's full CAREER line for every ballpark. With MIN_VENUE_AB=20 against career
+    # AB in the thousands the gate always passed, so this layer was applying a hidden 5%
+    # shrink toward each batter's career average while contributing zero park signal.
+    # Not repaired, because park effects are already handled correctly and independently
+    # by park_factors.get_park_factor (Coors 1.37, SF 0.93) further down — a working
+    # venue blend would only double-count it. `venue_stats` is still accepted so the
+    # frozen versions/8leg_10 caller keeps working, but it is ignored.
 
     # ── 5. Team recent offense multiplier ────────────────────────────────────
     if team_recent and team_recent.get("avg") is not None:

@@ -803,9 +803,17 @@ def get_venue_id(home_team: str) -> int | None:
 
 def fetch_batter_venue_stats(batter_id: int, venue_id: int) -> dict:
     """
-    Career regular-season batting stats for a batter at a specific MLB ballpark.
-    Display-only — not weighted into hit probability.
-    Returns {ab, hits, avg}. Empty dict if no history at this venue.
+    DEPRECATED / BROKEN — do not use. Kept only so the frozen versions/8leg_10
+    snapshot still imports.
+
+    The MLB Stats API silently ignores `venueId` on career stats: this returns the
+    batter's FULL CAREER line, identical for every ballpark (verified 2026-09-08 —
+    venueId=3313, venueId=15, and no venueId all return ab=8635 for Freeman).
+
+    There is no cheap correct version: venue splits would require pulling per-batter
+    game logs and aggregating, and that is redundant anyway because park effects are
+    handled by park_factors.get_park_factor. The hit model's venue blend was removed
+    rather than repaired. Callers were removed from the live hit pipeline.
     """
     cache_path = _day_cache_path(f"venue_{venue_id}", batter_id)
     cached = _read_day_cache(cache_path)

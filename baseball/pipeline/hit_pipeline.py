@@ -2,8 +2,6 @@ from pipeline.stats_fetcher import (
     fetch_batter_splits,
     fetch_batter_vs_pitcher,
     fetch_batter_recent_ba,
-    fetch_batter_venue_stats,
-    get_venue_id,
     fetch_pitcher_recent_form,
     fetch_team_recent_hitting,
     get_team_id,
@@ -58,7 +56,6 @@ def analyze_hit_props(lineups: dict, stats: dict,
 
         home_team = lineup_entry.get("home_team", "")
         runs_factor, _ = get_park_factor(home_team)
-        venue_id = get_venue_id(home_team)
 
         commence = lineup_entry.get("commence_time", "")
         day_game = is_day_game(commence)
@@ -113,13 +110,11 @@ def analyze_hit_props(lineups: dict, stats: dict,
                 splits       = fetch_batter_splits(batter_id)
                 h2h_stats    = fetch_batter_vs_pitcher(batter_id, pitcher_id)
                 recent_stats = fetch_batter_recent_ba(batter_id)
-                venue_stats  = fetch_batter_venue_stats(batter_id, venue_id) if venue_id else {}
 
                 base_prob = score_batter_hit_prob(
                     splits, p_stats, pitcher_hand, lineup_pos, runs_factor,
                     h2h_stats=h2h_stats,
                     recent_ba_stats=recent_stats,
-                    venue_stats=venue_stats,
                     pitcher_recent=pitcher_recent,
                     team_recent=team_recent,
                     is_day_game=day_game,
@@ -148,8 +143,11 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     "h2h_avg":         h2h_stats.get("avg"),
                     "recent_ab":       recent_stats.get("ab", 0),
                     "recent_avg":      recent_stats.get("avg"),
-                    "venue_ab":          venue_stats.get("ab", 0),
-                    "venue_avg":         venue_stats.get("avg"),
+                    # Venue lookup removed 2026-09-08 — the API ignored venueId, so this
+                    # was the batter's career line, not a park split. Logged as NULL now;
+                    # park effects come from park_factors. Saves ~150 API calls per run.
+                    "venue_ab":          None,
+                    "venue_avg":         None,
                     "pitcher_recent_h9": pitcher_recent.get("h_per_9"),
                     "pitcher_days_rest": pitcher_recent.get("days_rest"),
                     "team_recent_avg":   team_recent.get("avg"),
