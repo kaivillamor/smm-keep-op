@@ -9,7 +9,13 @@
 # real-money record stays on the local machine.
 set -uo pipefail
 
+# nixpacks installs Python into /opt/venv but only exports PATH via /root/.profile,
+# which a non-login shell (`bash scripts/collect.sh`) never reads. Prepend it explicitly
+# so `python` resolves in the container. No-op locally, where the dir doesn't exist.
+[ -d /opt/venv/bin ] && export PATH="/opt/venv/bin:$PATH"
+
 cd "$(dirname "$0")/../baseball" || exit 1
+echo "python: $(command -v python || echo 'NOT FOUND')"
 echo "=== $(date -u +%FT%TZ) | collection run | RESEARCH_DB_PATH=${RESEARCH_DB_PATH:-<default>} ==="
 
 # Grade first (yesterday's pending), then collect today's newly-confirmed lineups.
