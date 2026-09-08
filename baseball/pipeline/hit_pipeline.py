@@ -128,9 +128,17 @@ def analyze_hit_props(lineups: dict, stats: dict,
                 owner_adj = apply_hit_owner_logic(batter_name, opponent_team, base_prob)
                 prob = round(min(max(base_prob + owner_adj, 0.0), 1.0), 4)
 
+                # The handedness split actually used as this matchup's BA base. Stored
+                # so a refit can use it: it is the model's single largest input, and it
+                # was silently empty for every batter until the statSplits sitCodes fix
+                # (2026-09-08), so rows logged before then have it NULL.
+                _split = splits.get("vs_rhp" if pitcher_hand == "R" else "vs_lhp", {})
+
                 candidates.append({
                     "batter_id":       batter_id,
                     "batter_name":     batter_name,
+                    "split_avg":       _split.get("avg"),
+                    "split_ab":        _split.get("ab", 0),
                     "team":            team,
                     "opponent_team":   opponent_team,
                     "lineup_pos":      lineup_pos,

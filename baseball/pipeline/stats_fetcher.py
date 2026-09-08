@@ -89,11 +89,35 @@ def _is_transient_savant_error(e: Exception) -> bool:
     return _is_savant_timeout(e)
 
 
+# Cache root. Env-overridable so a containerised run can point it at a mounted
+# volume — otherwise the cache lives on the container's ephemeral disk, is wiped
+# between scheduled runs, and every run re-fetches identical day-stable data.
+_CACHE_DIR = os.getenv("STATS_CACHE_DIR") or "data/stats"
+
+
 def _day_cache_path(kind: str, player_id: int) -> str:
-    """Per-player, per-day cache path. Zone/recent inputs are stable within a day,
-    so this makes repeated --props runs on the same slate near-instant."""
+    """Per-player, per-day cache path. Zone/recent/split inputs are stable within a
+    day, so this makes repeated runs on the same slate near-instant."""
     date_str = slate_date()
-    return f"data/stats/{kind}_{player_id}_{date_str}.json"
+    return f"{_CACHE_DIR}/{kind}_{player_id}_{date_str}.json"
+
+
+def _prune_old_caches(keep_days: int = 3) -> None:
+    """Delete day-cache files older than keep_days. The service writes ~600 small
+    files per slate; without this the volume grows for the whole season. Failures
+    are ignored — pruning is housekeeping and must never break a run."""
+    import time
+    cutoff = time.time() - keep_days * 86400
+    try:
+        for name in os.listdir(_CACHE_DIR):
+            fp = os.path.join(_CACHE_DIR, name)
+            try:
+                if os.path.isfile(fp) and os.path.getmtime(fp) < cutoff:
+                    os.remove(fp)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _read_day_cache(path: str, int_keys: bool = False) -> dict | None:
@@ -117,7 +141,7 @@ def _write_day_cache(path: str, data: dict) -> None:
     same cache path (e.g. a batter appearing in both games of a doubleheader).
     The first os.replace consumes the shared temp file and the second fails
     with ENOENT, losing that batter's data."""
-    os.makedirs("data/stats", exist_ok=True)
+    os.makedirs(_CACHE_DIR, exist_ok=True)
     tmp = f"{path}.{uuid.uuid4().hex}.tmp"
     try:
         with open(tmp, "w") as f:
@@ -155,6 +179,10 @@ def _savant_csv_get(url: str, params: dict) -> str | None:
 
 
 def fetch_stats() -> dict:
+    # Once per run: drop day-cache files from previous slates so an unattended
+    # service doesn't grow its volume for the whole season.
+    _prune_old_caches()
+
     date_str = slate_date()
     year = date_str[:4]
 
@@ -523,7 +551,7 @@ def fetch_batter_statcast_season(year: str) -> dict:
             "barrel_batted_rate": _safe_float(row.get("barrel_batted_rate")),
         }
 
-    os.makedirs("data/stats", exist_ok=True)
+    os.makedirs(_CACHE_DIR, exist_ok=True)
     with open(cache_path, "w") as f:
         json.dump(result, f)
 
@@ -779,6 +807,11 @@ def fetch_batter_venue_stats(batter_id: int, venue_id: int) -> dict:
     Display-only — not weighted into hit probability.
     Returns {ab, hits, avg}. Empty dict if no history at this venue.
     """
+    cache_path = _day_cache_path(f"venue_{venue_id}", batter_id)
+    cached = _read_day_cache(cache_path)
+    if cached is not None:
+        return cached
+
     url = f"{MLB_API}/people/{batter_id}/stats"
     params = {
         "stats":   "career",
@@ -790,12 +823,21 @@ def fetch_batter_venue_stats(batter_id: int, venue_id: int) -> dict:
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         stat = resp.json()["stats"][0]["splits"][0]["stat"]
-        return {
+        result = {
             "ab":   int(stat.get("atBats", 0)),
             "hits": int(stat.get("hits", 0)),
             "avg":  _safe_float(stat.get("avg")),
         }
-    except (IndexError, KeyError, requests.RequestException):
+        _write_day_cache(cache_path, result)
+        return result
+    except (IndexError, KeyError):
+        # Genuinely no such record (never faced him / no games in window). That is a
+        # real answer and worth caching — it is the common case for H2H.
+        _write_day_cache(cache_path, {})
+        return {}
+    except requests.RequestException:
+        # Transient. Return empty so the caller degrades, but do NOT cache it —
+        # caching a network blip would poison this player for the rest of the day.
         return {}
 
 
@@ -872,6 +914,11 @@ def fetch_batter_vs_pitcher(batter_id: int, pitcher_id: int) -> dict:
     Career regular-season stats for a batter against one specific pitcher.
     Returns {ab, hits, avg}. Empty dict if no history exists.
     """
+    cache_path = _day_cache_path(f"h2h_{pitcher_id}", batter_id)
+    cached = _read_day_cache(cache_path)
+    if cached is not None:
+        return cached
+
     url = f"{MLB_API}/people/{batter_id}/stats"
     params = {
         "stats": "vsPlayer",
@@ -883,12 +930,21 @@ def fetch_batter_vs_pitcher(batter_id: int, pitcher_id: int) -> dict:
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         stat = resp.json()["stats"][0]["splits"][0]["stat"]
-        return {
+        result = {
             "ab":   int(stat.get("atBats", 0)),
             "hits": int(stat.get("hits", 0)),
             "avg":  _safe_float(stat.get("avg")),
         }
-    except (IndexError, KeyError, requests.RequestException):
+        _write_day_cache(cache_path, result)
+        return result
+    except (IndexError, KeyError):
+        # Genuinely no such record (never faced him / no games in window). That is a
+        # real answer and worth caching — it is the common case for H2H.
+        _write_day_cache(cache_path, {})
+        return {}
+    except requests.RequestException:
+        # Transient. Return empty so the caller degrades, but do NOT cache it —
+        # caching a network blip would poison this player for the rest of the day.
         return {}
 
 
@@ -897,6 +953,11 @@ def fetch_batter_recent_ba(batter_id: int, days: int = 14) -> dict:
     Batting average for a batter over the last N days from the MLB Stats API.
     Returns {ab, hits, avg}. Empty dict if no games in the window.
     """
+    cache_path = _day_cache_path(f"recentba{days}d", batter_id)
+    cached = _read_day_cache(cache_path)
+    if cached is not None:
+        return cached
+
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=days)
 
@@ -913,12 +974,21 @@ def fetch_batter_recent_ba(batter_id: int, days: int = 14) -> dict:
         resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
         stat = resp.json()["stats"][0]["splits"][0]["stat"]
-        return {
+        result = {
             "ab":   int(stat.get("atBats", 0)),
             "hits": int(stat.get("hits", 0)),
             "avg":  _safe_float(stat.get("avg")),
         }
-    except (IndexError, KeyError, requests.RequestException):
+        _write_day_cache(cache_path, result)
+        return result
+    except (IndexError, KeyError):
+        # Genuinely no such record (never faced him / no games in window). That is a
+        # real answer and worth caching — it is the common case for H2H.
+        _write_day_cache(cache_path, {})
+        return {}
+    except requests.RequestException:
+        # Transient. Return empty so the caller degrades, but do NOT cache it —
+        # caching a network blip would poison this player for the rest of the day.
         return {}
 
 
@@ -926,12 +996,23 @@ def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
     if year is None:
         year = str(datetime.now(timezone.utc).year)
 
+    cache_path = _day_cache_path("splits", batter_id)
+    cached = _read_day_cache(cache_path)
+    if cached is not None:
+        return cached
+
     url = f"{MLB_API}/people/{batter_id}/stats"
     params = {
         "stats": "statSplits",
         "group": "hitting",
         "season": year,
         "gameType": "R",
+        # REQUIRED. `stats=statSplits` without sitCodes returns a stats entry with an
+        # EMPTY splits list — no error, no warning, just nothing. Omitting it made this
+        # function return {} for every batter, so hit_model fell through to
+        # LEAGUE_AVG_BA (.248) as the base for all of them and the batter's own
+        # handedness split — the single largest input — was a constant.
+        "sitCodes": "vr,vl",
     }
     resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
@@ -940,25 +1021,31 @@ def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
     splits = {"vs_rhp": {}, "vs_lhp": {}}
     for stat_group in data.get("stats", []):
         for split in stat_group.get("splits", []):
-            split_name = split.get("split", {}).get("description", "")
+            # Match on the stable code, not the description. The old code compared
+            # against "vs. RHP"/"vs. LHP"; the API actually returns "vs Right"/"vs Left",
+            # so even with sitCodes set every comparison would still have failed.
+            split_code = split.get("split", {}).get("code", "")
             stat = split.get("stat", {})
-            if split_name == "vs. RHP":
+            if split_code == "vr":
                 splits["vs_rhp"] = {
-                    "avg": float(stat.get("avg", 0)),
-                    "obp": float(stat.get("obp", 0)),
-                    "slg": float(stat.get("slg", 0)),
-                    "ops": float(stat.get("ops", 0)),
-                    "ab": int(stat.get("atBats", 0)),
+                    "avg": _safe_float(stat.get("avg")),
+                    "obp": _safe_float(stat.get("obp")),
+                    "slg": _safe_float(stat.get("slg")),
+                    "ops": _safe_float(stat.get("ops")),
+                    "ab": int(stat.get("atBats", 0) or 0),
                 }
-            elif split_name == "vs. LHP":
+            elif split_code == "vl":
                 splits["vs_lhp"] = {
-                    "avg": float(stat.get("avg", 0)),
-                    "obp": float(stat.get("obp", 0)),
-                    "slg": float(stat.get("slg", 0)),
-                    "ops": float(stat.get("ops", 0)),
-                    "ab": int(stat.get("atBats", 0)),
+                    "avg": _safe_float(stat.get("avg")),
+                    "obp": _safe_float(stat.get("obp")),
+                    "slg": _safe_float(stat.get("slg")),
+                    "ops": _safe_float(stat.get("ops")),
+                    "ab": int(stat.get("atBats", 0) or 0),
                 }
 
+    # Unlike the fetches above this one has no try/except — raise_for_status means
+    # any failure propagates, so getting here is proof of success.
+    _write_day_cache(cache_path, splits)
     return splits
 
 
@@ -971,7 +1058,7 @@ def _safe_float(val) -> float | None:
 
 
 def _save(data: dict, date_str: str) -> None:
-    os.makedirs("data/stats", exist_ok=True)
+    os.makedirs(_CACHE_DIR, exist_ok=True)
     path = f"data/stats/{date_str}.json"
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
