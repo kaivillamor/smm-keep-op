@@ -5,6 +5,12 @@ __pycache__/
 *.pyc
 *.pyo
 *.db
+# Backups too: `*.db` did NOT match bets.db.bak-<timestamp>, so three copies of the
+# real betting record were committed to a PUBLIC repo (found 2026-09-08).
+*.db.bak*
+*.db-journal
+*.sqlite
+*.sqlite3
 baseball/data/odds/*
 baseball/data/stats/*
 baseball/data/lineups/*

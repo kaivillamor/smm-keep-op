@@ -1,0 +1,8 @@
+venv/
+.git/
+__pycache__/
+*.pyc
+*.db
+.env
+PROJECT.md
+baseball/data/

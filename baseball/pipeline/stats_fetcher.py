@@ -516,7 +516,9 @@ def fetch_batter_statcast_season(year: str) -> dict:
     Returns dict keyed by player_id (str).
     """
     date_str  = slate_date()
-    cache_path = f"data/stats/batter_season_{date_str}.json"
+    # Follows _CACHE_DIR: this is a day cache and should persist on the mounted
+    # volume, unlike the slate snapshot in _save().
+    cache_path = f"{_CACHE_DIR}/batter_season_{date_str}.json"
 
     if os.path.exists(cache_path):
         with open(cache_path) as f:
@@ -1066,8 +1068,12 @@ def _safe_float(val) -> float | None:
 
 
 def _save(data: dict, date_str: str) -> None:
-    os.makedirs(_CACHE_DIR, exist_ok=True)
+    # This is the whole-slate day snapshot, NOT the per-player cache, so it does not
+    # follow _CACHE_DIR — create the directory it actually writes to. (A global
+    # makedirs("data/stats") -> makedirs(_CACHE_DIR) edit briefly pointed these at two
+    # different places, which crashes as soon as STATS_CACHE_DIR is set elsewhere.)
     path = f"data/stats/{date_str}.json"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
     print(f"[stats_fetcher] Saved → {path}")
