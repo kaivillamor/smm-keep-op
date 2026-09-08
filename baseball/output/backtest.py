@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from datetime import date, datetime, timezone
 
@@ -7,7 +8,10 @@ from datetime import date, datetime, timezone
 # file as a script (only 'output/' on sys.path), where 'parlay' isn't importable;
 # summary never logs, so the import only needs to exist when main.py does the logging.
 
-DB_PATH = "data/history/bets.db"
+# Env-overridable for containerised runs (see RESEARCH_DB in research.py). Note the
+# collection service deliberately does NOT set this — it never writes bets.db, so the
+# real-money record stays on the local machine only.
+DB_PATH = os.getenv("BETS_DB_PATH") or "data/history/bets.db"
 
 
 # ---------------------------------------------------------------------------
@@ -15,6 +19,10 @@ DB_PATH = "data/history/bets.db"
 # ---------------------------------------------------------------------------
 
 def _connect(db_path: str = DB_PATH) -> sqlite3.Connection:
+    # A mounted volume starts empty, so the parent dir may not exist yet.
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)

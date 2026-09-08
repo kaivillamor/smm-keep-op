@@ -15,13 +15,24 @@ model probability actually produce a higher hit rate — in days instead of mont
     python output/research.py report     # calibration + ranking-signal report
     python output/research.py grade      # grade pending predictions
 """
+import os
 import sqlite3
 from datetime import date, datetime, timezone
 
-RESEARCH_DB = "data/history/research.db"
+# Path is env-overridable so the same code runs locally (relative path, repo-local file)
+# and on a container with a mounted volume (absolute path). Default preserves the
+# existing local behaviour exactly — nothing changes unless RESEARCH_DB_PATH is set.
+# `or` (not getenv's default arg) on purpose: a var present-but-empty — which is what
+# copying .env.example verbatim produces — yields "", and getenv would hand that back
+# as a real value. An empty path is never legitimate, so falling through is correct.
+RESEARCH_DB = os.getenv("RESEARCH_DB_PATH") or "data/history/research.db"
 
 
 def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
+    # A mounted volume starts empty, so the parent dir may not exist yet.
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -46,6 +57,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             venue_avg     REAL,
             team_recent_avg    REAL,
             pitcher_recent_h9  REAL,
+            pitcher_days_rest  INTEGER,   -- days since the pitcher's last start
             is_day_game   INTEGER,
             outcome       TEXT DEFAULT NULL,   -- 'win' | 'loss' | 'void'
             actual_hits   INTEGER DEFAULT NULL,
@@ -53,6 +65,15 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             UNIQUE(date, game_pk, batter_id)
         );
     """)
+    # Migration: pitcher_days_rest was computed by hit_pipeline from the start but never
+    # persisted here, so rows logged before 2026-09-08 have it NULL and always will. The
+    # days-rest effect is believed to be pitcher-specific rather than league-wide (which
+    # is why hit_model applies no blanket adjustment); this column is what will eventually
+    # let the data settle that. Column name/type are module literals — see the note in
+    # backtest.py::_ensure_schema on why identifier interpolation is unavoidable here.
+    pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    if "pitcher_days_rest" not in pred_cols:
+        conn.execute("ALTER TABLE predictions ADD COLUMN pitcher_days_rest INTEGER DEFAULT NULL")
     conn.commit()
     return conn
 
@@ -71,8 +92,9 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
             INSERT INTO predictions
               (date, game_pk, batter_id, batter_name, team, lineup_pos, pitcher_name,
                model_prob, book_odds, book_implied, h2h_ab, h2h_avg, recent_ab, recent_avg,
-               venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9, is_day_game, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9, pitcher_days_rest,
+               is_day_game, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(date, game_pk, batter_id) DO UPDATE SET
                model_prob=excluded.model_prob,
                book_odds=COALESCE(excluded.book_odds, predictions.book_odds),
@@ -83,7 +105,8 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
             c.get("hit_probability"), c.get("book_odds"), c.get("book_implied"),
             c.get("h2h_ab"), c.get("h2h_avg"), c.get("recent_ab"), c.get("recent_avg"),
             c.get("venue_ab"), c.get("venue_avg"), c.get("team_recent_avg"),
-            c.get("pitcher_recent_h9"), int(bool(c.get("is_day_game"))), now,
+            c.get("pitcher_recent_h9"), c.get("pitcher_days_rest"),
+            int(bool(c.get("is_day_game"))), now,
         ))
         n += 1
     conn.commit()
