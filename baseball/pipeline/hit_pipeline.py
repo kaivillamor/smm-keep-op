@@ -10,6 +10,7 @@ from pipeline.stats_fetcher import (
 )
 from model.factors.hit_model import (
     score_batter_hit_prob,
+    calibrated_hit_prob,
     HIT_PARLAY_LEGS,
     MAX_LINEUP_DEPTH,
     MIN_HIT_PROB,
@@ -155,6 +156,9 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     "base_prob":       base_prob,
                     "owner_adj":       owner_adj,
                     "hit_probability": prob,
+                    # Raw value above is what research.db logs. The calibrated one below
+                    # is what the betting gate uses — see hit_model.calibrated_hit_prob.
+                    "calibrated_prob": calibrated_hit_prob(prob),
                     "game_pk":         game_pk,
                 })
 
@@ -200,8 +204,12 @@ def _attach_hit_odds(legs: list[dict]) -> None:
         leg["book_odds"]    = entry["odds"]
         leg["book_implied"] = entry["implied"]
         leg["book"]         = entry["book"]
-        # EV as a probability edge: how much higher our estimate is than the book's
-        leg["ev"] = (round(leg["hit_probability"] - entry["implied"], 4)
+        # EV as a probability edge: how much higher our estimate is than the book's.
+        # Uses the CALIBRATED probability, not the raw one — EV is a betting decision and
+        # the raw number is known to overstate by ~5x at the top end. Computing edge from
+        # the inflated value manufactured positive EV that was never there.
+        est = leg.get("calibrated_prob", leg["hit_probability"])
+        leg["ev"] = (round(est - entry["implied"], 4)
                      if entry["implied"] is not None else None)
     print(f"[hit_pipeline] matched book odds for {matched}/{len(legs)} legs")
 
@@ -212,7 +220,7 @@ def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
     legs = []
     below_gate = 0
     for c in candidates:
-        if c["hit_probability"] < MIN_HIT_PROB:
+        if c.get("calibrated_prob", c["hit_probability"]) < MIN_HIT_PROB:
             below_gate += 1
             continue
         if c["team"] in seen_teams:

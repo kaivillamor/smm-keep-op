@@ -31,7 +31,35 @@ DAY_GAME_BA_PENALTY = 0.010  # flat BA reduction — batters hit slightly worse 
 MAX_ADJUSTED_BA     = 0.400
 
 HIT_PARLAY_LEGS   = 4     # legs surfaced in the daily hit parlay (2 pairs × 2 legs)
-MIN_HIT_PROB      = 0.68  # legs below this P(1+ hit) can't cover typical parlay pricing
+MIN_HIT_PROB      = 0.73  # legs below this can't cover typical parlay pricing (see below)
+
+# ── Betting-gate calibration (added 2026-09-09) ──────────────────────────────
+# Measured on the first 240 post-splits-fix graded predictions, the model's raw output
+# regressed against reality with a slope of ~0.17: only ~17% of each predicted point
+# translated into a real point (1.0 would be perfect). The two top buckets missed by
+# -11.9 and -27.6 pts, both statistically real (z = -2.0 and -3.7), so the model's most
+# confident predictions were its least accurate.
+#
+# The raw number is still what gets LOGGED to research.db — compressing that would split
+# the calibration series into two model versions and make the sample unusable, which is
+# already the problem with the pre-fix 986. So the shrink applies to the BETTING GATE
+# only, via calibrated_hit_prob().
+#
+# Consequence, stated plainly: almost nothing clears MIN_HIT_PROB now. That is the
+# correct behaviour — at a -270 median each leg needs 73.0% and the best empirical cut
+# reached 66.1%. Surfacing nothing is the honest answer, not a bug.
+#
+# PROVISIONAL: fitted on 240 rows / 5 buckets. Refit once a few hundred more land.
+CALIBRATION_SLOPE = 0.17   # how much of a predicted point survives contact with reality
+CALIBRATION_BASE  = 0.61   # observed base rate the shrink pulls toward
+
+
+def calibrated_hit_prob(raw_prob: float) -> float:
+    """Shrink a raw model probability toward the observed base rate.
+
+    Used ONLY for the betting gate and EV. Research logging keeps the raw value.
+    """
+    return round(CALIBRATION_BASE + CALIBRATION_SLOPE * (raw_prob - CALIBRATION_BASE), 4)
 MAX_LINEUP_DEPTH  = 6     # only score batters in positions 1–6 (most plate appearances)
 
 # "Double-up, else $25 floor" staking (see parlay_builder.recommended_stake):
