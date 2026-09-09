@@ -1,24 +1,30 @@
-# Explicit Dockerfile instead of nixpacks. Three reasons:
+# Multi-stage: node builds the React front-end, python serves it alongside the API.
 #
-#  1. Secrets. Nixpacks injects every service variable as Docker ARG/ENV at build time,
-#     baking PROP_ODDS_API_KEY into the image layers (the SecretsUsedInArgOrEnv warning).
-#     Nothing here declares them, so they exist only in the running container, where
-#     Railway injects them at start. Encryption is NOT an alternative fix: anything the
-#     app can decrypt unaided needs its key in the image too.
-#  2. PATH. Nixpacks' generated Dockerfile references $NIXPACKS_PATH before defining it,
-#     which is why `python` did not resolve in a non-login shell. A normal python base
-#     image has it on PATH already.
-#  3. Reproducibility. The base image is pinned; builds skip the nix layer entirely.
-FROM python:3.12-slim
+# Explicit Dockerfile rather than nixpacks because nixpacks injects every service
+# variable as Docker ARG/ENV (baking PROP_ODDS_API_KEY into image layers) and its
+# generated template references $NIXPACKS_PATH before defining it, which broke PATH.
 
+# ---- stage 1: build the front-end -------------------------------------------
+FROM node:20-slim AS frontend
+WORKDIR /fe
+COPY web/frontend/package.json web/frontend/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+COPY web/frontend/ ./
+RUN npm run build
+
+# ---- stage 2: runtime -------------------------------------------------------
+FROM python:3.12-slim
 WORKDIR /app
 
-# Dependencies first: this layer is cached and only rebuilds when requirements change,
-# so an ordinary code push doesn't reinstall pandas.
+# Dependencies first so this layer caches and an ordinary code push doesn't
+# reinstall pandas.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+COPY --from=frontend /fe/dist ./web/frontend/dist
 
-# Cron service: runs once and exits. Railway's restart policy must stay NEVER.
-CMD ["bash", "scripts/collect.sh"]
+# Always-on service: serves the dashboard AND runs collection on an internal schedule.
+# A Railway volume attaches to only one service, so these cannot be split apart.
+# Restart policy should be ON_FAILURE (not NEVER) — this is meant to stay up.
+CMD ["sh", "-c", "uvicorn web.app:app --host 0.0.0.0 --port ${PORT:-8000}"]

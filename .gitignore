@@ -19,3 +19,7 @@ baseball/data/weather/*
 
 # macOS
 .DS_Store
+
+# React front-end build artifacts
+web/frontend/node_modules/
+web/frontend/dist/

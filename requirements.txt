@@ -7,6 +7,10 @@ pandas==3.0.3
 python-dotenv==1.2.2
 anthropic==0.120.2
 
+# Dashboard service (web/app.py) — always-on, also hosts the collection scheduler.
+fastapi==0.141.1
+uvicorn==0.49.0
+
 # streamlit was listed but never imported anywhere in the codebase. It pulled in
 # gitpython, pillow, and starlette, which together accounted for every known CVE
 # in the environment (21 advisories). Removed 2026-08-26. If a dashboard gets built

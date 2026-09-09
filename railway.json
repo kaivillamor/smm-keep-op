@@ -5,8 +5,8 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "bash scripts/collect.sh",
-    "restartPolicyType": "NEVER",
-    "cronSchedule": "0 14,16,18,20,22,0 * * *"
+    "startCommand": "uvicorn web.app:app --host 0.0.0.0 --port ${PORT:-8000}",
+    "restartPolicyType": "ON_FAILURE",
+    "healthcheckPath": "/healthz"
   }
 }
