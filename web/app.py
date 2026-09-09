@@ -10,6 +10,8 @@ Shows research/calibration data ONLY. bets.db (real money) never leaves the loca
 machine and is not deployed, so there is nothing here that can mix real and simulated.
 """
 import os
+import hashlib
+import hmac
 import secrets
 import sqlite3
 import threading
@@ -31,8 +33,20 @@ import sys
 BASEBALL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "baseball"))
 sys.path.insert(0, BASEBALL_DIR)
 
+# uvicorn imports this as `web.app` with the REPO ROOT on sys.path, not web/ — so a bare
+# `from users import ...` below would not resolve. Add our own directory explicitly so
+# the import works however the app is launched (uvicorn, pytest, python -m).
+WEB_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, WEB_DIR)
+
 @asynccontextmanager
 async def lifespan(_: "FastAPI"):
+    try:
+        seeded = bootstrap_from_env()
+        if seeded:
+            print(f"[users] seeded {seeded} account(s) from environment", flush=True)
+    except Exception as e:
+        print(f"[users] bootstrap failed: {type(e).__name__}: {e}", flush=True)
     threading.Thread(target=_scheduler, daemon=True).start()
     print("[scheduler] started", flush=True)
     yield
@@ -41,33 +55,56 @@ async def lifespan(_: "FastAPI"):
 app = FastAPI(title="MLB Model Research", lifespan=lifespan)
 security = HTTPBasic()
 
-DASH_USER = os.getenv("DASH_USER") or "kai"
-DASH_PASS = os.getenv("DASH_PASS")          # unset => dashboard refuses all requests
+# Users live in a SQLite store on the volume (web/users.py), NOT in env vars — env
+# configuration stops scaling the moment more than a couple of accounts exist, and
+# passwords in variables are plaintext by construction.
+#
+# DASH_USERS / DASH_PASS still work, but only as a first-run SEED: bootstrap_from_env()
+# inserts them if absent and never overwrites, so a fresh deploy is not locked out and a
+# password later changed via the CLI is not silently reverted.
+from users import authenticate, bootstrap_from_env   # noqa: E402  (needs sys.path above)
+
+# scrypt costs ~100ms on purpose. Basic auth re-sends credentials on EVERY request, so
+# without a cache each page load would pay it several times over. Successful results are
+# cached briefly under an HMAC of the credentials keyed by a per-process random secret —
+# so the cache never holds a password, and its keys are useless outside this process.
+_AUTH_TTL = 60.0
+_auth_cache: dict[str, tuple[float, tuple[str, str]]] = {}
+_CACHE_SECRET = secrets.token_bytes(32)
 
 
-def auth(creds: HTTPBasicCredentials = Depends(security)) -> str:
-    """Constant-time comparison. A plain == leaks the password through timing."""
-    if not DASH_PASS:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
-                            "DASH_PASS not configured — dashboard disabled")
-    ok_u = secrets.compare_digest(creds.username, DASH_USER)
-    ok_p = secrets.compare_digest(creds.password, DASH_PASS)
-    if not (ok_u and ok_p):
+def _cache_key(username: str, password: str) -> str:
+    return hmac.new(_CACHE_SECRET, f"{username}\x00{password}".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def auth(creds: HTTPBasicCredentials = Depends(security)) -> tuple[str, str]:
+    """Returns (username, role)."""
+    key = _cache_key(creds.username, creds.password)
+    now = time.time()
+    cached = _auth_cache.get(key)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    user = authenticate(creds.username, creds.password)
+    if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bad credentials",
                             {"WWW-Authenticate": "Basic"})
-    return creds.username
+
+    if len(_auth_cache) > 256:            # bounded; this is a cache, not a session store
+        _auth_cache.clear()
+    result = (user["username"], user["role"])
+    _auth_cache[key] = (now + _AUTH_TTL, result)
+    return result
 
 
-def _research_db_path() -> str:
-    """Absolute path to research.db.
-
-    RESEARCH_DB is absolute on Railway (/data/research.db) but relative by default
-    (data/history/research.db). A relative path resolves against the process CWD, which
-    for uvicorn is the repo root, not baseball/ — so it silently pointed at a file that
-    does not exist. Anchor relative paths to BASEBALL_DIR instead.
+def require_admin(who: tuple[str, str] = Depends(auth)) -> tuple[str, str]:
+    """Admin-only gate. Applied to the DATA endpoint, not just the page — hiding a route
+    in the UI while the API still answers is not access control.
     """
-    from output.research import RESEARCH_DB
-    return RESEARCH_DB if os.path.isabs(RESEARCH_DB) else os.path.join(BASEBALL_DIR, RESEARCH_DB)
+    if who[1] != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+    return who
 
 
 def _db():
@@ -124,8 +161,47 @@ def healthz():
     return {"ok": True, "utc": datetime.now(timezone.utc).isoformat()}
 
 
+@app.get("/api/summary")
+def api_summary(who: tuple = Depends(auth)):
+    """Headline numbers any signed-in user may see. Deliberately excludes buckets,
+    ranking gap and slope — those are admin-only via /api/report."""
+    s = stats()
+    return {"logged": s.get("logged", 0), "graded": s.get("graded", 0),
+            "actual": s.get("actual"), "predicted": s.get("predicted"),
+            "role": who[1], "user": who[0], "error": s.get("error")}
+
+
+@app.get("/api/hits")
+def api_hits(limit: int = 60, _: tuple = Depends(auth)):
+    """Recent winning legs for the ambient feed.
+
+    research.db only — these are model predictions that hit, NOT real parlays. Winning
+    parlays live in bets.db, which is deliberately never deployed, so the feed cannot
+    accidentally present simulated results as real money.
+    """
+    try:
+        c = _db()
+        rows = [dict(r) for r in c.execute(
+            "SELECT batter_name, team, actual_hits, model_prob, date "
+            "FROM predictions WHERE outcome='win' AND batter_name IS NOT NULL "
+            "ORDER BY date DESC, model_prob DESC LIMIT ?", (min(limit, 200),))]
+        c.close()
+    except Exception as e:
+        return {"error": str(e), "hits": []}
+    return {"error": None, "hits": [
+        {"name": r["batter_name"], "team": r["team"], "hits": r["actual_hits"],
+         "prob": r["model_prob"], "date": r["date"]} for r in rows]}
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin(_: tuple = Depends(require_admin)):
+    """Same SPA — the front-end branches on pathname. Kept as its own route so the
+    server serves index.html here instead of 404ing on a client-side route."""
+    return index(_)
+
+
 @app.get("/api/report")
-def api_report(_: str = Depends(auth)):
+def api_report(_: tuple = Depends(require_admin)):
     return stats()
 
 
@@ -140,7 +216,7 @@ if os.path.isdir(os.path.join(FRONTEND_DIST, "assets")):
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(_: str = Depends(auth)):
+def index(_: tuple = Depends(auth)):
     """Serves the built React app. Auth here is what makes the browser prompt once,
     after which it reuses the credentials for the /api/report fetch."""
     idx = os.path.join(FRONTEND_DIST, "index.html")

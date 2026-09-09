@@ -34,3 +34,51 @@ th { font-weight: 600; font-size: .8rem; text-transform: uppercase;
   .note { background: #2b2410; border-left-color: #9a7d00; color: #e8dca8; }
   .good { color: #4ac26b; } .warn { color: #d4a72c; } .bad { color: #ff7b72; }
 }
+
+/* ── ambient falling-hit feed ────────────────────────────────────────────── */
+.feed {
+  position: relative;
+  height: 42vh;
+  min-height: 16rem;
+  overflow: hidden;
+  margin: 1.5rem 0 2rem;
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(128,128,128,.06), transparent 70%);
+}
+.feed-empty { display: grid; place-items: center; height: 8rem; min-height: 0; }
+
+.drop {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
+  font-size: 1.05rem;
+  will-change: transform, opacity;
+  animation-name: fall;
+  animation-timing-function: cubic-bezier(.33, .1, .5, 1);
+  animation-fill-mode: forwards;
+  pointer-events: none;
+}
+.drop b  { font-weight: 600; }
+.drop em { font-style: normal; color: #1a7f37; font-variant-numeric: tabular-nums; }
+
+@keyframes fall {
+  0%   { transform: translate(0, -12%)   scale(1); opacity: 0; }
+  12%  { opacity: 1; }
+  75%  { opacity: 1; }
+  100% { transform: translate(var(--drift), 46vh) scale(1); opacity: 0; }
+}
+
+/* Respect users who have asked for less motion: show the text, hold it still. */
+@media (prefers-reduced-motion: reduce) {
+  .drop { animation: none; opacity: .9; position: static; display: block; margin: .3rem 0; }
+  .feed { height: auto; min-height: 0; overflow: visible; }
+}
+
+@media (prefers-color-scheme: dark) {
+  .drop em { color: #4ac26b; }
+}
+
+.bar { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.bar h1 { margin-bottom: 0; }
+.bar a { font-size: .85rem; color: inherit; opacity: .65; text-decoration: none; }
+.bar a:hover { opacity: 1; text-decoration: underline; }

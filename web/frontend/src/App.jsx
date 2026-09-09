@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import FallingHits from './FallingHits.jsx'
 
 const pct = (v) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
 const pts = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)} pts`)
@@ -63,37 +64,86 @@ function Days({ days }) {
   )
 }
 
-export default function App() {
+function useJson(url) {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
-
-  const load = () =>
-    fetch('/api/report')
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then(setData)
-      .catch((e) => setError(e.message))
-
   useEffect(() => {
+    const load = () =>
+      fetch(url)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then(setData)
+        .catch((e) => setError(e.message))
     load()
-    // The scheduler collects at most once an hour, so anything faster is wasted requests.
+    // The scheduler collects at most hourly, so anything faster is wasted requests.
     const t = setInterval(load, 5 * 60 * 1000)
     return () => clearInterval(t)
-  }, [])
+  }, [url])
+  return { data, error }
+}
 
-  if (error) return <main><h1>MLB Model Research</h1><p className="bad">Failed to load: {error}</p></main>
-  if (!data) return <main><h1>MLB Model Research</h1><p className="muted">Loading…</p></main>
-  if (data.error) return <main><h1>MLB Model Research</h1><p className="bad">{data.error}</p></main>
+function Banner() {
+  return (
+    <div className="note">
+      <strong>Research only.</strong> Simulated predictions, no money staked. Real P&amp;L
+      lives in <code>bets.db</code> on the local machine and is deliberately not deployed here.
+    </div>
+  )
+}
+
+function Home() {
+  // /api/summary, not /api/report — report is admin-only now and a non-admin would 403.
+  const { data: sum } = useJson('/api/summary')
+  const { data: feed } = useJson('/api/hits')
+
+  return (
+    <main>
+      <header className="bar">
+        <h1>MLB Model Research</h1>
+        {sum?.role === 'admin' && <a href="/admin">admin →</a>}
+      </header>
+      <Banner />
+
+      <FallingHits hits={feed?.hits} />
+
+      {sum && sum.graded > 0 && (
+        <div className="stats">
+          <Stat label="legs graded" value={sum.graded.toLocaleString()} sub={`${sum.logged.toLocaleString()} logged`} />
+          <Stat label="hit rate" value={pct(sum.actual)} />
+          <Stat label="model says" value={pct(sum.predicted)} />
+        </div>
+      )}
+      <p className="muted">
+        Collection is running. These are legs the model predicted that went on to hit —
+        not parlays, and not real money.
+      </p>
+    </main>
+  )
+}
+
+function Admin() {
+  const { data, error } = useJson('/api/report')
+
+  if (error?.includes('403'))
+    return (
+      <main>
+        <h1>Admin</h1>
+        <p className="bad">Your account does not have the admin role.</p>
+        <p><a href="/">← back to dashboard</a></p>
+      </main>
+    )
+  if (error) return <main><h1>Admin</h1><p className="bad">Failed to load: {error}</p></main>
+  if (!data) return <main><h1>Admin</h1><p className="muted">Loading…</p></main>
+  if (data.error) return <main><h1>Admin</h1><p className="bad">{data.error}</p></main>
 
   const v = verdictFor(data.gap)
 
   return (
     <main>
-      <h1>MLB Model Research</h1>
-
-      <div className="note">
-        <strong>Research only.</strong> Simulated predictions, no money staked. Real P&amp;L
-        lives in <code>bets.db</code> on the local machine and is deliberately not deployed here.
-      </div>
+      <header className="bar">
+        <h1>Admin · model calibration</h1>
+        <a href="/">← dashboard</a>
+      </header>
+      <Banner />
 
       {data.graded === 0 ? (
         <p>{data.logged.toLocaleString()} logged, none graded yet — grading runs after games finish.</p>
@@ -123,4 +173,10 @@ export default function App() {
       )}
     </main>
   )
+}
+
+export default function App() {
+  // Deliberately no router dependency — two routes do not justify one. The server
+  // serves index.html for both paths, so this branch is all the routing needed.
+  return window.location.pathname.startsWith('/admin') ? <Admin /> : <Home />
 }
