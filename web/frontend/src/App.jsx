@@ -99,7 +99,10 @@ function Home() {
     <main>
       <header className="bar">
         <h1>MLB Model Research</h1>
-        {sum?.role === 'admin' && <a href="/admin">admin →</a>}
+        <nav>
+          {sum?.role === 'admin' && <a href="/admin">admin →</a>}
+          <a href="/logout">sign out</a>
+        </nav>
       </header>
       <Banner />
 
@@ -141,7 +144,10 @@ function Admin() {
     <main>
       <header className="bar">
         <h1>Admin · model calibration</h1>
-        <a href="/">← dashboard</a>
+        <nav>
+          <a href="/">← dashboard</a>
+          <a href="/logout">sign out</a>
+        </nav>
       </header>
       <Banner />
 

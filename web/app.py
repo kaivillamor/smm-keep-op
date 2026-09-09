@@ -107,6 +107,18 @@ def require_admin(who: tuple[str, str] = Depends(auth)) -> tuple[str, str]:
     return who
 
 
+def _research_db_path() -> str:
+    """Absolute path to research.db.
+
+    RESEARCH_DB is absolute on Railway (/data/research.db) but relative by default
+    (data/history/research.db). A relative path resolves against the process CWD, which
+    for uvicorn is the repo root rather than baseball/ — so anchor relative paths to
+    BASEBALL_DIR and leave absolute ones alone.
+    """
+    from output.research import RESEARCH_DB
+    return RESEARCH_DB if os.path.isabs(RESEARCH_DB) else os.path.join(BASEBALL_DIR, RESEARCH_DB)
+
+
 def _db():
     conn = sqlite3.connect(_research_db_path())
     conn.row_factory = sqlite3.Row
@@ -159,6 +171,19 @@ def stats() -> dict:
 def healthz():
     """Unauthenticated so Railway can health-check without credentials."""
     return {"ok": True, "utc": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/logout")
+def logout():
+    """Basic auth has no server-side session to destroy, so 'logging out' means getting
+    the browser to forget the cached credentials. Answering 401 under a new realm is the
+    most reliable cross-browser way to do that; some browsers still hold them until the
+    window closes, which the response body says out loud rather than pretending."""
+    raise HTTPException(
+        status.HTTP_401_UNAUTHORIZED,
+        "Signed out. If the browser still lets you back in, close this window "
+        "(HTTP Basic credentials live until the browser session ends).",
+        {"WWW-Authenticate": 'Basic realm="signed-out"'})
 
 
 @app.get("/api/summary")

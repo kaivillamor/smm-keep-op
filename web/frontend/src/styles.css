@@ -82,3 +82,5 @@ th { font-weight: 600; font-size: .8rem; text-transform: uppercase;
 .bar h1 { margin-bottom: 0; }
 .bar a { font-size: .85rem; color: inherit; opacity: .65; text-decoration: none; }
 .bar a:hover { opacity: 1; text-decoration: underline; }
+
+.bar nav { display: flex; gap: 1rem; white-space: nowrap; }
