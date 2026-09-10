@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import FallingHits from './FallingHits.jsx'
+import Login from './Login.jsx'
 
 const pct = (v) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
 const pts = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)} pts`)
@@ -81,6 +82,14 @@ function useJson(url) {
   return { data, error }
 }
 
+function SignOut() {
+  const go = async () => {
+    await fetch('/api/logout', { method: 'POST' })
+    window.location.href = '/'
+  }
+  return <a href="/" onClick={(e) => { e.preventDefault(); go() }}>sign out</a>
+}
+
 function Banner() {
   return (
     <div className="note">
@@ -101,7 +110,7 @@ function Home() {
         <h1>MLB Model Research</h1>
         <nav>
           {sum?.role === 'admin' && <a href="/admin">admin →</a>}
-          <a href="/logout">sign out</a>
+          <SignOut />
         </nav>
       </header>
       <Banner />
@@ -146,7 +155,7 @@ function Admin() {
         <h1>Admin · model calibration</h1>
         <nav>
           <a href="/">← dashboard</a>
-          <a href="/logout">sign out</a>
+          <SignOut />
         </nav>
       </header>
       <Banner />
@@ -182,7 +191,21 @@ function Admin() {
 }
 
 export default function App() {
-  // Deliberately no router dependency — two routes do not justify one. The server
-  // serves index.html for both paths, so this branch is all the routing needed.
+  const [me, setMe] = useState(undefined)          // undefined = still checking
+  const { data: feed } = useJson('/api/hits')
+
+  useEffect(() => {
+    fetch('/api/me')
+      .then((r) => r.json())
+      .then((d) => setMe(d.user ? d : null))
+      .catch(() => setMe(null))
+  }, [])
+
+  // Render nothing while the session check is in flight — flashing the login screen at
+  // an already-signed-in user is worse than a brief blank.
+  if (me === undefined) return null
+  if (me === null) return <Login hits={feed?.hits} onSignedIn={setMe} />
+
+  // Two routes do not justify a router dependency; the server serves index.html for both.
   return window.location.pathname.startsWith('/admin') ? <Admin /> : <Home />
 }

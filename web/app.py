@@ -16,13 +16,14 @@ import secrets
 import sqlite3
 import threading
 import time
+
+from pydantic import BaseModel
 from datetime import datetime, timezone
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 import sys
@@ -53,49 +54,67 @@ async def lifespan(_: "FastAPI"):
 
 
 app = FastAPI(title="MLB Model Research", lifespan=lifespan)
-security = HTTPBasic()
 
-# Users live in a SQLite store on the volume (web/users.py), NOT in env vars — env
-# configuration stops scaling the moment more than a couple of accounts exist, and
-# passwords in variables are plaintext by construction.
-#
-# DASH_USERS / DASH_PASS still work, but only as a first-run SEED: bootstrap_from_env()
-# inserts them if absent and never overwrites, so a fresh deploy is not locked out and a
-# password later changed via the CLI is not silently reverted.
+# Users live in a SQLite store on the volume (web/users.py), NOT in env vars.
+# DASH_USERS / DASH_PASS remain a first-run SEED only — see users.bootstrap_from_env.
 from users import authenticate, bootstrap_from_env   # noqa: E402  (needs sys.path above)
 
-# scrypt costs ~100ms on purpose. Basic auth re-sends credentials on EVERY request, so
-# without a cache each page load would pay it several times over. Successful results are
-# cached briefly under an HMAC of the credentials keyed by a per-process random secret —
-# so the cache never holds a password, and its keys are useless outside this process.
-_AUTH_TTL = 60.0
-_auth_cache: dict[str, tuple[float, tuple[str, str]]] = {}
-_CACHE_SECRET = secrets.token_bytes(32)
+# Auth is form + signed cookie, not HTTP Basic. Basic forces the browser's own popup
+# (no custom login screen) and has no real sign-out — the browser caches credentials for
+# the window. A signed session cookie fixes both: it can be cleared on demand, and the
+# login screen is ours to design.
+SESSION_COOKIE = "mlbsession"
+SESSION_MAX_AGE = 60 * 60 * 24 * 14        # 14 days
+
+_secret_env = os.getenv("SESSION_SECRET")
+if not _secret_env:
+    print("[auth] SESSION_SECRET unset — generating an ephemeral one. Every restart will "
+          "sign everyone out. Set SESSION_SECRET in the environment.", flush=True)
+SESSION_SECRET = (_secret_env or secrets.token_hex(32)).encode()
 
 
-def _cache_key(username: str, password: str) -> str:
-    return hmac.new(_CACHE_SECRET, f"{username}\x00{password}".encode(),
-                    hashlib.sha256).hexdigest()
+def _sign(payload: str) -> str:
+    return hmac.new(SESSION_SECRET, payload.encode(), hashlib.sha256).hexdigest()
 
 
-def auth(creds: HTTPBasicCredentials = Depends(security)) -> tuple[str, str]:
-    """Returns (username, role)."""
-    key = _cache_key(creds.username, creds.password)
-    now = time.time()
-    cached = _auth_cache.get(key)
-    if cached and cached[0] > now:
-        return cached[1]
+def make_session(username: str) -> str:
+    """Stateless signed token: <username>|<expiry>|<signature>. No server-side store to
+    keep in sync, and tampering with either field invalidates the signature."""
+    payload = f"{username}|{int(time.time()) + SESSION_MAX_AGE}"
+    return f"{payload}|{_sign(payload)}"
 
-    user = authenticate(creds.username, creds.password)
-    if not user:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Bad credentials",
-                            {"WWW-Authenticate": "Basic"})
 
-    if len(_auth_cache) > 256:            # bounded; this is a cache, not a session store
-        _auth_cache.clear()
-    result = (user["username"], user["role"])
-    _auth_cache[key] = (now + _AUTH_TTL, result)
-    return result
+def read_session(token: str | None) -> str | None:
+    """Returns the username, or None if absent/expired/tampered."""
+    if not token:
+        return None
+    try:
+        username, expiry, sig = token.rsplit("|", 2)
+    except ValueError:
+        return None
+    if not hmac.compare_digest(sig, _sign(f"{username}|{expiry}")):
+        return None
+    if int(expiry) < time.time():
+        return None
+    return username
+
+
+def current_user(request: Request) -> tuple[str, str] | None:
+    """(username, role) for a valid session, else None. Never raises — callers decide
+    whether anonymous is acceptable, so the same helper serves public and private routes."""
+    from users import get_user
+    name = read_session(request.cookies.get(SESSION_COOKIE))
+    if not name:
+        return None
+    user = get_user(name)
+    return (user["username"], user["role"]) if user else None
+
+
+def auth(request: Request) -> tuple[str, str]:
+    who = current_user(request)
+    if not who:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
+    return who
 
 
 def require_admin(who: tuple[str, str] = Depends(auth)) -> tuple[str, str]:
@@ -173,17 +192,39 @@ def healthz():
     return {"ok": True, "utc": datetime.now(timezone.utc).isoformat()}
 
 
-@app.get("/logout")
-def logout():
-    """Basic auth has no server-side session to destroy, so 'logging out' means getting
-    the browser to forget the cached credentials. Answering 401 under a new realm is the
-    most reliable cross-browser way to do that; some browsers still hold them until the
-    window closes, which the response body says out loud rather than pretending."""
-    raise HTTPException(
-        status.HTTP_401_UNAUTHORIZED,
-        "Signed out. If the browser still lets you back in, close this window "
-        "(HTTP Basic credentials live until the browser session ends).",
-        {"WWW-Authenticate": 'Basic realm="signed-out"'})
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/login")
+def api_login(body: LoginBody, request: Request, response: Response):
+    user = authenticate(body.username, body.password)
+    if not user:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect username or password")
+    response.set_cookie(
+        SESSION_COOKIE, make_session(user["username"]),
+        max_age=SESSION_MAX_AGE,
+        httponly=True,                                  # JS cannot read it -> XSS can't steal it
+        secure=request.url.scheme == "https",           # HTTPS-only in production, still works on localhost
+        samesite="lax",                                 # not sent on cross-site POSTs -> basic CSRF defence
+        path="/")
+    return {"user": user["username"], "role": user["role"]}
+
+
+@app.post("/api/logout")
+def api_logout(response: Response):
+    """A real sign-out — the cookie is the entire session, so clearing it ends it."""
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def api_me(request: Request):
+    """Who am I? Returns null when anonymous rather than 401 — the front-end uses this to
+    decide between the login screen and the dashboard, and a 401 here would be noise."""
+    who = current_user(request)
+    return {"user": who[0], "role": who[1]} if who else {"user": None, "role": None}
 
 
 @app.get("/api/summary")
@@ -197,7 +238,7 @@ def api_summary(who: tuple = Depends(auth)):
 
 
 @app.get("/api/hits")
-def api_hits(limit: int = 60, _: tuple = Depends(auth)):
+def api_hits(request: Request, limit: int = 60):
     """Recent winning legs for the ambient feed.
 
     research.db only — these are model predictions that hit, NOT real parlays. Winning
@@ -213,16 +254,21 @@ def api_hits(limit: int = 60, _: tuple = Depends(auth)):
         c.close()
     except Exception as e:
         return {"error": str(e), "hits": []}
+    # PUBLIC — this feeds the login screen background, so it must work signed-out.
+    # Player names and hit counts are public MLB box-score facts. The model's predicted
+    # probability is NOT, so it is only included for signed-in users.
+    signed_in = current_user(request) is not None
     return {"error": None, "hits": [
         {"name": r["batter_name"], "team": r["team"], "hits": r["actual_hits"],
-         "prob": r["model_prob"], "date": r["date"]} for r in rows]}
+         "date": r["date"], **({"prob": r["model_prob"]} if signed_in else {})}
+        for r in rows]}
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin(_: tuple = Depends(require_admin)):
+def admin():
     """Same SPA — the front-end branches on pathname. Kept as its own route so the
     server serves index.html here instead of 404ing on a client-side route."""
-    return index(_)
+    return index()
 
 
 @app.get("/api/report")
@@ -241,7 +287,7 @@ if os.path.isdir(os.path.join(FRONTEND_DIST, "assets")):
 
 
 @app.get("/", response_class=HTMLResponse)
-def index(_: tuple = Depends(auth)):
+def index():
     """Serves the built React app. Auth here is what makes the browser prompt once,
     after which it reuses the credentials for the /api/report fetch."""
     idx = os.path.join(FRONTEND_DIST, "index.html")

@@ -84,3 +84,55 @@ th { font-weight: 600; font-size: .8rem; text-transform: uppercase;
 .bar a:hover { opacity: 1; text-decoration: underline; }
 
 .bar nav { display: flex; gap: 1rem; white-space: nowrap; }
+
+/* ── sign-in screen ──────────────────────────────────────────────────────── */
+.login-screen { position: relative; min-height: 100vh; overflow: hidden; }
+
+/* Feed sits behind the card, full-bleed and non-interactive. */
+.login-bg { position: absolute; inset: 0; z-index: 0; opacity: .55; pointer-events: none; }
+.login-bg .feed { height: 100vh; margin: 0; border-radius: 0; background: none; }
+@keyframes fall-full {
+  0%   { transform: translate(0, -8vh) scale(1); opacity: 0; }
+  10%  { opacity: 1; }
+  85%  { opacity: 1; }
+  100% { transform: translate(var(--drift), 104vh) scale(1); opacity: 0; }
+}
+.login-bg .drop { animation-name: fall-full; }
+
+.login-card {
+  position: relative; z-index: 1;
+  width: min(22rem, calc(100% - 2.5rem));
+  margin: 0 auto; top: 50%; transform: translateY(-50%);
+  display: flex; flex-direction: column; gap: .85rem;
+  padding: 2rem 1.75rem;
+  border: 1px solid rgba(128,128,128,.3);
+  border-radius: 10px;
+  background: rgba(255,255,255,.92);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 12px 40px rgba(0,0,0,.18);
+}
+.login-card h1 { font-size: 1.2rem; margin: 0; }
+.login-card p  { margin: -.5rem 0 .35rem; font-size: .875rem; }
+.login-card label { display: flex; flex-direction: column; gap: .3rem; font-size: .8rem;
+                    text-transform: uppercase; letter-spacing: .04em; color: #777; }
+.login-card input {
+  font: inherit; text-transform: none; letter-spacing: normal; color: inherit;
+  padding: .55rem .7rem; border: 1px solid rgba(128,128,128,.4);
+  border-radius: 6px; background: rgba(128,128,128,.06);
+}
+.login-card input:focus { outline: 2px solid #4c8dff; outline-offset: 1px; }
+.login-card button {
+  font: inherit; font-weight: 600; margin-top: .4rem; padding: .6rem;
+  border: 0; border-radius: 6px; cursor: pointer;
+  background: #1a1a1a; color: #fff;
+}
+.login-card button:disabled { opacity: .5; cursor: not-allowed; }
+.login-error { margin: 0 !important; font-size: .85rem !important; }
+
+@media (prefers-color-scheme: dark) {
+  .login-card { background: rgba(24,26,30,.92); border-color: rgba(255,255,255,.14); }
+  .login-card button { background: #f0f0f0; color: #14161a; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-bg { display: none; }   /* a still list behind a form is just clutter */
+}
