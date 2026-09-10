@@ -1,114 +1,140 @@
-:root { color-scheme: light dark; }
-* { box-sizing: border-box; }
-body { margin: 0; font: 15px/1.5 system-ui, -apple-system, sans-serif; }
-main { max-width: 54rem; margin: 2rem auto; padding: 0 1.25rem; }
-h1 { font-size: 1.5rem; margin-bottom: .25rem; }
-h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: .04em;
-     color: #777; margin-top: 2rem; }
-code { font-family: ui-monospace, monospace; font-size: .9em; }
-
-.note { background: #fffbe6; border-left: 3px solid #e6c200; color: #4a3f00;
-        padding: .7rem 1rem; margin: 1rem 0 1.5rem; border-radius: 3px; }
-
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-         gap: .75rem; margin: 1rem 0; }
-.stat { border: 1px solid rgba(128,128,128,.28); border-radius: 6px; padding: .75rem .9rem; }
-.stat-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: #777; }
-.stat-value { font-size: 1.6rem; font-weight: 600; }
-.stat-sub { font-size: .8rem; color: #777; }
-
-table { border-collapse: collapse; width: 100%; margin: .5rem 0 1rem; }
-th, td { text-align: left; padding: .4rem .75rem;
-         border-bottom: 1px solid rgba(128,128,128,.22); }
-th { font-weight: 600; font-size: .8rem; text-transform: uppercase;
-     letter-spacing: .03em; color: #777; }
-
-.muted { color: #777; }
-.good  { color: #1a7f37; }
-.warn  { color: #9a6700; }
-.bad   { color: #b3261e; }
-.neutral { color: #777; }
-
-@media (prefers-color-scheme: dark) {
-  body { background: #14161a; color: #e6e6e6; }
-  .note { background: #2b2410; border-left-color: #9a7d00; color: #e8dca8; }
-  .good { color: #4ac26b; } .warn { color: #d4a72c; } .bad { color: #ff7b72; }
+/* ── tokens ──────────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+  --bg:      #000;
+  --surface: rgba(255, 255, 255, .035);
+  --line:    rgba(255, 255, 255, .13);
+  --line-strong: rgba(255, 255, 255, .3);
+  --text:    #f5f5f5;
+  --muted:   rgba(255, 255, 255, .52);
+  --good:    #4ade80;
+  --warn:    #fbbf24;
+  --bad:     #f87171;
+  --radius:  22px;          /* generous — the "bubbly" look, still rectangular */
+  --radius-sm: 12px;
 }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  /* Inter's optical sizing + tabular figures keep stat columns from shifting width
+     as digits change — the reason it's worth loading over a system stack here. */
+  font-feature-settings: 'tnum' 1, 'cv05' 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+main { max-width: 56rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+
+h1 { font-size: 1.45rem; font-weight: 600; letter-spacing: -.02em; margin: 0 0 .25rem; }
+h2 {
+  font-size: .78rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .09em; color: var(--muted); margin: 2.25rem 0 .75rem;
+}
+code { font-family: ui-monospace, 'SF Mono', monospace; font-size: .88em; }
+a { color: inherit; }
+
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .5rem; }
+.bar nav { display: flex; gap: 1.25rem; white-space: nowrap; }
+.bar nav a {
+  font-size: .82rem; color: var(--muted); text-decoration: none;
+  transition: color .15s;
+}
+.bar nav a:hover { color: var(--text); }
+
+.note {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: .8rem 1.05rem;
+  margin: 1.25rem 0 1.75rem;
+  font-size: .875rem;
+  color: var(--muted);
+}
+.note strong { color: var(--text); }
+
+/* ── stat tiles ──────────────────────────────────────────────────────────── */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: .8rem; margin: 1.25rem 0; }
+.stat {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: .95rem 1.1rem;
+}
+.stat-label { font-size: .7rem; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.stat-value { font-size: 1.75rem; font-weight: 600; letter-spacing: -.03em; margin-top: .15rem; }
+.stat-sub   { font-size: .78rem; color: var(--muted); }
+
+/* ── tables ──────────────────────────────────────────────────────────────── */
+table {
+  border-collapse: separate; border-spacing: 0;
+  width: 100%; margin: .5rem 0 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+th, td { text-align: left; padding: .55rem .9rem; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th {
+  font-size: .7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--muted); background: var(--surface);
+}
+td { font-variant-numeric: tabular-nums; }
+
+.muted { color: var(--muted); }
+.good  { color: var(--good); }
+.warn  { color: var(--warn); }
+.bad   { color: var(--bad); }
+.neutral { color: var(--muted); }
 
 /* ── ambient falling-hit feed ────────────────────────────────────────────── */
 .feed {
-  position: relative;
-  height: 42vh;
-  min-height: 16rem;
-  overflow: hidden;
-  margin: 1.5rem 0 2rem;
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(128,128,128,.06), transparent 70%);
+  position: relative; height: 40vh; min-height: 15rem; overflow: hidden;
+  margin: 1.5rem 0 2rem; border-radius: var(--radius);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 15%, #000 78%, transparent 100%);
+          mask-image: linear-gradient(to bottom, transparent 0%, #000 15%, #000 78%, transparent 100%);
 }
-.feed-empty { display: grid; place-items: center; height: 8rem; min-height: 0; }
+.feed-empty { display: grid; place-items: center; height: 7rem; min-height: 0; mask-image: none; -webkit-mask-image: none; }
 
 .drop {
-  position: absolute;
-  top: 0;
-  white-space: nowrap;
-  font-size: 1.05rem;
+  position: absolute; top: 0; white-space: nowrap;
+  font-size: 1.05rem; font-weight: 500; letter-spacing: -.01em;
   will-change: transform, opacity;
-  animation-name: fall;
-  animation-timing-function: cubic-bezier(.33, .1, .5, 1);
-  animation-fill-mode: forwards;
-  pointer-events: none;
+  animation-name: fall; animation-timing-function: cubic-bezier(.33, .1, .5, 1);
+  animation-fill-mode: forwards; pointer-events: none;
 }
 .drop b  { font-weight: 600; }
-.drop em { font-style: normal; color: #1a7f37; font-variant-numeric: tabular-nums; }
+.drop em { font-style: normal; color: var(--good); }
 
 @keyframes fall {
-  0%   { transform: translate(0, -12%)   scale(1); opacity: 0; }
-  12%  { opacity: 1; }
-  75%  { opacity: 1; }
-  100% { transform: translate(var(--drift), 46vh) scale(1); opacity: 0; }
+  0%   { transform: translate(0, -10%) scale(1); opacity: 0; }
+  15%  { opacity: 1; }
+  72%  { opacity: 1; }
+  100% { transform: translate(var(--drift), 44vh) scale(1); opacity: 0; }
 }
-
-/* Respect users who have asked for less motion: show the text, hold it still. */
-@media (prefers-reduced-motion: reduce) {
-  .drop { animation: none; opacity: .9; position: static; display: block; margin: .3rem 0; }
-  .feed { height: auto; min-height: 0; overflow: visible; }
-}
-
-@media (prefers-color-scheme: dark) {
-  .drop em { color: #4ac26b; }
-}
-
-.bar { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
-.bar h1 { margin-bottom: 0; }
-.bar a { font-size: .85rem; color: inherit; opacity: .65; text-decoration: none; }
-.bar a:hover { opacity: 1; text-decoration: underline; }
-
-.bar nav { display: flex; gap: 1rem; white-space: nowrap; }
 
 /* ── sign-in screen ──────────────────────────────────────────────────────── */
 .login-screen {
-  position: relative;
-  min-height: 100vh;
-  overflow: hidden;
-  background: #000;
+  position: relative; min-height: 100vh; overflow: hidden;
+  background: var(--bg);
   /* Grid centring, not `top:50%` + translate — that offsets from the element's normal
      flow position, which pushed the card off the top of the viewport. */
-  display: grid;
-  place-items: center;
+  display: grid; place-items: center;
 }
 
 .login-bg {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  /* Spatial fade at the top and bottom edges. The keyframes already ramp opacity, but
-     that is time-based — an item still pops in at the very top if its timing is off.
-     Masking the container guarantees the fade happens at the edges of the SCREEN. */
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  /* Spatial fade at the screen edges. The keyframes ramp opacity too, but that is
+     time-based — an item pops in visibly at the top if its timing lands wrong. */
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 74%, transparent 100%);
           mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 74%, transparent 100%);
 }
-.login-bg .feed { height: 100vh; margin: 0; border-radius: 0; background: none; }
+.login-bg .feed { height: 100vh; margin: 0; border-radius: 0; mask-image: none; -webkit-mask-image: none; }
 
 @keyframes fall-full {
   0%   { transform: translate(0, -6vh) scale(1); opacity: 0; }
@@ -119,45 +145,42 @@ th { font-weight: 600; font-size: .8rem; text-transform: uppercase;
 .login-bg .drop { animation-name: fall-full; }
 
 .login-card {
-  position: relative;
-  z-index: 1;
-  width: min(22rem, calc(100% - 2.5rem));
-  display: flex;
-  flex-direction: column;
-  gap: .85rem;
-  padding: 2rem 1.75rem;
-  border: 1px solid rgba(255, 255, 255, .85);
-  border-radius: 10px;
+  position: relative; z-index: 1;
+  width: min(23rem, calc(100% - 2.5rem));
+  display: flex; flex-direction: column; gap: .9rem;
+  padding: 2.4rem 2rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 28px;                     /* bubblier than the rest, still a rectangle */
   background: #000;
-  color: #fff;
 }
-.login-card h1 { font-size: 1.2rem; margin: 0; color: #fff; }
-.login-card p  { margin: -.5rem 0 .35rem; font-size: .875rem; color: rgba(255,255,255,.6); }
+.login-card h1 { font-size: 1.25rem; margin: 0; }
+.login-card p  { margin: -.55rem 0 .5rem; font-size: .875rem; color: var(--muted); }
 .login-card label {
-  display: flex; flex-direction: column; gap: .3rem;
-  font-size: .75rem; text-transform: uppercase; letter-spacing: .05em;
-  color: rgba(255,255,255,.6);
+  display: flex; flex-direction: column; gap: .35rem;
+  font-size: .7rem; font-weight: 500; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted);
 }
 .login-card input {
-  font: inherit; text-transform: none; letter-spacing: normal;
-  color: #fff;
-  padding: .55rem .7rem;
-  border: 1px solid rgba(255,255,255,.35);
-  border-radius: 6px;
+  font: inherit; text-transform: none; letter-spacing: normal; color: var(--text);
+  padding: .7rem .9rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
   background: #000;
+  transition: border-color .15s;
 }
 .login-card input:focus { outline: none; border-color: #fff; }
 .login-card button {
-  font: inherit; font-weight: 600; margin-top: .4rem; padding: .6rem;
-  border: 1px solid #fff; border-radius: 6px; cursor: pointer;
+  font: inherit; font-weight: 600; margin-top: .5rem; padding: .72rem;
+  border: 1px solid #fff; border-radius: 14px; cursor: pointer;
   background: #fff; color: #000;
+  transition: opacity .15s;
 }
-.login-card button:hover:not(:disabled) { background: rgba(255,255,255,.85); }
-.login-card button:disabled { opacity: .35; cursor: not-allowed; }
-.login-error { margin: 0 !important; font-size: .85rem !important; color: #ff7b72 !important; }
-
-/* The screen is black in both themes — no light-mode override on purpose. */
+.login-card button:hover:not(:disabled) { opacity: .85; }
+.login-card button:disabled { opacity: .3; cursor: not-allowed; }
+.login-error { margin: 0 !important; font-size: .85rem !important; color: var(--bad) !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .login-bg { display: none; }   /* a static list behind a form is just clutter */
+  .login-bg { display: none; }        /* a static list behind a form is just clutter */
+  .drop { animation: none; opacity: .9; position: static; display: block; margin: .3rem 0; }
+  .feed { height: auto; min-height: 0; overflow: visible; mask-image: none; -webkit-mask-image: none; }
 }
