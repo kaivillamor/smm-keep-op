@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import FallingHits from './FallingHits.jsx'
+import HitsList from './HitsList.jsx'
 import Login from './Login.jsx'
 
 const pct = (v) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
@@ -115,7 +115,6 @@ function Home() {
       </header>
       <Banner />
 
-      <FallingHits hits={feed?.hits} />
 
       {sum && sum.graded > 0 && (
         <div className="stats">
@@ -124,6 +123,9 @@ function Home() {
           <Stat label="model says" value={pct(sum.predicted)} />
         </div>
       )}
+      <h2>Recent hits</h2>
+      <HitsList hits={feed?.hits} />
+
       <p className="muted">
         Collection is running. These are legs the model predicted that went on to hit —
         not parlays, and not real money.
