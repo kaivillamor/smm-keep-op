@@ -236,10 +236,96 @@ def report(db_path: str = RESEARCH_DB) -> None:
     print(f"{'=' * w}\n")
 
 
+def compare_owner_logic(db_path: str = RESEARCH_DB) -> None:
+    """A/B the quant model against model + personal rules.
+
+    Because `owner_adj` is additive and logged separately, BOTH predictions exist for the
+    same row and the same outcome — so this is a paired comparison on identical data, not
+    a split sample. No power is lost to splitting, and the only difference between the two
+    arms is the personal adjustment itself.
+
+    Honest-use note: define rules, THEN measure forward. Tuning rules after reading this
+    output fits noise, and the result stops meaning anything.
+    """
+    import math
+
+    conn = _connect(db_path)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT model_prob, base_prob, owner_adj, outcome FROM predictions "
+        "WHERE outcome IN ('win','loss') AND base_prob IS NOT NULL "
+        "  AND model_prob IS NOT NULL")]
+    conn.close()
+
+    w = 56
+    print(f"\n{'=' * w}\n  QUANT MODEL  vs  QUANT + YOUR LOGIC\n{'=' * w}")
+    if not rows:
+        print("  No rows with base_prob yet — logging started 2026-09-11.")
+        print("  Rows from before then only have the combined number, so they")
+        print("  cannot be split. This fills in from the next slate onward.")
+        print(f"{'=' * w}\n")
+        return
+
+    fired = [r for r in rows if (r["owner_adj"] or 0) != 0]
+    print(f"  graded rows          : {len(rows)}")
+    print(f"  personal rule fired  : {len(fired)}  ({len(fired)/len(rows):.1%})")
+    if not fired:
+        print("\n  No rule has fired yet — the two arms are identical, nothing to compare.")
+        print(f"{'=' * w}\n")
+        return
+
+    def metrics(key):
+        ps = [r[key] for r in rows]
+        ys = [1 if r["outcome"] == "win" else 0 for r in rows]
+        n = len(ps)
+        mp, my = sum(ps) / n, sum(ys) / n
+        num = sum((p - mp) * (y - my) for p, y in zip(ps, ys))
+        den = sum((p - mp) ** 2 for p in ps)
+        slope = num / den if den else 0.0          # 1.0 = perfectly calibrated
+        order = sorted(zip(ps, ys))
+        half = n // 2
+        lo = sum(y for _, y in order[:half]) / half if half else 0
+        hi = sum(y for _, y in order[half:]) / (n - half) if n - half else 0
+        return {"pred": mp, "actual": my, "slope": slope, "gap": hi - lo}
+
+    a, b = metrics("base_prob"), metrics("model_prob")
+    print(f"\n  {'':<22}{'quant only':>13}{'+ your logic':>15}{'delta':>9}")
+    for label, k, fmt in (("predicted", "pred", "pct"), ("actually hit", "actual", "pct"),
+                          ("calibration slope", "slope", "raw"), ("ranking gap", "gap", "pts")):
+        va, vb = a[k], b[k]
+        if fmt == "pct":
+            print(f"  {label:<22}{va:>12.1%}{vb:>15.1%}{(vb-va)*100:>+8.1f}pt")
+        elif fmt == "pts":
+            print(f"  {label:<22}{va*100:>11.1f}pt{vb*100:>14.1f}pt{(vb-va)*100:>+8.1f}pt")
+        else:
+            print(f"  {label:<22}{va:>12.3f}{vb:>15.3f}{vb-va:>+9.3f}")
+
+    # Did the flagged legs actually outperform? Paired on the same outcomes.
+    hit = lambda g: sum(1 for r in g if r["outcome"] == "win") / len(g)
+    rest = [r for r in rows if (r["owner_adj"] or 0) == 0]
+    print(f"\n  legs your rules touched : {hit(fired):.1%}  (n={len(fired)})")
+    if rest:
+        print(f"  every other leg        : {hit(rest):.1%}  (n={len(rest)})")
+        diff = hit(fired) - hit(rest)
+        se = math.sqrt(hit(fired) * (1 - hit(fired)) / len(fired)
+                       + hit(rest) * (1 - hit(rest)) / len(rest))
+        lo_ci, hi_ci = (diff - 1.96 * se) * 100, (diff + 1.96 * se) * 100
+        print(f"  difference             : {diff*100:+.1f} pts   95% CI [{lo_ci:+.1f}, {hi_ci:+.1f}]")
+        if lo_ci > 0:
+            print("  -> your rules beat the model, and the interval excludes zero.")
+        elif hi_ci < 0:
+            print("  -> your rules hurt, and the interval excludes zero.")
+        else:
+            print("  -> inconclusive: the interval still contains zero. Need more rows.")
+    print(f"{'=' * w}\n")
+
+
 if __name__ == "__main__":
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
     if cmd == "grade":
         grade_predictions()
+    elif cmd in ("owner", "compare"):
+        compare_owner_logic()
     else:
         report()
+        compare_owner_logic()
