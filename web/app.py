@@ -237,6 +237,45 @@ def api_summary(who: tuple = Depends(auth)):
             "role": who[1], "user": who[0], "error": s.get("error")}
 
 
+@app.get("/api/slate")
+def api_slate(_: tuple = Depends(auth), limit: int = 200):
+    """Today's ungraded predictions, ranked — the pool a parlay gets built from.
+
+    Returns the model's RANKING, not a recommendation. Two numbers per leg:
+      model_prob      raw output, what research.db logs
+      calibrated      what the betting gate actually uses
+
+    They differ a lot on purpose. Measured calibration slope is ~0.17, so the raw number
+    overstates badly at the top end; `clears_gate` is almost always false right now and
+    that is the honest state of the model, not a bug.
+    """
+    from model.factors.hit_model import calibrated_hit_prob, MIN_HIT_PROB
+    try:
+        c = _db()
+        day = c.execute(
+            "SELECT MAX(date) FROM predictions WHERE outcome IS NULL").fetchone()[0]
+        rows = [dict(r) for r in c.execute(
+            "SELECT batter_name, team, pitcher_name, lineup_pos, model_prob, "
+            "       book_odds, book_implied, date "
+            "FROM predictions WHERE outcome IS NULL AND date = ? "
+            "ORDER BY model_prob DESC LIMIT ?", (day, min(limit, 400)))] if day else []
+        c.close()
+    except Exception as e:
+        return {"error": str(e), "date": None, "legs": []}
+
+    legs = []
+    for r in rows:
+        cal = calibrated_hit_prob(r["model_prob"]) if r["model_prob"] is not None else None
+        legs.append({
+            "name": r["batter_name"], "team": r["team"], "pitcher": r["pitcher_name"],
+            "spot": r["lineup_pos"], "model_prob": r["model_prob"], "calibrated": cal,
+            "odds": r["book_odds"], "book_implied": r["book_implied"],
+            "clears_gate": bool(cal is not None and cal >= MIN_HIT_PROB),
+        })
+    return {"error": None, "date": day, "threshold": MIN_HIT_PROB,
+            "count": len(legs), "legs": legs}
+
+
 @app.get("/api/hits")
 def api_hits(request: Request, limit: int = 60):
     """Recent winning legs for the ambient feed.

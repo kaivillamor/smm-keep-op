@@ -195,6 +195,7 @@ function Admin() {
 export default function App() {
   const [me, setMe] = useState(undefined)          // undefined = still checking
   const { data: feed } = useJson('/api/hits')
+  const { data: slate } = useJson('/api/slate')
 
   useEffect(() => {
     fetch('/api/me')

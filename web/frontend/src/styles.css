@@ -207,3 +207,13 @@ td { font-variant-numeric: tabular-nums; }
   .hit-meta { grid-column: 1; font-size: .8rem; }
   .hit-date { grid-column: 2; }
 }
+
+/* ── today's slate ───────────────────────────────────────────────────────── */
+.slate-meta { font-size: .85rem; margin: .25rem 0 .75rem; }
+table.slate td:nth-child(n+3) { font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.slate tr.clears td { background: rgba(74, 222, 128, .07); }
+.link-btn {
+  font: inherit; font-size: .85rem; color: var(--muted);
+  background: none; border: 0; padding: .25rem 0; cursor: pointer; text-decoration: underline;
+}
+.link-btn:hover { color: var(--text); }

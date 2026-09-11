@@ -45,7 +45,9 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             team          TEXT,
             lineup_pos    INTEGER,
             pitcher_name  TEXT,
-            model_prob    REAL,            -- what the model predicted
+            model_prob    REAL,            -- final prediction (base_prob + owner_adj)
+            base_prob     REAL,            -- quant model ONLY, before personal rules
+            owner_adj     REAL,            -- the personal-logic delta, so it can be measured
             book_odds     INTEGER,         -- book's line, when one was posted
             book_implied  REAL,
             -- raw model inputs, so a future recalibration can be backtested properly
@@ -75,7 +77,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     # backtest.py::_ensure_schema on why identifier interpolation is unavoidable here.
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
     for _col, _decl in (("pitcher_days_rest", "INTEGER"),
-                        ("split_avg", "REAL"), ("split_ab", "INTEGER")):
+                        ("split_avg", "REAL"), ("split_ab", "INTEGER"),
+                        ("base_prob", "REAL"), ("owner_adj", "REAL")):
         if _col not in pred_cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_decl} DEFAULT NULL")
     conn.commit()
@@ -95,11 +98,11 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
         conn.execute("""
             INSERT INTO predictions
               (date, game_pk, batter_id, batter_name, team, lineup_pos, pitcher_name,
-               model_prob, book_odds, book_implied, split_avg, split_ab,
+               model_prob, base_prob, owner_adj, book_odds, book_implied, split_avg, split_ab,
                h2h_ab, h2h_avg, recent_ab, recent_avg,
                venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9, pitcher_days_rest,
                is_day_game, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(date, game_pk, batter_id) DO UPDATE SET
                model_prob=excluded.model_prob,
                book_odds=COALESCE(excluded.book_odds, predictions.book_odds),
@@ -107,7 +110,8 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
         """, (
             today, c.get("game_pk"), c.get("batter_id"), c.get("batter_name"),
             c.get("team"), c.get("lineup_pos"), c.get("pitcher_name"),
-            c.get("hit_probability"), c.get("book_odds"), c.get("book_implied"),
+            c.get("hit_probability"), c.get("base_prob"), c.get("owner_adj"),
+            c.get("book_odds"), c.get("book_implied"),
             c.get("split_avg"), c.get("split_ab"),
             c.get("h2h_ab"), c.get("h2h_avg"), c.get("recent_ab"), c.get("recent_avg"),
             c.get("venue_ab"), c.get("venue_avg"), c.get("team_recent_avg"),
