@@ -186,8 +186,23 @@ td { font-variant-numeric: tabular-nums; }
 }
 
 /* ── recent-hits list (dashboard; the animation is sign-in only) ──────────── */
-.hits { list-style: none; margin: .5rem 0 1rem; padding: 0;
-        border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.hits {
+  list-style: none; margin: .35rem 0 1rem; padding: 0;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  /* Fixed viewport instead of an ever-growing page. overflow-x stays hidden so the
+     rounded corners still clip the rows; only the y axis scrolls. */
+  max-height: 26rem;
+  overflow: hidden auto;
+  overscroll-behavior: contain;   /* stop the page scrolling once the list bottoms out */
+}
+.hits::-webkit-scrollbar { width: 10px; }
+.hits::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,.16); border-radius: 6px;
+  border: 3px solid transparent; background-clip: content-box;
+}
+.hits::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.3); background-clip: content-box; }
+.hits { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.18) transparent; }
+.list-meta { font-size: .8rem; margin: 0 0 .1rem; }
 .hits li {
   display: grid;
   grid-template-columns: 1fr auto 10rem 6rem;
