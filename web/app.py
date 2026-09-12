@@ -174,6 +174,14 @@ def stats() -> dict:
     if half:
         lo, hi = hit(rows[:half]), hit(rows[half:])
         out["lower"], out["upper"], out["gap"] = lo, hi, hi - lo
+        # Ship the confidence interval, not just the point estimate. A +6.9pt gap on 696
+        # rows has a CI of [-0.2, +14.0] — indistinguishable from zero — and a label that
+        # reads only the point estimate calls that "weak signal", asserting a finding the
+        # data cannot support.
+        import math
+        se = math.sqrt(lo * (1 - lo) / half + hi * (1 - hi) / (n - half))
+        out["gap_ci_low"] = (hi - lo) - 1.96 * se
+        out["gap_ci_high"] = (hi - lo) + 1.96 * se
 
     buckets = []
     for lo_b, hi_b in ((0, .55), (.55, .65), (.65, .72), (.72, .80), (.80, 1.01)):

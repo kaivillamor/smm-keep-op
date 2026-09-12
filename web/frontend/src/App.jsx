@@ -7,10 +7,14 @@ const pts = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed
 
 // The ranking gap is the number that decides whether the model is bettable at all, so
 // it gets an explicit verdict rather than leaving the reader to interpret a decimal.
-function verdictFor(gap) {
+function verdictFor(gap, ciLow, ciHigh) {
   if (gap == null) return { label: 'not enough data', tone: 'neutral' }
-  if (gap < 0.02) return { label: 'no usable ranking signal', tone: 'bad' }
-  if (gap < 0.08) return { label: 'weak signal', tone: 'warn' }
+  // The interval decides, not the point estimate. Thresholds alone read noise as a
+  // finding: +6.9pt on 696 rows carries a CI of [-0.2, +14.0] and means nothing yet.
+  if (ciLow == null || ciHigh == null) return { label: `${(gap * 100).toFixed(1)} pts`, tone: 'neutral' }
+  if (ciHigh < 0) return { label: 'inverted — ranks worse than chance', tone: 'bad' }
+  if (ciLow <= 0) return { label: 'inconclusive — interval still contains zero', tone: 'warn' }
+  if (gap < 0.08) return { label: 'weak but real signal', tone: 'warn' }
   return { label: 'usable signal', tone: 'good' }
 }
 
@@ -149,7 +153,7 @@ function Admin() {
   if (!data) return <main><h1>Admin</h1><p className="muted">Loading…</p></main>
   if (data.error) return <main><h1>Admin</h1><p className="bad">{data.error}</p></main>
 
-  const v = verdictFor(data.gap)
+  const v = verdictFor(data.gap, data.gap_ci_low, data.gap_ci_high)
 
   return (
     <main>
@@ -178,6 +182,9 @@ function Admin() {
             lower half <strong>{pct(data.lower)}</strong> &nbsp;·&nbsp;
             upper half <strong>{pct(data.upper)}</strong> &nbsp;·&nbsp;
             gap <strong className={v.tone}>{pts(data.gap)}</strong>
+            {data.gap_ci_low != null && (
+              <span className="muted"> &nbsp;95% CI [{pts(data.gap_ci_low)}, {pts(data.gap_ci_high)}]</span>
+            )}
           </p>
           <p className={v.tone}>{v.label}</p>
 

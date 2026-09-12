@@ -171,10 +171,20 @@ def report(db_path: str = RESEARCH_DB) -> None:
     print(f"    lower half by model prob → hit {lo_rate * 100:.1f}%")
     print(f"    upper half by model prob → hit {hi_rate * 100:.1f}%")
     gap = (hi_rate - lo_rate) * 100
-    verdict = ("model ranks better than chance" if gap > 3 else
-               "NO usable ranking signal — do not bet this" if gap <= 0 else
-               "inconclusive — keep collecting")
-    print(f"    gap: {gap:+.1f} pts  →  {verdict}")
+    # The INTERVAL decides, not the point estimate. A threshold on the gap alone reads
+    # noise as a finding: +6.9 pts on 696 rows carries a 95% CI of [-0.2, +14.0], which
+    # is indistinguishable from zero, yet a bare `gap > 3` test calls it real.
+    import math
+    # lo_rate/hi_rate, NOT lo/hi — those are bucket BOUNDS left over from the loop
+    # above, so using them here would silently compute the SE of (0.80, 1.01).
+    _se = math.sqrt(lo_rate * (1 - lo_rate) / max(half, 1)
+                    + hi_rate * (1 - hi_rate) / max(n - half, 1)) * 100
+    ci_lo, ci_hi = gap - 1.96 * _se, gap + 1.96 * _se
+    verdict = ("inverted — ranks WORSE than chance" if ci_hi < 0 else
+               "inconclusive — interval still contains zero" if ci_lo <= 0 else
+               "usable signal" if gap >= 8 else "weak but real signal")
+    print(f"    gap: {gap:+.1f} pts   95% CI [{ci_lo:+.1f}, {ci_hi:+.1f}]")
+    print(f"    →  {verdict}")
     print(f"{'=' * w}\n")
 
 
