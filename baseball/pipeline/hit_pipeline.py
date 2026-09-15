@@ -11,6 +11,7 @@ from pipeline.stats_fetcher import (
 from model.factors.hit_model import (
     score_batter_hit_prob,
     calibrated_hit_prob,
+    _pitcher_hits_per_9,
     HIT_PARLAY_LEGS,
     MAX_LINEUP_DEPTH,
     MIN_HIT_PROB,
@@ -135,6 +136,12 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     "batter_name":     batter_name,
                     "split_avg":       _split.get("avg"),
                     "split_ab":        _split.get("ab", 0),
+                    # Needed to REPRODUCE the model from stored rows. Without these the
+                    # reconstruction runs on 100% recent H/9 (the model blends season
+                    # 60/40) and on a neutral park, giving 0.05 mean error and making
+                    # any weight-fitting describe a different model than the live one.
+                    "park_factor":       runs_factor,
+                    "pitcher_season_h9": _pitcher_hits_per_9(p_stats),
                     "team":            team,
                     "opponent_team":   opponent_team,
                     "lineup_pos":      lineup_pos,
@@ -164,17 +171,23 @@ def analyze_hit_props(lineups: dict, stats: dict,
 
     candidates.sort(key=lambda c: c["hit_probability"], reverse=True)
 
+    # Price the WHOLE slate, not just the surfaced legs. Costs NOTHING extra:
+    # fetch_hit_prop_odds() already pulls the entire board in one paginated call
+    # (~180 players) and the old code looked up 4 names from it, discarding the rest.
+    # Pricing only the top 4 made the recorded price distribution a 4-row sample of the
+    # model's own favourites — which cannot answer whether playable prices exist on the
+    # legs it likes, and that question decides whether this layer is viable at all.
+    # No legs are dropped for negative EV — we surface the same picks, ranked by edge.
+    _attach_hit_odds(candidates)
+
     # Optional hand-off of EVERY scored batter for calibration research. The surfaced
     # legs alone are a biased sample (the ones the model already liked), which can't
     # reveal whether the ranking works. Default None keeps existing callers unchanged.
+    # Odds are attached ABOVE this line so research.db records the price too.
     if all_candidates_out is not None:
         all_candidates_out.extend(candidates)
 
     top = _select_legs(candidates, HIT_PARLAY_LEGS)
-
-    # Attach real book odds (prop-odds API) and compute EV = our prob − book implied.
-    # No legs are dropped for negative EV — we surface the same picks, ranked by edge.
-    _attach_hit_odds(top)
     # Rank by EV descending; legs with no posted line (ev=None) sort to the bottom.
     # Use -inf rather than `or -1` so an EV of exactly 0.0 isn't mis-sorted as negative.
     top.sort(key=lambda c: c["ev"] if c.get("ev") is not None else float("-inf"),
@@ -211,7 +224,13 @@ def _attach_hit_odds(legs: list[dict]) -> None:
         est = leg.get("calibrated_prob", leg["hit_probability"])
         leg["ev"] = (round(est - entry["implied"], 4)
                      if entry["implied"] is not None else None)
-    print(f"[hit_pipeline] matched book odds for {matched}/{len(legs)} legs")
+    print(f"[hit_pipeline] matched book odds for {matched}/{len(legs)} scored batters "
+          f"({len(board)} players on the board)")
+    if board and matched < len(legs) * 0.5:
+        # Low coverage has two very different causes: names that failed to normalise, or
+        # players absent because _paginate hit the provider's ~600-row cap. Say which.
+        print("[hit_pipeline] NOTE low odds coverage — if the board looks truncated, "
+              "prop_odds._paginate stops at the provider's ~600-row cap")
 
 
 def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:

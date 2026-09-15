@@ -61,6 +61,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             venue_avg     REAL,
             team_recent_avg    REAL,
             pitcher_recent_h9  REAL,
+            pitcher_season_h9  REAL,   -- model blends season/recent 60/40
+            park_factor        REAL,   -- park_adj = 1 + (this - 1) * 0.3
             pitcher_days_rest  INTEGER,   -- days since the pitcher's last start
             is_day_game   INTEGER,
             outcome       TEXT DEFAULT NULL,   -- 'win' | 'loss' | 'void'
@@ -78,7 +80,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
     for _col, _decl in (("pitcher_days_rest", "INTEGER"),
                         ("split_avg", "REAL"), ("split_ab", "INTEGER"),
-                        ("base_prob", "REAL"), ("owner_adj", "REAL")):
+                        ("base_prob", "REAL"), ("owner_adj", "REAL"),
+                        ("pitcher_season_h9", "REAL"), ("park_factor", "REAL")):
         if _col not in pred_cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_decl} DEFAULT NULL")
     conn.commit()
@@ -100,9 +103,10 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
               (date, game_pk, batter_id, batter_name, team, lineup_pos, pitcher_name,
                model_prob, base_prob, owner_adj, book_odds, book_implied, split_avg, split_ab,
                h2h_ab, h2h_avg, recent_ab, recent_avg,
-               venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9, pitcher_days_rest,
+               venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9,
+               pitcher_season_h9, park_factor, pitcher_days_rest,
                is_day_game, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(date, game_pk, batter_id) DO UPDATE SET
                model_prob=excluded.model_prob,
                book_odds=COALESCE(excluded.book_odds, predictions.book_odds),
@@ -115,7 +119,8 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
             c.get("split_avg"), c.get("split_ab"),
             c.get("h2h_ab"), c.get("h2h_avg"), c.get("recent_ab"), c.get("recent_avg"),
             c.get("venue_ab"), c.get("venue_avg"), c.get("team_recent_avg"),
-            c.get("pitcher_recent_h9"), c.get("pitcher_days_rest"),
+            c.get("pitcher_recent_h9"), c.get("pitcher_season_h9"), c.get("park_factor"),
+            c.get("pitcher_days_rest"),
             int(bool(c.get("is_day_game"))), now,
         ))
         n += 1
