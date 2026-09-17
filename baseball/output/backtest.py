@@ -141,12 +141,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # cannot bind a column name or type as a parameter (`?` placeholders work only for
     # values, not identifiers). Every other statement in this module is parameterized.
     leg_cols = {r[1] for r in conn.execute("PRAGMA table_info(hit_legs)").fetchall()}
-    for col, decl in (("book_odds", "INTEGER"), ("book_implied", "REAL"), ("ev", "REAL")):
+    for col, decl in (("book_odds", "INTEGER"), ("book_implied", "REAL"), ("ev", "REAL"),
+                      ("book", "TEXT")):
         if col not in leg_cols:
             conn.execute(f"ALTER TABLE hit_legs ADD COLUMN {col} {decl} DEFAULT NULL")
     # Migration: hr_prop_candidates gained book odds / implied columns
     hr_cols = {r[1] for r in conn.execute("PRAGMA table_info(hr_prop_candidates)").fetchall()}
-    for col, decl in (("book_odds", "INTEGER"), ("book_implied", "REAL")):
+    for col, decl in (("book_odds", "INTEGER"), ("book_implied", "REAL"),
+                      ("book", "TEXT")):
         if col not in hr_cols:
             conn.execute(f"ALTER TABLE hr_prop_candidates ADD COLUMN {col} {decl} DEFAULT NULL")
     conn.commit()
@@ -278,8 +280,8 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> list[in
                 """INSERT INTO hr_prop_candidates
                    (date, game_pk, batter_id, batter_name, team, pitcher_id,
                     barrel_rate, sweet_spot, hard_contact, zone_fit, pitcher_hr_fb,
-                    gate_triggered, book_odds, book_implied, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    gate_triggered, book_odds, book_implied, book, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     today,
                     c.get("game_pk"),
@@ -295,6 +297,7 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> list[in
                     s.get("gate_triggered"),
                     c.get("book_odds"),
                     c.get("book_implied"),
+                    c.get("book"),
                     now,
                 ),
             )
@@ -426,8 +429,8 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
                 """INSERT INTO hit_legs
                    (date, game_pk, batter_id, batter_name, team, opponent_team,
                     pitcher_name, lineup_pos, hit_probability,
-                    book_odds, book_implied, ev, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    book_odds, book_implied, book, ev, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     today,
                     leg.get("game_pk"),
@@ -440,6 +443,7 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
                     leg.get("hit_probability"),
                     leg.get("book_odds"),
                     leg.get("book_implied"),
+                    leg.get("book"),
                     leg.get("ev"),
                     now,
                 ),
