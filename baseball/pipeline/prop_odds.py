@@ -110,7 +110,18 @@ def normalize_name(name: str) -> str:
 # Restrict to a single book so a 2-leg parlay is actually placeable (you can't
 # parlay a DraftKings leg with a FanDuel leg). Default FanDuel — the only book the
 # user bets. Pass book="draftkings" or book=None (best-of-all) to widen coverage.
-DEFAULT_BOOK = "fanduel"
+# Preferred book for PRICING. DraftKings, not FanDuel — verified against the live books
+# on 2026-09-17: the provider reported FanDuel at -350/-290 for Vilade/Pasquantino when
+# FanDuel actually showed -210/-220, while its DraftKings prices (-188/-172) matched
+# reality (-193/-176). The FanDuel feed overstates by 5-10 implied points.
+#
+# FanDuel stays as a FALLBACK for coverage (157 rows vs DraftKings' 54), and the real
+# book name is always recorded so analysis can filter:
+#     trustworthy prices -> WHERE book = 'draftkings'
+# Re-verify periodically: if the provider fixes its FanDuel feed, flip these back.
+PREFERRED_BOOK = "draftkings"
+FALLBACK_BOOK  = "fanduel"
+DEFAULT_BOOK   = PREFERRED_BOOK
 
 
 def _fetch_over05(market: str, label: str, book: str | None,
@@ -183,18 +194,28 @@ def _fetch_over05(market: str, label: str, book: str | None,
 
 
 def fetch_hit_prop_odds(book: str | None = DEFAULT_BOOK) -> dict:
-    """1+ hit odds (player_hits, Over 0.5), FanDuel-only — EV and single-book
-    placeability matter here, so no cross-book fallback."""
-    return _fetch_over05("player_hits", "hit", book)
+    """1+ hit odds (player_hits, Over 0.5).
+
+    DraftKings preferred (verified accurate), FanDuel borrowed only where DraftKings has
+    no line. `relabel_as_primary` is deliberately OFF — the borrowed price is reported as
+    FanDuel's, because pretending otherwise is exactly what made the HR data unusable.
+    """
+    fallback = FALLBACK_BOOK if book == PREFERRED_BOOK else None
+    return _fetch_over05("player_hits", "hit", book, fallback=fallback)
 
 
 def fetch_hr_prop_odds(book: str | None = DEFAULT_BOOK) -> dict:
-    """1+ home run odds (player_home_runs, Over 0.5). FanDuel preferred; if FanDuel
-    lacks a line, borrow DraftKings' price but report it as FanDuel — the parlay is
-    placeable on the FanDuel app regardless, we just couldn't scrape that number."""
-    fallback = "draftkings" if book == "fanduel" else None
-    return _fetch_over05("player_home_runs", "HR", book,
-                         fallback=fallback, relabel_as_primary=True)
+    """1+ home run odds (player_home_runs, Over 0.5).
+
+    `relabel_as_primary` REMOVED 2026-09-17. It used to report a borrowed DraftKings
+    price as FanDuel's on the reasoning that the parlay is placeable on FanDuel anyway.
+    That made the two sources indistinguishable after the fact — so when the FanDuel feed
+    turned out to be wrong, there was no way to tell which HR prices came from where.
+    The book is now always recorded truthfully; placeability is a betting decision, not
+    something to encode by mislabelling the data.
+    """
+    fallback = FALLBACK_BOOK if book == PREFERRED_BOOK else None
+    return _fetch_over05("player_home_runs", "HR", book, fallback=fallback)
 
 
 if __name__ == "__main__":
