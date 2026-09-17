@@ -151,6 +151,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                       ("book", "TEXT")):
         if col not in hr_cols:
             conn.execute(f"ALTER TABLE hr_prop_candidates ADD COLUMN {col} {decl} DEFAULT NULL")
+    # Same provenance backfill as research.py — see the note there. hr_prop_candidates is
+    # doubly ambiguous: DraftKings prices were used as a FanDuel stand-in when FanDuel had
+    # no line, and were relabelled 'fanduel', so the two sources are now indistinguishable.
+    for _t in ("hit_legs", "hr_prop_candidates"):
+        conn.execute(f"UPDATE {_t} SET book = 'fanduel_feed_suspect' "
+                     f"WHERE book_odds IS NOT NULL AND book IS NULL")
     conn.commit()
 
 

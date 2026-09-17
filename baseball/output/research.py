@@ -89,6 +89,24 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                         ("book", "TEXT")):
         if _col not in pred_cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_decl} DEFAULT NULL")
+    # One-time provenance backfill. Every price stored before 2026-09-17 came from the
+    # prop provider's FanDuel feed, which was verified WRONG that day: it reported
+    # Vilade -350 / Pasquantino -290 when FanDuel actually showed -210 / -220, while its
+    # DraftKings prices matched reality. Those prices overstate the market by 5-10
+    # implied points, which invalidated the median-price, break-even and
+    # "no band is mispriced" analyses (the MODEL results are untouched — they never
+    # read a price).
+    #
+    # The rows are NOT deleted: they hold valid model_prob/outcome/input data. They are
+    # tagged so any price analysis can exclude them with
+    #     WHERE book IS NOT NULL AND book NOT LIKE '%suspect%'
+    # No date bound: once provenance tracking exists every priced row carries a book,
+    # so a priced row with a NULL book is unattributed by definition — and an
+    # unattributed price IS suspect. Self-maintaining, and it also catches any
+    # future code path that forgets to record the source.
+    conn.execute(
+        "UPDATE predictions SET book = 'fanduel_feed_suspect' "
+        "WHERE book_odds IS NOT NULL AND book IS NULL")
     conn.commit()
     return conn
 
