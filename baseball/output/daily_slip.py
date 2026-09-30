@@ -24,7 +24,14 @@ def print_slip(parlay: dict, num: int | None = None) -> None:
     print()
     header = f"=== TODAY'S VALUE PARLAY #{num} ===" if num else "=== TODAY'S VALUE PARLAY ==="
     print(header)
-    print(f"Date: {date.today()}")
+    # The slate date, not the process date — a 9pm-ET run is already tomorrow in UTC and
+    # printed a slip headed with the wrong day.
+    try:
+        from pipeline.stats_fetcher import slate_date
+        _d = slate_date()
+    except Exception:
+        _d = date.today()
+    print(f"Date: {_d}")
     print()
 
     for i, leg in enumerate(legs, 1):

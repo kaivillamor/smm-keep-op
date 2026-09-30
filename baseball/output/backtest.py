@@ -14,6 +14,26 @@ from datetime import date, datetime, timezone
 DB_PATH = os.getenv("BETS_DB_PATH") or "data/history/bets.db"
 
 
+def _slate_today() -> str:
+    """The MLB slate date (Eastern) — not the calendar date this process happens to see.
+
+    `date.today()` rolls over at midnight while collection is still running (the window is
+    roughly 19:00-02:00 UTC). In research.db that put the same game under two dates and
+    duplicated 20% of the corpus (§29); every table here keys on `date` the same way, so
+    they carried the identical latent bug. bets.db has not been written since 2026-07-31,
+    which is the only reason it never bit.
+
+    Lazy import: stats_fetcher pulls pandas/requests, and result_tracker imports this
+    module for `_connect` alone. Falls back to the old behaviour if unavailable, so a
+    missing optional dependency degrades rather than crashes.
+    """
+    try:
+        from pipeline.stats_fetcher import slate_date
+        return slate_date()
+    except Exception:
+        return str(date.today())
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -172,7 +192,7 @@ def log_parlays(parlays: list[dict], db_path: str = DB_PATH) -> list[int]:
     if not parlays:
         return []
     conn  = _connect(db_path)
-    today = str(date.today())
+    today = _slate_today()
 
     existing = conn.execute(
         "SELECT id FROM parlays WHERE date=? LIMIT 1", (today,)
@@ -196,7 +216,7 @@ def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
     Skips logging if a parlay was already saved today (prevents duplicate runs).
     """
     conn  = _connect(db_path)
-    today = str(date.today())
+    today = _slate_today()
 
     existing = conn.execute(
         "SELECT id FROM parlays WHERE date=? LIMIT 1", (today,)
@@ -214,7 +234,7 @@ def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
 
 
 def _insert_parlay(conn: sqlite3.Connection, parlay: dict, now: str) -> int:
-    today = str(date.today())
+    today = _slate_today()
     cur = conn.execute(
         """INSERT INTO parlays (date, num_legs, combined_odds, total_edge, created_at)
            VALUES (?, ?, ?, ?, ?)""",
@@ -258,7 +278,7 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> list[in
     if not candidates:
         return []
     conn  = _connect(db_path)
-    today = str(date.today())
+    today = _slate_today()
 
     existing_rows = conn.execute(
         "SELECT id, batter_id, book_odds FROM hr_prop_candidates WHERE date=?", (today,)
@@ -325,7 +345,7 @@ def log_hr_parlays(cand_ids: list[int], stake: float = 10.0,
     if not cand_ids or len(cand_ids) < 2:
         return
     conn  = _connect(db_path)
-    today = str(date.today())
+    today = _slate_today()
     from parlay.parlay_builder import combine_odds
 
     existing = conn.execute(
@@ -388,7 +408,7 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
     if not legs:
         return []
     conn  = _connect(db_path)
-    today = str(date.today())
+    today = _slate_today()
 
     new_ids  = sorted(str(leg.get("batter_id", "")) for leg in legs)
     existing_rows = conn.execute(
@@ -473,7 +493,7 @@ def log_hit_parlays(leg_ids: list[int], base_stake: float = 25.0,
     if not leg_ids:
         return
     conn  = _connect(db_path)
-    today = str(date.today())
+    today = _slate_today()
     from parlay.parlay_builder import combine_odds, recommended_stake
 
     existing = conn.execute(

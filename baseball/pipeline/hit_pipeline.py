@@ -6,6 +6,7 @@ from pipeline.stats_fetcher import (
     fetch_team_recent_hitting,
     get_team_id,
     game_has_started,
+    game_slate_date,
     is_day_game,
 )
 from model.factors.hit_model import (
@@ -160,6 +161,9 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     "pitcher_days_rest": pitcher_recent.get("days_rest"),
                     "team_recent_avg":   team_recent.get("avg"),
                     "is_day_game":       day_game,
+                    # The slate this GAME belongs to, not the day collection happened to
+                    # run. Keys the research row — see game_slate_date() and §29.
+                    "game_date":         game_slate_date(commence),
                     "base_prob":       base_prob,
                     "owner_adj":       owner_adj,
                     "hit_probability": prob,

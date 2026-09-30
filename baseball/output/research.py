@@ -28,6 +28,34 @@ from datetime import date, datetime, timezone
 RESEARCH_DB = os.getenv("RESEARCH_DB_PATH") or "data/history/research.db"
 
 
+# MLB regular-season / postseason boundary, by season. Postseason rows are structurally
+# different — best teams only, ace rotations, quick hooks, and pitcher_recent_h9 missing
+# on 12.5% of rows against 3.3% in the regular season — so they must not silently pool
+# into the model corpus (§29). Tagged rather than date-filtered, because an implicit
+# cutoff is something a future reader has to remember. Update annually, same maintenance
+# note as PARK_FACTORS.
+POSTSEASON_START = {2026: "2026-09-29"}
+
+
+def _season_phase(game_date: str | None) -> str | None:
+    """'regular' | 'postseason', or None when this season's boundary isn't recorded.
+
+    None on purpose: an unrecorded boundary is unknown, not 'regular'. Guessing here
+    would put postseason rows into the model corpus under a confident label, which is
+    the exact failure this column exists to prevent.
+    """
+    if not game_date:
+        return None
+    try:
+        year = int(str(game_date)[:4])
+    except (TypeError, ValueError):
+        return None
+    start = POSTSEASON_START.get(year)
+    if not start:
+        return None
+    return "postseason" if str(game_date) >= start else "regular"
+
+
 def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     # A mounted volume starts empty, so the parent dir may not exist yet.
     parent = os.path.dirname(db_path)
@@ -38,7 +66,12 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS predictions (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            date          TEXT    NOT NULL,
+            date          TEXT    NOT NULL,   -- the GAME's Eastern slate date, from first
+                                              --  pitch — NOT the date collection ran. It
+                                              --  was the collection date until
+                                              --  2026-09-30, which duplicated 20% of the
+                                              --  corpus across UTC midnight (§29).
+                                              --  created_at still records collection time.
             game_pk       INTEGER NOT NULL,
             batter_id     INTEGER NOT NULL,
             batter_name   TEXT,
@@ -80,6 +113,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             is_day_game   INTEGER,
             outcome       TEXT DEFAULT NULL,   -- 'win' | 'loss' | 'void'
             actual_hits   INTEGER DEFAULT NULL,
+            season_phase  TEXT DEFAULT NULL,  -- 'regular' | 'postseason' | NULL=unknown
             created_at    TEXT NOT NULL,
             UNIQUE(date, game_pk, batter_id)
         );
@@ -95,7 +129,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                         ("split_avg", "REAL"), ("split_ab", "INTEGER"),
                         ("base_prob", "REAL"), ("owner_adj", "REAL"),
                         ("pitcher_season_h9", "REAL"), ("park_factor", "REAL"),
-                        ("book", "TEXT"), ("calibrated_prob", "REAL")):
+                        ("book", "TEXT"), ("calibrated_prob", "REAL"),
+                        ("season_phase", "TEXT")):
         if _col not in pred_cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_decl} DEFAULT NULL")
     # One-time provenance backfill. Every price stored before 2026-09-17 came from the
@@ -115,21 +150,123 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     # future code path that forgets to record the source.
     conn.execute(
         "UPDATE predictions SET book = 'fanduel_feed_suspect' "
-        "WHERE book_odds IS NOT NULL AND book IS NULL")
+        "WHERE book_odds IS NOT NULL AND book IS NULL "
+        "AND created_at < '2026-09-17T19:00'")
+    # The "self-maintaining" claim above was WRONG, and this is the correction. `book` was
+    # missing from the INSERT's ON CONFLICT clause, so a row first written unpriced had its
+    # odds filled in by COALESCE on a later run while `book` stayed NULL — and this
+    # backfill then stamped a correctly-sourced DraftKings price as coming from the
+    # discredited feed. 219 prices collected AFTER the 2026-09-17 fix were mislabelled.
+    #
+    # The ON CONFLICT clause now carries `book`, so the rule genuinely self-maintains from
+    # here. The bound above stops it re-libelling post-fix rows; the statement below
+    # relabels the 219 already hit. They are 'unattributed' rather than suspect: their
+    # source was never recorded, so it is unknown — which is not the same as known-bad, and
+    # conflating the two would throw away usable prices.
+    #
+    # Bounded on created_at, NOT date: `date` is the slate, which the de-duplication below
+    # rewrites, and the fix deployed at 2026-09-17T19:06Z — mid-slate. Splitting there puts
+    # 343 rows pre-fix and 219 post-fix, and the 343 matches §28's independently recorded
+    # count exactly. A `date >= '2026-09-17'` bound instead swept in 43 rows written at
+    # 00:09Z that day, which really were from the bad feed.
+    conn.execute(
+        "UPDATE predictions SET book = 'unattributed' "
+        "WHERE book_odds IS NOT NULL AND (book IS NULL OR book = 'fanduel_feed_suspect') "
+        "AND created_at >= '2026-09-17T19:00'")
+
+    # ── De-duplicate the collection-date key (one-time, idempotent) ────────────────
+    # `date` was `date.today()` — the COLLECTION date — inside
+    # UNIQUE(date, game_pk, batter_id). Collection runs ~19:00-02:00 UTC, so a late game
+    # scored either side of UTC midnight was inserted TWICE under two dates: 678 excess
+    # rows, 20% of the corpus. Duplicates are perfectly correlated, so they inflated every
+    # n and narrowed every confidence interval by ~12% (§29).
+    #
+    # A batter appears once per game, so (game_pk, batter_id) is the true natural key. The
+    # surviving row is the LAST logged (freshest lineup and stats), and its date is
+    # repaired to the earliest of the group — which is the real slate, since the spurious
+    # copy is always the one written after midnight.
+    #
+    # Losing rows are ARCHIVED, not dropped (§28's precedent: rows hold valid model data).
+    # Archived as JSON so this table can never break when predictions gains a column.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS predictions_superseded (
+            id          INTEGER PRIMARY KEY,   -- original predictions.id
+            game_pk     INTEGER,
+            batter_id   INTEGER,
+            date        TEXT,
+            created_at  TEXT,
+            archived_at TEXT NOT NULL,
+            reason      TEXT NOT NULL,
+            row_json    TEXT NOT NULL
+        );
+    """)
+    dupes = conn.execute("""
+        SELECT game_pk, batter_id, MIN(date) AS slate, MAX(id) AS keep_id, COUNT(*) AS n
+        FROM predictions
+        GROUP BY game_pk, batter_id
+        HAVING n > 1
+    """).fetchall()
+    if dupes:
+        import json as _json
+        _now = datetime.now(timezone.utc).isoformat()
+        _archived = 0
+        for _d in dupes:
+            losers = conn.execute(
+                "SELECT * FROM predictions WHERE game_pk=? AND batter_id=? AND id<>?",
+                (_d["game_pk"], _d["batter_id"], _d["keep_id"])).fetchall()
+            for _row in losers:
+                conn.execute(
+                    "INSERT OR IGNORE INTO predictions_superseded "
+                    "(id, game_pk, batter_id, date, created_at, archived_at, reason, row_json) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (_row["id"], _row["game_pk"], _row["batter_id"], _row["date"],
+                     _row["created_at"], _now, "collection-date duplicate (pre-2026-09-30)",
+                     _json.dumps({k: _row[k] for k in _row.keys()})))
+                _archived += 1
+            # DELETE before the date repair: updating the survivor first would collide with
+            # the row still occupying (date, game_pk, batter_id).
+            conn.execute(
+                "DELETE FROM predictions WHERE game_pk=? AND batter_id=? AND id<>?",
+                (_d["game_pk"], _d["batter_id"], _d["keep_id"]))
+            conn.execute("UPDATE predictions SET date=? WHERE id=?", (_d["slate"], _d["keep_id"]))
+        print(f"[research] de-duplicated {_archived} collection-date rows "
+              f"({len(dupes)} matchups); archived to predictions_superseded", flush=True)
+
+    # Backfill season_phase for every row that predates the column.
+    conn.execute("UPDATE predictions SET season_phase = CASE "
+                 "WHEN date >= ? THEN 'postseason' ELSE 'regular' END "
+                 "WHERE season_phase IS NULL AND date LIKE '2026-%'",
+                 (POSTSEASON_START[2026],))
     conn.commit()
     return conn
 
 
 def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
     """Records every scored batter. Idempotent — re-running a slate updates in place
-    rather than duplicating, so a mid-day re-run is safe."""
+    rather than duplicating, so a re-run at any hour is safe.
+
+    "Any hour" is the fix, not decoration. This keyed rows on `date.today()`, so the same
+    game scored either side of UTC midnight landed as two rows under two dates and the
+    upsert never fired — 20% of the corpus duplicated (§29). The key is now the GAME's
+    Eastern slate date, carried on each candidate by hit_pipeline, which cannot move with
+    the clock.
+    """
     if not candidates:
         return 0
     conn  = _connect(db_path)
-    today = str(date.today())
+    # Lazy import: stats_fetcher pulls pandas/requests, and web/app.py imports this module
+    # just for RESEARCH_DB. Only needed for candidates with no game_date of their own.
+    try:
+        from pipeline.stats_fetcher import slate_date as _slate_date
+        fallback_date = _slate_date()
+    except Exception:
+        fallback_date = str(date.today())
     now   = datetime.now(timezone.utc).isoformat()
+    dates_seen: set[str] = set()
     n = 0
     for c in candidates:
+        game_date = c.get("game_date") or fallback_date
+        dates_seen.add(game_date)
         conn.execute("""
             INSERT INTO predictions
               (date, game_pk, batter_id, batter_name, team, lineup_pos, pitcher_name,
@@ -139,15 +276,20 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
                h2h_ab, h2h_avg, recent_ab, recent_avg,
                venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9,
                pitcher_season_h9, park_factor, pitcher_days_rest,
-               is_day_game, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               is_day_game, season_phase, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(date, game_pk, batter_id) DO UPDATE SET
                model_prob=excluded.model_prob,
                calibrated_prob=excluded.calibrated_prob,
                book_odds=COALESCE(excluded.book_odds, predictions.book_odds),
-               book_implied=COALESCE(excluded.book_implied, predictions.book_implied)
+               book_implied=COALESCE(excluded.book_implied, predictions.book_implied),
+               -- `book` MUST be refreshed with the odds it describes. Omitting it left a
+               -- row that gained a price on a later run with book=NULL, which the
+               -- provenance backfill then stamped 'fanduel_feed_suspect' — 219 good
+               -- DraftKings prices libelled as coming from the broken feed (§29).
+               book=COALESCE(excluded.book, predictions.book)
         """, (
-            today, c.get("game_pk"), c.get("batter_id"), c.get("batter_name"),
+            game_date, c.get("game_pk"), c.get("batter_id"), c.get("batter_name"),
             c.get("team"), c.get("lineup_pos"), c.get("pitcher_name"),
             c.get("hit_probability"), c.get("calibrated_prob"),
             c.get("base_prob"), c.get("owner_adj"),
@@ -157,12 +299,13 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
             c.get("venue_ab"), c.get("venue_avg"), c.get("team_recent_avg"),
             c.get("pitcher_recent_h9"), c.get("pitcher_season_h9"), c.get("park_factor"),
             c.get("pitcher_days_rest"),
-            int(bool(c.get("is_day_game"))), now,
+            int(bool(c.get("is_day_game"))), _season_phase(game_date), now,
         ))
         n += 1
     conn.commit()
     conn.close()
-    print(f"[research] logged {n} prediction(s) for {today} (research only — not bets)")
+    slates = ", ".join(sorted(dates_seen)) or fallback_date
+    print(f"[research] logged {n} prediction(s) for {slates} (research only — not bets)")
     return n
 
 

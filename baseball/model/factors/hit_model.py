@@ -223,15 +223,45 @@ def score_batter_hit_prob(
     return round(1.0 - (1.0 - adjusted_ba) ** expected_ab, 4)
 
 
+# Innings of league-average prior mixed into every pitcher's H/9. A September call-up
+# with 2 innings gets pulled ~94% of the way to league average; a 180-inning starter keeps
+# ~86% of his own rate. Chosen so a single short outing cannot masquerade as dominance.
+H9_IP_PRIOR = 30.0
+
+
 def _pitcher_hits_per_9(pitcher_stats: dict) -> float:
-    """H/9 = WHIP×9 − BB/9. Falls back through opp_avg, then league average."""
-    whip = pitcher_stats.get("whip")
-    bb9  = pitcher_stats.get("bb_per_9")
-    if whip is not None and bb9 is not None:
-        return max(whip * 9 - bb9, 0.5)
-    if whip is not None:
-        return max(whip * 9 - 3.2, 0.5)
+    """H/9 = WHIP×9 − BB/9, regressed toward league average by innings pitched.
+
+    The regression is the point. This used to end in `max(..., 0.5)`, and that floor —
+    not a small sample — is where Jared Simpson's 0.5 H/9 came from: it drove six
+    Phillies batters to 4-6% hit probability on 2026-09-16, including Harper at 6.1% and
+    Arraez at 6.4%, both of whom got hits. Across the 138 rows with a sub-4.0 H/9 the
+    model predicted 45.4% where reality delivered 61.6% (§29).
+
+    Note the asymmetry that bug had: when stats were entirely MISSING the function
+    returned LEAGUE_H_PER_9, which is right, but when they were present and tiny it
+    returned 0.5. Sparse data was handled worse than absent data. Now a rate with no
+    innings behind it is treated as no rate at all, and a thin sample is shrunk rather
+    than trusted.
+    """
+    whip    = pitcher_stats.get("whip")
+    bb9     = pitcher_stats.get("bb_per_9")
     opp_avg = pitcher_stats.get("opp_avg")
-    if opp_avg is not None:
-        return max(opp_avg * 34, 0.5)
-    return LEAGUE_H_PER_9
+
+    if whip is not None and bb9 is not None:
+        raw = whip * 9 - bb9        # exact: WHIP×9 = H/9 + BB/9, so this is H/9
+    elif whip is not None:
+        raw = whip * 9 - 3.2        # league-average BB/9 stand-in
+    elif opp_avg is not None:
+        raw = opp_avg * 34          # opponent BA -> H/9 at ~34 AB per 9 innings
+    else:
+        return LEAGUE_H_PER_9
+
+    ip = pitcher_stats.get("innings_pitched")
+    if not ip or ip <= 0:
+        # A rate with no innings behind it is not a rate. Previously this branch could
+        # still return a raw number computed from a 2-inning sample.
+        return LEAGUE_H_PER_9
+
+    weight = ip / (ip + H9_IP_PRIOR)
+    return max(weight * raw + (1.0 - weight) * LEAGUE_H_PER_9, 0.0)

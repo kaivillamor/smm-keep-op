@@ -30,6 +30,34 @@ def slate_date() -> str:
     return (datetime.now(timezone.utc) - _ET_OFFSET).strftime("%Y-%m-%d")
 
 
+def game_slate_date(commence_time: str | None) -> str:
+    """The MLB slate date (Eastern) a given first pitch belongs to, as YYYY-MM-DD.
+
+    Deliberately the same basis as slate_date() — the fixed offset, not the DST zone.
+    This value is the key written to predictions.date, so it has to agree with the
+    per-day caches and probable-pitcher keying, which key off slate_date(). An hour of
+    DST drift cannot move a first pitch across a slate boundary; a different offset can.
+
+    Why this exists: research.py used `date.today()`, the COLLECTION date, as part of
+    UNIQUE(date, game_pk, batter_id). Collection runs ~19:00-02:00 UTC, so a late game
+    scored either side of UTC midnight was written twice under two different dates — 678
+    duplicate rows, 20% of the corpus (§29). A slate date derived from first pitch is a
+    property of the game and cannot drift with the clock.
+
+    Falls back to slate_date() on a missing or unparseable timestamp, so a game with no
+    start time is attributed to the run's own slate rather than dropped.
+    """
+    if not commence_time:
+        return slate_date()
+    try:
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+    except ValueError:
+        return slate_date()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt.astimezone(timezone.utc) - _ET_OFFSET).strftime("%Y-%m-%d")
+
+
 def is_day_game(commence_time: str | None) -> bool:
     """True if first pitch is before 6pm Eastern.
 
