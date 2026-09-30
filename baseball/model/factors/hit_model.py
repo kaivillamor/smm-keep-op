@@ -31,35 +31,49 @@ DAY_GAME_BA_PENALTY = 0.010  # flat BA reduction — batters hit slightly worse 
 MAX_ADJUSTED_BA     = 0.400
 
 HIT_PARLAY_LEGS   = 4     # legs surfaced in the daily hit parlay (2 pairs × 2 legs)
-MIN_HIT_PROB      = 0.73  # legs below this can't cover typical parlay pricing (see below)
+MIN_HIT_PROB      = 0.654 # implied prob of the verified DK median — derived below
 
-# ── Betting-gate calibration (added 2026-09-09) ──────────────────────────────
-# Measured on the first 240 post-splits-fix graded predictions, the model's raw output
-# regressed against reality with a slope of ~0.17: only ~17% of each predicted point
-# translated into a real point (1.0 would be perfect). The two top buckets missed by
-# -11.9 and -27.6 pts, both statistically real (z = -2.0 and -3.7), so the model's most
-# confident predictions were its least accurate.
+# ── Betting-gate calibration (added 2026-09-09, refit 2026-09-30) ─────────────
+# The model overstates its own confidence: regressed against reality, only a fraction of
+# each predicted point survives. So the gate compares a SHRUNK probability against
+# MIN_HIT_PROB, via calibrated_hit_prob().
 #
-# The raw number is still what gets LOGGED to research.db — compressing that would split
-# the calibration series into two model versions and make the sample unusable, which is
-# already the problem with the pre-fix 986. So the shrink applies to the BETTING GATE
-# only, via calibrated_hit_prob().
+# The raw number is still what gets logged as predictions.model_prob — compressing that
+# would split the calibration series into two model versions and make the sample
+# unusable, which is already the problem with the pre-fix 986. The shrunk value is now
+# logged ALONGSIDE it as predictions.calibrated_prob (2026-09-30). It is the number the
+# gate actually decides on, and discarding it hid the bug in the guard below for three
+# weeks: every analysis of "what the gate selects" silently measured model_prob instead.
 #
-# Consequence, stated plainly: almost nothing clears MIN_HIT_PROB now. That is the
-# correct behaviour — at a -270 median each leg needs 73.0% and the best empirical cut
-# reached 66.1%. Surfacing nothing is the honest answer, not a bug.
+# Refit 2026-09-30 on 2,598 deduplicated graded rows (the original used 240):
+#   slope 0.2570 ± 0.0804, 95% CI [0.099, 0.415]   base = observed rate 0.6455
+# The old 0.17 sits inside that interval, so it was never wrong — only fitted on 10x
+# less data. Fitted on what the model ACTUALLY emits, pathological rows included: while
+# _pitcher_hits_per_9 still floors at 0.5 the live model keeps producing them, so the
+# calibration has to map its real output. Excluding them gives 0.2893 ± 0.0908.
 #
-# PROVISIONAL: fitted on 240 rows / 5 buckets. Refit once a few hundred more land.
-CALIBRATION_SLOPE = 0.17   # how much of a predicted point survives contact with reality
-CALIBRATION_BASE  = 0.61   # observed base rate the shrink pulls toward
+# MIN_HIT_PROB derivation (2026-09-30). For a parlay of equally-priced legs the per-leg
+# break-even equals the single-leg implied probability, so the gate is the implied prob
+# of the median price actually available. Verified DraftKings, 915 graded priced rows:
+#   p25 -219 (68.7%) | median -189 (65.4%) | p75 -163 (62.0%)
+# -> 0.654. This REPLACES the old 0.73, which came from a -270 median the broken FanDuel
+# feed invented (PROJECT.md §28). Known limitation: a constant derived from the median
+# does not protect against selection — on the 2,598-row corpus the legs that clear this
+# gate are priced at a mean 72.1% implied, not 65.4%, for a -4.1pt edge. The per-leg EV
+# gate (compare calibrated_prob to each leg's own book_implied) is the agreed fallback.
+CALIBRATION_SLOPE = 0.257   # how much of a predicted point survives contact with reality
+CALIBRATION_BASE  = 0.6455  # observed base rate the shrink pulls toward
 
 
 def calibrated_hit_prob(raw_prob: float) -> float:
     """Shrink a raw model probability toward the observed base rate.
 
-    Used ONLY for the betting gate and EV. Research logging keeps the raw value.
+    Used for the betting gate and EV. `model_prob` keeps the raw value; this one is
+    logged beside it as `calibrated_prob`.
     """
     return round(CALIBRATION_BASE + CALIBRATION_SLOPE * (raw_prob - CALIBRATION_BASE), 4)
+
+
 MAX_LINEUP_DEPTH  = 6     # only score batters in positions 1–6 (most plate appearances)
 
 # "Double-up, else $25 floor" staking (see parlay_builder.recommended_stake):
@@ -80,6 +94,34 @@ _PA_BY_POS = {
     1: 4.6, 2: 4.4, 3: 4.3, 4: 4.1,
     5: 4.0, 6: 3.9, 7: 3.8, 8: 3.7, 9: 3.5,
 }
+
+
+# ── Gate reachability guard (added 2026-09-30) ────────────────────────────────
+# From 2026-09-09 to 2026-09-30 the gate could not fire at ANY input. Shrinking toward
+# 0.61 with slope 0.17 capped calibrated_hit_prob() at 0.676 while MIN_HIT_PROB was
+# 0.73: clearing it needed a raw probability of 1.316. Zero of 2,598 graded rows cleared
+# it, and from outside that looked like a finding ("the market is priced past the model")
+# rather than a bug, because the compared value was never logged. Two constants, each
+# defensible alone, were jointly impossible.
+#
+# The bound that matters is the model's STRUCTURAL ceiling, not calibrated_hit_prob(1.0):
+# raw output is capped by MAX_ADJUSTED_BA over the most plate appearances any scored
+# lineup slot gets, which is 0.8759 — so a gate can pass a raw=1.0 check and still be
+# unreachable in practice. Checking the real ceiling is what makes this guard bite.
+#
+# A raise rather than an assert: `python -O` strips asserts, and this must hold in
+# production, where a dead gate is invisible.
+_MAX_PA  = max(pa for pos, pa in _PA_BY_POS.items() if pos <= MAX_LINEUP_DEPTH)
+_MAX_RAW = 1.0 - (1.0 - MAX_ADJUSTED_BA) ** (_MAX_PA * AB_PER_PA)
+_CEILING = calibrated_hit_prob(_MAX_RAW)
+if _CEILING < MIN_HIT_PROB:
+    raise RuntimeError(
+        f"hit gate is unreachable: the model's highest possible raw probability "
+        f"({_MAX_RAW:.4f}) calibrates to {_CEILING:.4f}, below MIN_HIT_PROB "
+        f"({MIN_HIT_PROB}). No lineup can ever clear the gate. Move MIN_HIT_PROB, "
+        f"CALIBRATION_SLOPE ({CALIBRATION_SLOPE}) or CALIBRATION_BASE "
+        f"({CALIBRATION_BASE}) — do not ship a gate that cannot fire."
+    )
 
 
 def score_batter_hit_prob(

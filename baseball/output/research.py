@@ -46,6 +46,15 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             lineup_pos    INTEGER,
             pitcher_name  TEXT,
             model_prob    REAL,            -- final prediction (base_prob + owner_adj)
+            calibrated_prob REAL,          -- model_prob shrunk toward the base rate. THIS
+                                           --  is the number the betting gate compares
+                                           --  against MIN_HIT_PROB, not model_prob.
+                                           --  Computed since 2026-09-09 but discarded
+                                           --  until 2026-09-30, which is how a gate that
+                                           --  could not fire at any input stayed hidden
+                                           --  for three weeks: every study of "what the
+                                           --  gate selects" was really reading model_prob.
+                                           --  §24 — if the model uses a value, log it.
             base_prob     REAL,            -- quant model ONLY, before personal rules
             owner_adj     REAL,            -- the personal-logic delta, so it can be measured
             book_odds     INTEGER,         -- book's line, when one was posted
@@ -86,7 +95,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                         ("split_avg", "REAL"), ("split_ab", "INTEGER"),
                         ("base_prob", "REAL"), ("owner_adj", "REAL"),
                         ("pitcher_season_h9", "REAL"), ("park_factor", "REAL"),
-                        ("book", "TEXT")):
+                        ("book", "TEXT"), ("calibrated_prob", "REAL")):
         if _col not in pred_cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_decl} DEFAULT NULL")
     # One-time provenance backfill. Every price stored before 2026-09-17 came from the
@@ -124,21 +133,24 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
         conn.execute("""
             INSERT INTO predictions
               (date, game_pk, batter_id, batter_name, team, lineup_pos, pitcher_name,
-               model_prob, base_prob, owner_adj, book_odds, book_implied, book,
+               model_prob, calibrated_prob, base_prob, owner_adj,
+               book_odds, book_implied, book,
                split_avg, split_ab,
                h2h_ab, h2h_avg, recent_ab, recent_avg,
                venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9,
                pitcher_season_h9, park_factor, pitcher_days_rest,
                is_day_game, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(date, game_pk, batter_id) DO UPDATE SET
                model_prob=excluded.model_prob,
+               calibrated_prob=excluded.calibrated_prob,
                book_odds=COALESCE(excluded.book_odds, predictions.book_odds),
                book_implied=COALESCE(excluded.book_implied, predictions.book_implied)
         """, (
             today, c.get("game_pk"), c.get("batter_id"), c.get("batter_name"),
             c.get("team"), c.get("lineup_pos"), c.get("pitcher_name"),
-            c.get("hit_probability"), c.get("base_prob"), c.get("owner_adj"),
+            c.get("hit_probability"), c.get("calibrated_prob"),
+            c.get("base_prob"), c.get("owner_adj"),
             c.get("book_odds"), c.get("book_implied"), c.get("book"),
             c.get("split_avg"), c.get("split_ab"),
             c.get("h2h_ab"), c.get("h2h_avg"), c.get("recent_ab"), c.get("recent_avg"),

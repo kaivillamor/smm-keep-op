@@ -48,6 +48,20 @@ async def lifespan(_: "FastAPI"):
             print(f"[users] seeded {seeded} account(s) from environment", flush=True)
     except Exception as e:
         print(f"[users] bootstrap failed: {type(e).__name__}: {e}", flush=True)
+    # research.py owns the predictions schema, and its migrations run inside _connect().
+    # This process READS that table through _db() (a bare sqlite3.connect), so without
+    # this it would serve a pre-migration schema until the first collection run of the
+    # day wrote a row — a window in which any endpoint selecting a newly added column
+    # fails with "no such column". Opening once through the owning module closes it.
+    try:
+        from output.research import _connect as _research_connect
+        # Must pass the RESOLVED path: research.py's default is relative and would
+        # resolve against this process's CWD, migrating a different file than _db()
+        # reads — see the note in _research_db_path().
+        _research_connect(_research_db_path()).close()
+        print("[research] schema ensured", flush=True)
+    except Exception as e:
+        print(f"[research] schema ensure failed: {type(e).__name__}: {e}", flush=True)
     threading.Thread(target=_scheduler, daemon=True).start()
     print("[scheduler] started", flush=True)
     yield
@@ -253,9 +267,14 @@ def api_slate(_: tuple = Depends(auth), limit: int = 200):
       model_prob      raw output, what research.db logs
       calibrated      what the betting gate actually uses
 
-    They differ a lot on purpose. Measured calibration slope is ~0.17, so the raw number
-    overstates badly at the top end; `clears_gate` is almost always false right now and
-    that is the honest state of the model, not a bug.
+    They differ a lot on purpose: the measured calibration slope is well under 1, so the
+    raw number overstates badly at the top end.
+
+    `calibrated` prefers the STORED calibrated_prob (logged since 2026-09-30) and only
+    recomputes for older rows that predate the column. That distinction matters —
+    recomputing applies today's CALIBRATION_SLOPE to a prediction that was gated under
+    the old one, which silently rewrites what the model is claimed to have said. The
+    stored value is the historical record; the recomputation is a best-effort fallback.
     """
     from model.factors.hit_model import calibrated_hit_prob, MIN_HIT_PROB
     try:
@@ -264,7 +283,7 @@ def api_slate(_: tuple = Depends(auth), limit: int = 200):
             "SELECT MAX(date) FROM predictions WHERE outcome IS NULL").fetchone()[0]
         rows = [dict(r) for r in c.execute(
             "SELECT batter_name, team, pitcher_name, lineup_pos, model_prob, "
-            "       book_odds, book_implied, date "
+            "       calibrated_prob, book_odds, book_implied, date "
             "FROM predictions WHERE outcome IS NULL AND date = ? "
             "ORDER BY model_prob DESC LIMIT ?", (day, min(limit, 400)))] if day else []
         c.close()
@@ -273,7 +292,9 @@ def api_slate(_: tuple = Depends(auth), limit: int = 200):
 
     legs = []
     for r in rows:
-        cal = calibrated_hit_prob(r["model_prob"]) if r["model_prob"] is not None else None
+        cal = r["calibrated_prob"]
+        if cal is None and r["model_prob"] is not None:
+            cal = calibrated_hit_prob(r["model_prob"])   # pre-2026-09-30 row
         legs.append({
             "name": r["batter_name"], "team": r["team"], "pitcher": r["pitcher_name"],
             "spot": r["lineup_pos"], "model_prob": r["model_prob"], "calibrated": cal,
