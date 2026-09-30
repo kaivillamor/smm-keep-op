@@ -107,7 +107,15 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             venue_avg     REAL,
             team_recent_avg    REAL,
             pitcher_recent_h9  REAL,
-            pitcher_season_h9  REAL,   -- model blends season/recent 60/40
+            pitcher_season_h9  REAL,   -- model blends season/recent 60/40. From
+                                       --  2026-09-30 this is REGRESSED toward league
+                                       --  average by pitcher_season_ip; before that it
+                                       --  was the raw rate with a 0.5 floor (§29). The
+                                       --  two methods are not comparable — rows with
+                                       --  calibrated_prob NOT NULL use the new one.
+            pitcher_season_ip  REAL,   -- innings behind that rate. Logged so the shrink
+                                       --  can be undone: with w = ip/(ip+H9_IP_PRIOR),
+                                       --  raw = (h9 - (1-w)*LEAGUE_H_PER_9) / w
             park_factor        REAL,   -- park_adj = 1 + (this - 1) * 0.3
             pitcher_days_rest  INTEGER,   -- days since the pitcher's last start
             is_day_game   INTEGER,
@@ -130,7 +138,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                         ("base_prob", "REAL"), ("owner_adj", "REAL"),
                         ("pitcher_season_h9", "REAL"), ("park_factor", "REAL"),
                         ("book", "TEXT"), ("calibrated_prob", "REAL"),
-                        ("season_phase", "TEXT")):
+                        ("season_phase", "TEXT"), ("pitcher_season_ip", "REAL")):
         if _col not in pred_cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_decl} DEFAULT NULL")
     # One-time provenance backfill. Every price stored before 2026-09-17 came from the
@@ -275,9 +283,9 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
                split_avg, split_ab,
                h2h_ab, h2h_avg, recent_ab, recent_avg,
                venue_ab, venue_avg, team_recent_avg, pitcher_recent_h9,
-               pitcher_season_h9, park_factor, pitcher_days_rest,
+               pitcher_season_h9, pitcher_season_ip, park_factor, pitcher_days_rest,
                is_day_game, season_phase, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(date, game_pk, batter_id) DO UPDATE SET
                model_prob=excluded.model_prob,
                calibrated_prob=excluded.calibrated_prob,
@@ -297,7 +305,8 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
             c.get("split_avg"), c.get("split_ab"),
             c.get("h2h_ab"), c.get("h2h_avg"), c.get("recent_ab"), c.get("recent_avg"),
             c.get("venue_ab"), c.get("venue_avg"), c.get("team_recent_avg"),
-            c.get("pitcher_recent_h9"), c.get("pitcher_season_h9"), c.get("park_factor"),
+            c.get("pitcher_recent_h9"), c.get("pitcher_season_h9"),
+            c.get("pitcher_season_ip"), c.get("park_factor"),
             c.get("pitcher_days_rest"),
             int(bool(c.get("is_day_game"))), _season_phase(game_date), now,
         ))

@@ -143,6 +143,10 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     # any weight-fitting describe a different model than the live one.
                     "park_factor":       runs_factor,
                     "pitcher_season_h9": _pitcher_hits_per_9(p_stats),
+                    # The sample the shrinkage weight is computed from. §24 — h9 is now
+                    # regressed toward league average by innings, so without this the
+                    # stored h9 cannot be reproduced or un-shrunk by a later refit.
+                    "pitcher_season_ip": p_stats.get("innings_pitched"),
                     "team":            team,
                     "opponent_team":   opponent_team,
                     "lineup_pos":      lineup_pos,

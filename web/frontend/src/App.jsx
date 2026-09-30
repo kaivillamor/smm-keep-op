@@ -7,6 +7,10 @@ const pts = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed
 
 // The ranking gap is the number that decides whether the model is bettable at all, so
 // it gets an explicit verdict rather than leaving the reader to interpret a decimal.
+
+// A gap this size, ESTABLISHED, is what "usable" means.
+const USABLE_GAP = 0.08
+
 function verdictFor(gap, ciLow, ciHigh) {
   if (gap == null) return { label: 'not enough data', tone: 'neutral' }
   // The interval decides, not the point estimate. Thresholds alone read noise as a
@@ -14,7 +18,14 @@ function verdictFor(gap, ciLow, ciHigh) {
   if (ciLow == null || ciHigh == null) return { label: `${(gap * 100).toFixed(1)} pts`, tone: 'neutral' }
   if (ciHigh < 0) return { label: 'inverted — ranks worse than chance', tone: 'bad' }
   if (ciLow <= 0) return { label: 'inconclusive — interval still contains zero', tone: 'warn' }
-  if (gap < 0.08) return { label: 'weak but real signal', tone: 'warn' }
+  // Compare the LOWER BOUND, not the point estimate. This line used to read
+  // `gap < USABLE_GAP`, which is the very mistake the comment above warns about — and it
+  // misfired on 2026-09-30: tripling the sample pulled the point estimate from +8.9 to
+  // +7.4 while the interval TIGHTENED (width 10.5 -> 6.6) and its lower bound ROSE
+  // (+3.6 -> +4.1). Strictly better evidence, and the badge downgraded itself, which read
+  // as the model decaying. Testing ciLow means the badge only ever claims what the data
+  // establishes, and more data can no longer make the verdict worse on its own.
+  if (ciLow < USABLE_GAP) return { label: 'weak but real signal', tone: 'warn' }
   return { label: 'usable signal', tone: 'good' }
 }
 
