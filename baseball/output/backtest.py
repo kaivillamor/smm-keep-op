@@ -23,15 +23,12 @@ def _slate_today() -> str:
     they carried the identical latent bug. bets.db has not been written since 2026-07-31,
     which is the only reason it never bit.
 
-    Lazy import: stats_fetcher pulls pandas/requests, and result_tracker imports this
-    module for `_connect` alone. Falls back to the old behaviour if unavailable, so a
-    missing optional dependency degrades rather than crashes.
+    Imported inside the function for the same reason as parlay_builder above — `python
+    output/backtest.py summary` runs this file with only output/ on sys.path. Unguarded on
+    purpose: a missing slate calendar is an error, not a cue to use a different date.
     """
-    try:
-        from pipeline.stats_fetcher import slate_date
-        return slate_date()
-    except Exception:
-        return str(date.today())
+    from pipeline.stats_fetcher import slate_date
+    return slate_date()
 
 
 # ---------------------------------------------------------------------------
@@ -207,30 +204,6 @@ def log_parlays(parlays: list[dict], db_path: str = DB_PATH) -> list[int]:
     conn.commit()
     conn.close()
     return ids
-
-
-def log_parlay(parlay: dict, db_path: str = DB_PATH) -> int:
-    """
-    Saves a generated parlay and its legs to the database.
-    Returns the parlay ID for future outcome updates.
-    Skips logging if a parlay was already saved today (prevents duplicate runs).
-    """
-    conn  = _connect(db_path)
-    today = _slate_today()
-
-    existing = conn.execute(
-        "SELECT id FROM parlays WHERE date=? LIMIT 1", (today,)
-    ).fetchone()
-    if existing:
-        print(f"[backtest] Parlay already logged for {today} (id={existing['id']}) — skipping.")
-        conn.close()
-        return existing["id"]
-
-    now = datetime.now(timezone.utc).isoformat()
-    parlay_id = _insert_parlay(conn, parlay, now)
-    conn.commit()
-    conn.close()
-    return parlay_id
 
 
 def _insert_parlay(conn: sqlite3.Connection, parlay: dict, now: str) -> int:
@@ -614,34 +587,6 @@ def _american_to_decimal(odds: int) -> float:
 # Outcome updates (run after games resolve)
 # ---------------------------------------------------------------------------
 
-def update_parlay_outcome(parlay_id: int, outcome: str, payout: float = None,
-                          db_path: str = DB_PATH) -> None:
-    """outcome: 'win' | 'loss' | 'push'"""
-    conn = _connect(db_path)
-    conn.execute(
-        "UPDATE parlays SET outcome=?, payout=? WHERE id=?",
-        (outcome, payout, parlay_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def update_leg_outcome(leg_id: int, outcome: str, closing_odds: int = None,
-                       db_path: str = DB_PATH) -> None:
-    """
-    Records the result of a single leg and optionally the closing line.
-    closing_odds enables CLV tracking — ideally pulled from The Odds API
-    just before first pitch.
-    """
-    conn = _connect(db_path)
-    conn.execute(
-        "UPDATE legs SET outcome=?, closing_odds=? WHERE id=?",
-        (outcome, closing_odds, leg_id),
-    )
-    conn.commit()
-    conn.close()
-
-
 def get_pending_parlays(db_path: str = DB_PATH) -> list[dict]:
     """Returns all parlays without a recorded outcome yet."""
     conn  = _connect(db_path)
@@ -801,14 +746,6 @@ def _win_rate(legs: list) -> float | None:
     if not resolved:
         return None
     return round(sum(1 for l in resolved if l["outcome"] == "win") / len(resolved), 4)
-
-
-def _count_llm_actions(db_path: str) -> dict:
-    conn     = _connect(db_path)
-    removed  = conn.execute("SELECT COUNT(*) FROM legs WHERE llm_downgraded=1 AND outcome IS NULL").fetchone()[0]
-    downgraded = conn.execute("SELECT COUNT(*) FROM legs WHERE llm_downgraded=1").fetchone()[0]
-    conn.close()
-    return {"downgraded": downgraded}
 
 
 def _implied_prob(american_odds: int) -> float:

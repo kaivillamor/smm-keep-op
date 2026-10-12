@@ -17,7 +17,19 @@ model probability actually produce a higher hit rate — in days instead of mont
 """
 import os
 import sqlite3
-from datetime import date, datetime, timezone
+import sys
+from datetime import datetime, timezone
+
+# Run as a script (`python output/research.py report`, per the docstring above) only
+# output/ lands on sys.path, so `pipeline` would not import. Put the package root on the
+# path BEFORE the imports below rather than threading lazy imports through every function
+# that needs the slate calendar. Guarded on __package__ so it is a no-op when imported
+# normally, and done once here instead of in the __main__ block at the bottom, which runs
+# after module-level imports have already been attempted.
+if __package__ is None and __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pipeline.stats_fetcher import POSTSEASON_START, season_phase, slate_date
 
 # Path is env-overridable so the same code runs locally (relative path, repo-local file)
 # and on a container with a mounted volume (absolute path). Default preserves the
@@ -28,32 +40,11 @@ from datetime import date, datetime, timezone
 RESEARCH_DB = os.getenv("RESEARCH_DB_PATH") or "data/history/research.db"
 
 
-# MLB regular-season / postseason boundary, by season. Postseason rows are structurally
-# different — best teams only, ace rotations, quick hooks, and pitcher_recent_h9 missing
-# on 12.5% of rows against 3.3% in the regular season — so they must not silently pool
-# into the model corpus (§29). Tagged rather than date-filtered, because an implicit
-# cutoff is something a future reader has to remember. Update annually, same maintenance
-# note as PARK_FACTORS.
-POSTSEASON_START = {2026: "2026-09-29"}
-
-
-def _season_phase(game_date: str | None) -> str | None:
-    """'regular' | 'postseason', or None when this season's boundary isn't recorded.
-
-    None on purpose: an unrecorded boundary is unknown, not 'regular'. Guessing here
-    would put postseason rows into the model corpus under a confident label, which is
-    the exact failure this column exists to prevent.
-    """
-    if not game_date:
-        return None
-    try:
-        year = int(str(game_date)[:4])
-    except (TypeError, ValueError):
-        return None
-    start = POSTSEASON_START.get(year)
-    if not start:
-        return None
-    return "postseason" if str(game_date) >= start else "regular"
+# The slate calendar (POSTSEASON_START, season_phase, slate_date) lives in
+# pipeline.stats_fetcher so `pipeline` can use it without importing `output`. Postseason
+# rows are structurally different — best teams only, ace rotations, quick hooks — so they
+# are TAGGED rather than date-filtered, because an implicit cutoff is something a future
+# reader has to remember (§29).
 
 
 def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
@@ -262,18 +253,12 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
     if not candidates:
         return 0
     conn  = _connect(db_path)
-    # Lazy import: stats_fetcher pulls pandas/requests, and web/app.py imports this module
-    # just for RESEARCH_DB. Only needed for candidates with no game_date of their own.
-    try:
-        from pipeline.stats_fetcher import slate_date as _slate_date
-        fallback_date = _slate_date()
-    except Exception:
-        fallback_date = str(date.today())
+    default_date = slate_date()   # only for a candidate carrying no game_date of its own
     now   = datetime.now(timezone.utc).isoformat()
     dates_seen: set[str] = set()
     n = 0
     for c in candidates:
-        game_date = c.get("game_date") or fallback_date
+        game_date = c.get("game_date") or default_date
         dates_seen.add(game_date)
         conn.execute("""
             INSERT INTO predictions
@@ -308,12 +293,12 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
             c.get("pitcher_recent_h9"), c.get("pitcher_season_h9"),
             c.get("pitcher_season_ip"), c.get("park_factor"),
             c.get("pitcher_days_rest"),
-            int(bool(c.get("is_day_game"))), _season_phase(game_date), now,
+            int(bool(c.get("is_day_game"))), season_phase(game_date), now,
         ))
         n += 1
     conn.commit()
     conn.close()
-    slates = ", ".join(sorted(dates_seen)) or fallback_date
+    slates = ", ".join(sorted(dates_seen)) or default_date
     print(f"[research] logged {n} prediction(s) for {slates} (research only — not bets)")
     return n
 
@@ -523,7 +508,6 @@ def compare_owner_logic(db_path: str = RESEARCH_DB) -> None:
 
 
 if __name__ == "__main__":
-    import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
     if cmd == "grade":
         grade_predictions()

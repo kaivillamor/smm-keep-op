@@ -46,13 +46,3 @@ def get_runs_factor(team: str) -> float:
     return get_park_factor(team)[0]
 
 
-def get_hr_factor(team: str) -> float:
-    return get_park_factor(team)[1]
-
-
-if __name__ == "__main__":
-    print("Park factors ranked by run-scoring (hitter-friendly → pitcher-friendly):\n")
-    ranked = sorted(PARK_FACTORS.items(), key=lambda x: x[1][0], reverse=True)
-    for team, (runs, hr) in ranked:
-        bar = "+" * int((runs - 0.85) * 40)
-        print(f"  {team:<26} runs={runs:.2f}  hr={hr:.2f}  {bar}")

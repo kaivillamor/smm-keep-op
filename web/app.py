@@ -270,20 +270,26 @@ def api_slate(_: tuple = Depends(auth), limit: int = 200):
     They differ a lot on purpose: the measured calibration slope is well under 1, so the
     raw number overstates badly at the top end.
 
-    `calibrated` prefers the STORED calibrated_prob (logged since 2026-09-30) and only
-    recomputes for older rows that predate the column. That distinction matters —
-    recomputing applies today's CALIBRATION_SLOPE to a prediction that was gated under
-    the old one, which silently rewrites what the model is claimed to have said. The
-    stored value is the historical record; the recomputation is a best-effort fallback.
+    `calibrated` is the STORED calibrated_prob and nothing else. Rows predating the
+    column (before 2026-09-30) report null rather than a recomputation: recomputing
+    applies today's CALIBRATION_SLOPE to a prediction that was gated under the old one,
+    which silently rewrites what the model is claimed to have said. This endpoint serves
+    the pending slate, so in practice every row has it.
+
+    `clears_gate` is the PER-LEG EV gate (2026-10-12): edge against that leg's own price,
+    not a probability threshold. When a leg is blocked, `blocked_by` gives a stable code
+    and `blocked_detail` the numbers. Note `gate.live` — the gate is deliberately not
+    validated yet, so every leg reports blocked until an out-of-sample test passes.
     """
-    from model.factors.hit_model import calibrated_hit_prob, MIN_HIT_PROB
+    from model.factors.hit_model import (leg_edge, leg_gate_reason,
+                                         MIN_EDGE_PTS, EV_GATE_LIVE)
     try:
         c = _db()
         day = c.execute(
             "SELECT MAX(date) FROM predictions WHERE outcome IS NULL").fetchone()[0]
         rows = [dict(r) for r in c.execute(
             "SELECT batter_name, team, pitcher_name, lineup_pos, model_prob, "
-            "       calibrated_prob, book_odds, book_implied, date "
+            "       calibrated_prob, book_odds, book_implied, season_phase, date "
             "FROM predictions WHERE outcome IS NULL AND date = ? "
             "ORDER BY model_prob DESC LIMIT ?", (day, min(limit, 400)))] if day else []
         c.close()
@@ -293,16 +299,25 @@ def api_slate(_: tuple = Depends(auth), limit: int = 200):
     legs = []
     for r in rows:
         cal = r["calibrated_prob"]
-        if cal is None and r["model_prob"] is not None:
-            cal = calibrated_hit_prob(r["model_prob"])   # pre-2026-09-30 row
+        # Same gate the pipeline uses, so the dashboard can never disagree with what
+        # actually surfaces. `blocked_by` carries the reason — an unexplained empty slate
+        # is indistinguishable from a broken gate, which is how the old one stayed dead.
+        why = leg_gate_reason(cal, r["book_implied"], r["season_phase"])
         legs.append({
             "name": r["batter_name"], "team": r["team"], "pitcher": r["pitcher_name"],
             "spot": r["lineup_pos"], "model_prob": r["model_prob"], "calibrated": cal,
             "odds": r["book_odds"], "book_implied": r["book_implied"],
-            "clears_gate": bool(cal is not None and cal >= MIN_HIT_PROB),
+            "edge": leg_edge(cal, r["book_implied"]),
+            "clears_gate": why is None,
+            "blocked_by": None if why is None else why[0],
+            "blocked_detail": None if why is None else why[1],
         })
-    return {"error": None, "date": day, "threshold": MIN_HIT_PROB,
-            "count": len(legs), "legs": legs}
+    legs.sort(key=lambda l: l["edge"] if l["edge"] is not None else float("-inf"),
+              reverse=True)
+    return {"error": None, "date": day, "count": len(legs), "legs": legs,
+            "gate": {"kind": "per_leg_ev", "min_edge": MIN_EDGE_PTS,
+                     "live": EV_GATE_LIVE,
+                     "clearing": sum(1 for l in legs if l["clears_gate"])}}
 
 
 @app.get("/api/hits")

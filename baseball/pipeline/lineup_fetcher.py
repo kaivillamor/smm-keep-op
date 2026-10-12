@@ -114,17 +114,6 @@ def _parse_player(player: dict) -> dict:
     }
 
 
-def fetch_team_roster(team_id: int) -> list[dict]:
-    """Fallback — returns active roster when lineups aren't posted yet."""
-    resp = requests.get(
-        f"{MLB_API}/teams/{team_id}/roster",
-        params={"rosterType": "active"},
-    )
-    resp.raise_for_status()
-    roster = resp.json().get("roster", [])
-    return [_parse_player(p.get("person", {})) for p in roster]
-
-
 def _save(data: dict, date_str: str) -> None:
     os.makedirs("data/lineups", exist_ok=True)
     path = f"data/lineups/{date_str}.json"

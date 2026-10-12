@@ -30,6 +30,33 @@ def slate_date() -> str:
     return (datetime.now(timezone.utc) - _ET_OFFSET).strftime("%Y-%m-%d")
 
 
+# MLB regular-season / postseason boundary, by season. Lives here with the rest of the
+# slate calendar so `pipeline` can read it without importing `output` (it never does, and
+# the gate in hit_pipeline needs the phase). research.py imports it lazily for the same
+# reason it imports slate_date lazily. Update annually, like PARK_FACTORS.
+POSTSEASON_START = {2026: "2026-09-29"}
+
+
+def season_phase(game_date: str | None) -> str | None:
+    """'regular' | 'postseason', or None when this season's boundary isn't recorded.
+
+    None on purpose: an unrecorded boundary is unknown, not 'regular'. Guessing would put
+    postseason rows into the model corpus under a confident label, and would let the EV
+    gate fire in a regime its calibration was never fit on — the two failures this
+    function exists to prevent.
+    """
+    if not game_date:
+        return None
+    try:
+        year = int(str(game_date)[:4])
+    except (TypeError, ValueError):
+        return None
+    start = POSTSEASON_START.get(year)
+    if not start:
+        return None
+    return "postseason" if str(game_date) >= start else "regular"
+
+
 def game_slate_date(commence_time: str | None) -> str:
     """The MLB slate date (Eastern) a given first pitch belongs to, as YYYY-MM-DD.
 
@@ -793,90 +820,7 @@ def get_team_id(team_name: str) -> int | None:
 
 
 # MLB venue IDs — stable, update only when a team moves or opens a new park.
-_VENUE_IDS: dict[str, int] = {
-    "Arizona Diamondbacks":  15,
-    "Atlanta Braves":        4705,
-    "Baltimore Orioles":     2,
-    "Boston Red Sox":        3,
-    "Chicago Cubs":          17,
-    "Chicago White Sox":     4,
-    "Cincinnati Reds":       2602,
-    "Cleveland Guardians":   5,
-    "Colorado Rockies":      19,
-    "Detroit Tigers":        2394,
-    "Houston Astros":        2392,
-    "Kansas City Royals":    7,
-    "Los Angeles Angels":    1,
-    "Los Angeles Dodgers":   22,
-    "Miami Marlins":         4169,
-    "Milwaukee Brewers":     32,
-    "Minnesota Twins":       3312,
-    "New York Mets":         3289,
-    "New York Yankees":      3313,
-    "Oakland Athletics":     10,
-    "Philadelphia Phillies": 2681,
-    "Pittsburgh Pirates":    31,
-    "San Diego Padres":      2680,
-    "San Francisco Giants":  2395,
-    "Seattle Mariners":      680,
-    "St. Louis Cardinals":   2889,
-    "Tampa Bay Rays":        12,
-    "Texas Rangers":         5325,
-    "Toronto Blue Jays":     14,
-    "Washington Nationals":  3309,
-}
 
-
-def get_venue_id(home_team: str) -> int | None:
-    return _VENUE_IDS.get(home_team)
-
-
-def fetch_batter_venue_stats(batter_id: int, venue_id: int) -> dict:
-    """
-    DEPRECATED / BROKEN — do not use. Kept only so the frozen versions/8leg_10
-    snapshot still imports.
-
-    The MLB Stats API silently ignores `venueId` on career stats: this returns the
-    batter's FULL CAREER line, identical for every ballpark (verified 2026-09-08 —
-    venueId=3313, venueId=15, and no venueId all return ab=8635 for Freeman).
-
-    There is no cheap correct version: venue splits would require pulling per-batter
-    game logs and aggregating, and that is redundant anyway because park effects are
-    handled by park_factors.get_park_factor. The hit model's venue blend was removed
-    rather than repaired. Callers were removed from the live hit pipeline.
-    """
-    cache_path = _day_cache_path(f"venue_{venue_id}", batter_id)
-    cached = _read_day_cache(cache_path)
-    if cached is not None:
-        return cached
-
-    url = f"{MLB_API}/people/{batter_id}/stats"
-    params = {
-        "stats":   "career",
-        "group":   "hitting",
-        "gameType": "R",
-        "venueId": venue_id,
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        stat = resp.json()["stats"][0]["splits"][0]["stat"]
-        result = {
-            "ab":   int(stat.get("atBats", 0)),
-            "hits": int(stat.get("hits", 0)),
-            "avg":  _safe_float(stat.get("avg")),
-        }
-        _write_day_cache(cache_path, result)
-        return result
-    except (IndexError, KeyError):
-        # Genuinely no such record (never faced him / no games in window). That is a
-        # real answer and worth caching — it is the common case for H2H.
-        _write_day_cache(cache_path, {})
-        return {}
-    except requests.RequestException:
-        # Transient. Return empty so the caller degrades, but do NOT cache it —
-        # caching a network blip would poison this player for the rest of the day.
-        return {}
 
 
 def fetch_pitcher_recent_form(pitcher_id: int, num_starts: int = 3) -> dict:

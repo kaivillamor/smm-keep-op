@@ -1,6 +1,5 @@
-from datetime import date
-
 from parlay.parlay_builder import recommended_stake, profit_for_stake
+from pipeline.stats_fetcher import slate_date
 
 # "Double-up, else $25 floor" staking (see parlay_builder.recommended_stake).
 BASE_STAKE   = 25.0
@@ -26,12 +25,7 @@ def print_slip(parlay: dict, num: int | None = None) -> None:
     print(header)
     # The slate date, not the process date — a 9pm-ET run is already tomorrow in UTC and
     # printed a slip headed with the wrong day.
-    try:
-        from pipeline.stats_fetcher import slate_date
-        _d = slate_date()
-    except Exception:
-        _d = date.today()
-    print(f"Date: {_d}")
+    print(f"Date: {slate_date()}")
     print()
 
     for i, leg in enumerate(legs, 1):

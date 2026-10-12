@@ -8,6 +8,7 @@ from pipeline.stats_fetcher import (
     game_has_started,
     game_slate_date,
     is_day_game,
+    season_phase,
 )
 from model.factors.hit_model import (
     score_batter_hit_prob,
@@ -15,7 +16,9 @@ from model.factors.hit_model import (
     _pitcher_hits_per_9,
     HIT_PARLAY_LEGS,
     MAX_LINEUP_DEPTH,
-    MIN_HIT_PROB,
+    MIN_EDGE_PTS,
+    leg_edge,
+    leg_gate_reason,
 )
 from model.factors.park_factors import get_park_factor
 from model.factors.owner_logic import apply_hit_owner_logic
@@ -168,6 +171,9 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     # The slate this GAME belongs to, not the day collection happened to
                     # run. Keys the research row — see game_slate_date() and §29.
                     "game_date":         game_slate_date(commence),
+                    # Which regime this game falls in. The EV gate refuses to fire outside
+                    # the phase the calibration was fit on — see hit_model.CALIBRATION_PHASE.
+                    "season_phase":      season_phase(game_slate_date(commence)),
                     "base_prob":       base_prob,
                     "owner_adj":       owner_adj,
                     "hit_probability": prob,
@@ -227,11 +233,14 @@ def _attach_hit_odds(legs: list[dict]) -> None:
         leg["book"]         = entry["book"]
         # EV as a probability edge: how much higher our estimate is than the book's.
         # Uses the CALIBRATED probability, not the raw one — EV is a betting decision and
-        # the raw number is known to overstate by ~5x at the top end. Computing edge from
+        # the raw number is known to overstate badly at the top end. Computing edge from
         # the inflated value manufactured positive EV that was never there.
-        est = leg.get("calibrated_prob", leg["hit_probability"])
-        leg["ev"] = (round(est - entry["implied"], 4)
-                     if entry["implied"] is not None else None)
+        #
+        # Delegates to hit_model.leg_edge so this and the gate can never disagree. It had
+        # its own copy of the subtraction, and two formulas for one quantity is how they
+        # drift — note the old fallback to the RAW probability when calibrated_prob was
+        # missing, which would have reintroduced exactly the overstatement above.
+        leg["ev"] = leg_edge(leg.get("calibrated_prob"), entry["implied"])
     print(f"[hit_pipeline] matched book odds for {matched}/{len(legs)} scored batters "
           f"({len(board)} players on the board)")
     if board and matched < len(legs) * 0.5:
@@ -242,23 +251,54 @@ def _attach_hit_odds(legs: list[dict]) -> None:
 
 
 def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
-    """Pick the top max_legs candidates ≥ MIN_HIT_PROB with at most 1 leg per team."""
+    """Pick up to max_legs legs clearing the per-leg EV gate, at most 1 per team.
+
+    Selection is on EDGE against each leg's OWN price, not on a probability threshold.
+    A single threshold derived from the median price cannot protect against selection,
+    because the legs the model likes are not priced at the median — measured, and then
+    confirmed live when the old gate selected legs that did WORSE than the ones it
+    rejected (§29, hit_model.MIN_EDGE_PTS).
+
+    Prices are attached to the whole slate before this runs, so every candidate already
+    carries book_implied wherever the board had one.
+
+    Ranked by edge, highest first, so a thin slate keeps the best available rather than
+    whatever the lineup order happened to put first.
+    """
     seen_teams: set[str] = set()
-    legs = []
-    below_gate = 0
-    for c in candidates:
-        if c.get("calibrated_prob", c["hit_probability"]) < MIN_HIT_PROB:
-            below_gate += 1
+    legs: list[dict] = []
+    rejected: dict[str, int] = {}
+
+    ranked = sorted(
+        candidates,
+        key=lambda c: (leg_edge(c.get("calibrated_prob"), c.get("book_implied"))
+                       if leg_edge(c.get("calibrated_prob"), c.get("book_implied"))
+                          is not None else float("-inf")),
+        reverse=True)
+
+    for c in ranked:
+        why = leg_gate_reason(c.get("calibrated_prob"), c.get("book_implied"),
+                              c.get("season_phase"))
+        if why:
+            code, _detail = why
+            rejected[code] = rejected.get(code, 0) + 1
             continue
         if c["team"] in seen_teams:
+            rejected["one_per_team"] = rejected.get("one_per_team", 0) + 1
             continue
         seen_teams.add(c["team"])
         legs.append(c)
         if len(legs) >= max_legs:
             break
-    if below_gate and len(legs) < max_legs:
-        print(f"[hit_pipeline] Thin slate: only {len(legs)} leg(s) clear the "
-              f"{MIN_HIT_PROB:.0%} probability gate — not padding with weaker legs.")
+
+    if len(legs) < max_legs:
+        # Say WHY nothing qualified. An unexplained empty slate is indistinguishable from
+        # a broken gate, which is exactly how the 2026-09-09 gate stayed dead for three
+        # weeks — it surfaced nothing and that read as a fact about the market.
+        detail = ", ".join(f"{code} {cnt}" for code, cnt in sorted(rejected.items()))
+        print(f"[hit_pipeline] {len(legs)} of {max_legs} leg(s) cleared the EV gate "
+              f"(min edge {MIN_EDGE_PTS:.1%}) — not padding with weaker legs. "
+              f"Rejected: {detail or 'none'}")
     return legs
 
 

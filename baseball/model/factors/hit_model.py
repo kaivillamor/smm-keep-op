@@ -31,7 +31,14 @@ DAY_GAME_BA_PENALTY = 0.010  # flat BA reduction — batters hit slightly worse 
 MAX_ADJUSTED_BA     = 0.400
 
 HIT_PARLAY_LEGS   = 4     # legs surfaced in the daily hit parlay (2 pairs × 2 legs)
-MIN_HIT_PROB      = 0.654 # implied prob of the verified DK median — derived below
+
+# Absurdity floor, NOT the playability test — that is the per-leg EV gate further down.
+# Renamed from MIN_HIT_PROB on 2026-10-12 because the old name described a job it no
+# longer does, and a constant whose name lies about its role is what hid a dead gate for
+# three weeks (§29). Deliberately low and rarely binding: it only stops a leg the model
+# rates worse than a coin flip from entering a parlay. Profitability is decided by edge
+# against the leg's own price, never by a probability threshold.
+MIN_LEG_PROB      = 0.50
 
 # ── Betting-gate calibration (added 2026-09-09, refit 2026-09-30) ─────────────
 # The model overstates its own confidence: regressed against reality, only a fraction of
@@ -74,6 +81,96 @@ def calibrated_hit_prob(raw_prob: float) -> float:
     return round(CALIBRATION_BASE + CALIBRATION_SLOPE * (raw_prob - CALIBRATION_BASE), 4)
 
 
+# ── Per-leg EV gate (2026-10-12) ──────────────────────────────────────────────
+# Replaces the constant threshold, which was structurally wrong: a single number derived
+# from the MEDIAN price cannot protect against selection, because the legs the model likes
+# are not priced at the median. Measured — legs clearing the old 0.654 gate were priced at
+# a mean 72.1% implied, not 65.4%. Live postseason confirmed it: 55 gate-clearing legs went
+# 59.3% against a 68.4% book, a -9.2pt edge and -13.5% ROI, WORSE than the legs the gate
+# rejected (-3.3pt). A gate that selects worse than no gate is anti-selective.
+#
+# The structure here is right: compare the model's probability to THAT leg's own price, so
+# like is compared with like.
+#
+# MIN_EDGE_PTS derivation — from calibration uncertainty, not from a backtest optimum.
+# CALIBRATION_SLOPE is 0.257 with a 95% CI of [0.099, 0.415]. Pushing those bounds through
+# calibrated_hit_prob() moves the output by up to 3.2 pts over the usable raw range
+# (largest at the top end, raw 0.85). An "edge" smaller than that is inside the noise of
+# our own calibration, so the minimum is set above it. This is the opposite of how 0.73 was
+# chosen: the number has a derivation that can be rechecked when the slope is refit.
+MIN_EDGE_PTS = 0.05
+
+# The regime the calibration constants were fit on. calibrated_hit_prob() carries a FIXED
+# CALIBRATION_BASE, so it is only valid where that base rate holds. Out of regime it is
+# biased, and the bias flows straight into the edge: the 2026 postseason base rate was
+# 57.6% against the regular season's 64.5%, and every postseason calibrated_prob ran ~6 pts
+# high as a result. Selecting on edge then selects for the BIAS rather than for edge, which
+# is why tightening the threshold made out-of-sample results worse, not better.
+CALIBRATION_PHASE = "regular"
+
+# ── THE GATE IS NOT LIVE. Do not flip this without an out-of-sample test. ─────
+# In-sample the per-leg gate looks excellent and the appearance is an artifact:
+#
+#     MIN_EDGE   in-sample (fit on these rows)   out-of-sample (postseason)
+#      2.0 pt     +1.7 pts edge,  +2.9% ROI       -6.5 pts,  -11.5% ROI
+#      5.0 pt     +7.4 pts edge, +12.8% ROI      -14.3 pts,  -26.1% ROI
+#      8.0 pt    +15.9 pts edge, +28.8% ROI      -11.1 pts,  -21.9% ROI
+#
+# In-sample, tightening improves monotonically; out-of-sample it inverts. That is the
+# signature of selecting on a fitted residual — the calibration was fit on the same rows,
+# so `calibrated_prob - book_implied` partly encodes its own error, and a tighter cut
+# selects harder for that error. The out-of-sample column is confounded by the regime shift
+# above, so it is not proof the gate is bad; what it does prove is that the in-sample
+# column is not evidence the gate is good. Neither number licenses risking money.
+#
+# To validate: NBA week one, on a VERIFIED price feed (§27 #2), fitting the calibration on
+# one span and testing selection on a later one. Flip this to True only when an
+# out-of-sample span shows a positive edge with an interval that excludes zero.
+EV_GATE_LIVE = False
+
+
+def leg_edge(calibrated_prob: float | None, book_implied: float | None) -> float | None:
+    """Model edge on one leg, in probability points. None when the leg has no price.
+
+    None rather than 0.0: an unpriced leg has an UNKNOWN edge, and a zero would quietly
+    read as "no edge" and sort alongside genuinely fair-priced legs.
+    """
+    if calibrated_prob is None or book_implied is None:
+        return None
+    return round(calibrated_prob - book_implied, 4)
+
+
+def leg_gate_reason(calibrated_prob: float | None,
+                    book_implied: float | None,
+                    phase: str | None) -> tuple[str, str] | None:
+    """None if the leg may be surfaced, else (code, human_detail) saying why not.
+
+    Returns a REASON rather than a bare False on purpose. "Nothing qualified today" was
+    accepted as an honest result for three weeks while the gate was arithmetically dead
+    (§29); silence is a value, and it has to be able to explain itself. The code is stable
+    for counting, the detail carries the numbers.
+    """
+    if not EV_GATE_LIVE:
+        return ("not_validated",
+                "EV gate is not validated out of sample (hit_model.EV_GATE_LIVE)")
+    if calibrated_prob is None:
+        return ("no_prob", "no calibrated probability")
+    if calibrated_prob < MIN_LEG_PROB:
+        return ("below_floor",
+                f"calibrated {calibrated_prob:.1%} below the {MIN_LEG_PROB:.0%} floor")
+    if book_implied is None:
+        return ("unpriced", "unpriced — edge is not computable without a price")
+    if phase != CALIBRATION_PHASE:
+        return ("wrong_regime",
+                f"phase {phase or 'unknown'} is outside the calibration regime "
+                f"({CALIBRATION_PHASE})")
+    edge = leg_edge(calibrated_prob, book_implied)
+    if edge < MIN_EDGE_PTS:
+        return ("below_edge",
+                f"edge {edge * 100:+.1f}pt below the {MIN_EDGE_PTS * 100:.1f}pt minimum")
+    return None
+
+
 MAX_LINEUP_DEPTH  = 6     # only score batters in positions 1–6 (most plate appearances)
 
 # "Double-up, else $25 floor" staking (see parlay_builder.recommended_stake):
@@ -114,13 +211,13 @@ _PA_BY_POS = {
 _MAX_PA  = max(pa for pos, pa in _PA_BY_POS.items() if pos <= MAX_LINEUP_DEPTH)
 _MAX_RAW = 1.0 - (1.0 - MAX_ADJUSTED_BA) ** (_MAX_PA * AB_PER_PA)
 _CEILING = calibrated_hit_prob(_MAX_RAW)
-if _CEILING < MIN_HIT_PROB:
+if _CEILING < MIN_LEG_PROB:
     raise RuntimeError(
-        f"hit gate is unreachable: the model's highest possible raw probability "
-        f"({_MAX_RAW:.4f}) calibrates to {_CEILING:.4f}, below MIN_HIT_PROB "
-        f"({MIN_HIT_PROB}). No lineup can ever clear the gate. Move MIN_HIT_PROB, "
+        f"leg floor is unreachable: the model's highest possible raw probability "
+        f"({_MAX_RAW:.4f}) calibrates to {_CEILING:.4f}, below MIN_LEG_PROB "
+        f"({MIN_LEG_PROB}). No lineup could ever clear it. Move MIN_LEG_PROB, "
         f"CALIBRATION_SLOPE ({CALIBRATION_SLOPE}) or CALIBRATION_BASE "
-        f"({CALIBRATION_BASE}) — do not ship a gate that cannot fire."
+        f"({CALIBRATION_BASE}) — do not ship a threshold that cannot be met."
     )
 
 
