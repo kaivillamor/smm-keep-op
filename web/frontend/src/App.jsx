@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import HitsList from './HitsList.jsx'
 import Login from './Login.jsx'
+import Slate from './Slate.jsx'
 
 const pct = (v) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
 const pts = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)} pts`)
+const num = (v) => (v == null ? '—' : v.toLocaleString())
 
 // The ranking gap is the number that decides whether the model is bettable at all, so
 // it gets an explicit verdict rather than leaving the reader to interpret a decimal.
@@ -29,12 +31,28 @@ function verdictFor(gap, ciLow, ciHigh) {
   return { label: 'usable signal', tone: 'good' }
 }
 
-function Stat({ label, value, sub }) {
+/**
+ * The one number a view leads with. Exactly one per page — a second "hero" is just
+ * two medium numbers. Proportional figures on purpose: tabular digits are for
+ * columns, and at this size they read loose.
+ */
+function Hero({ label, value, tone, note }) {
   return (
-    <div className="stat">
-      <div className="stat-label">{label}</div>
-      <div className="stat-value">{value}</div>
-      {sub && <div className="stat-sub">{sub}</div>}
+    <div className="hero">
+      <div className="hero-label">{label}</div>
+      <div className={`hero-value ${tone || ''}`}>{value}</div>
+      {note && <div className="hero-note">{note}</div>}
+    </div>
+  )
+}
+
+/** A headline figure in the divided KPI band. Label is sentence case, no colon. */
+function Kpi({ label, value, sub }) {
+  return (
+    <div className="kpi">
+      <div className="kpi-label">{label}</div>
+      <div className="kpi-value">{value}</div>
+      {sub && <div className="kpi-sub">{sub}</div>}
     </div>
   )
 }
@@ -42,9 +60,15 @@ function Stat({ label, value, sub }) {
 function Buckets({ buckets }) {
   if (!buckets?.length) return null
   return (
-    <table>
+    <table className="narrow">
       <thead>
-        <tr><th>predicted range</th><th>n</th><th>predicted</th><th>actual</th><th>delta</th></tr>
+        <tr>
+          <th>Predicted range</th>
+          <th className="n">N</th>
+          <th className="n">Predicted</th>
+          <th className="n">Actual</th>
+          <th className="n">Delta</th>
+        </tr>
       </thead>
       <tbody>
         {buckets.map((b) => {
@@ -52,10 +76,11 @@ function Buckets({ buckets }) {
           return (
             <tr key={b.range}>
               <td>{b.range}</td>
-              <td>{b.n}</td>
-              <td>{pct(b.predicted)}</td>
-              <td>{pct(b.actual)}</td>
-              <td className={delta >= 0 ? 'good' : 'bad'}>{pts(delta)}</td>
+              <td className="n">{num(b.n)}</td>
+              <td className="n">{pct(b.predicted)}</td>
+              <td className="n">{pct(b.actual)}</td>
+              {/* Signed, so direction never rests on hue alone. */}
+              <td className={`n ${delta >= 0 ? 'good' : 'bad'}`}>{pts(delta)}</td>
             </tr>
           )
         })}
@@ -67,12 +92,16 @@ function Buckets({ buckets }) {
 function Days({ days }) {
   if (!days?.length) return null
   return (
-    <table>
-      <thead><tr><th>date</th><th>logged</th><th>graded</th></tr></thead>
+    <table className="narrow">
+      <thead>
+        <tr><th>Date</th><th className="n">Logged</th><th className="n">Graded</th></tr>
+      </thead>
       <tbody>
         {days.map((d) => (
           <tr key={d.date}>
-            <td>{d.date}</td><td>{d.n}</td><td>{d.graded ?? 0}</td>
+            <td>{d.date}</td>
+            <td className="n">{num(d.n)}</td>
+            <td className="n">{num(d.graded ?? 0)}</td>
           </tr>
         ))}
       </tbody>
@@ -107,10 +136,10 @@ function SignOut() {
 
 function Banner() {
   return (
-    <div className="note">
+    <p className="note">
       <strong>Research only.</strong> Simulated predictions, no money staked. Real P&amp;L
       lives in <code>bets.db</code> on the local machine and is deliberately not deployed here.
-    </div>
+    </p>
   )
 }
 
@@ -130,14 +159,21 @@ function Home() {
       </header>
       <Banner />
 
-
       {sum && sum.graded > 0 && (
-        <div className="stats">
-          <Stat label="legs graded" value={sum.graded.toLocaleString()} sub={`${sum.logged.toLocaleString()} logged`} />
-          <Stat label="hit rate" value={pct(sum.actual)} />
-          <Stat label="model says" value={pct(sum.predicted)} />
-        </div>
+        <>
+          <Hero
+            label="Hit rate, graded legs"
+            value={pct(sum.actual)}
+            note={<>model said {pct(sum.predicted)} over {num(sum.graded)} graded legs</>}
+          />
+          <div className="kpis">
+            <Kpi label="Legs graded" value={num(sum.graded)} sub={`${num(sum.logged)} logged`} />
+            <Kpi label="Hit rate" value={pct(sum.actual)} />
+            <Kpi label="Model says" value={pct(sum.predicted)} />
+          </div>
+        </>
       )}
+
       <h2>Recent hits</h2>
       <HitsList hits={feed?.hits} />
 
@@ -151,13 +187,15 @@ function Home() {
 
 function Admin() {
   const { data, error } = useJson('/api/report')
+  // Fetched here rather than in App(): the slate is a research view, and App() was
+  // requesting it on every page load without ever rendering it.
+  const { data: slate } = useJson('/api/slate')
 
   if (error?.includes('403'))
     return (
       <main>
-        <h1>Admin</h1>
+        <header className="bar"><h1>Admin</h1><nav><a href="/">← dashboard</a></nav></header>
         <p className="bad">Your account does not have the admin role.</p>
-        <p><a href="/">← back to dashboard</a></p>
       </main>
     )
   if (error) return <main><h1>Admin</h1><p className="bad">Failed to load: {error}</p></main>
@@ -169,7 +207,7 @@ function Admin() {
   return (
     <main>
       <header className="bar">
-        <h1>Admin · model calibration</h1>
+        <h1>Admin · Model calibration</h1>
         <nav>
           <a href="/">← dashboard</a>
           <SignOut />
@@ -178,29 +216,40 @@ function Admin() {
       <Banner />
 
       {data.graded === 0 ? (
-        <p>{data.logged.toLocaleString()} logged, none graded yet — grading runs after games finish.</p>
+        <p>{num(data.logged)} logged, none graded yet — grading runs after games finish.</p>
       ) : (
         <>
-          <div className="stats">
-            <Stat label="graded" value={data.graded.toLocaleString()} sub={`${data.logged.toLocaleString()} logged`} />
-            <Stat label="model says" value={pct(data.predicted)} />
-            <Stat label="actually hit" value={pct(data.actual)} />
-            <Stat label="overconfidence" value={pts(data.overconfidence)} />
-          </div>
+          {/* The gap is the number this page exists to report, so it leads. */}
+          <Hero
+            label="Ranking gap"
+            value={pts(data.gap)}
+            tone={v.tone}
+            note={
+              <>
+                <span className={`verdict ${v.tone}`}>{v.label}</span>
+                {data.gap_ci_low != null && (
+                  <span className="ci">
+                    {' '}· 95% CI [{pts(data.gap_ci_low)}, {pts(data.gap_ci_high)}]
+                  </span>
+                )}
+              </>
+            }
+          />
 
-          <h2>Ranking signal</h2>
-          <p>
-            lower half <strong>{pct(data.lower)}</strong> &nbsp;·&nbsp;
-            upper half <strong>{pct(data.upper)}</strong> &nbsp;·&nbsp;
-            gap <strong className={v.tone}>{pts(data.gap)}</strong>
-            {data.gap_ci_low != null && (
-              <span className="muted"> &nbsp;95% CI [{pts(data.gap_ci_low)}, {pts(data.gap_ci_high)}]</span>
-            )}
-          </p>
-          <p className={v.tone}>{v.label}</p>
+          <div className="kpis">
+            <Kpi label="Graded" value={num(data.graded)} sub={`${num(data.logged)} logged`} />
+            <Kpi label="Model says" value={pct(data.predicted)} />
+            <Kpi label="Actually hit" value={pct(data.actual)} />
+            <Kpi label="Overconfidence" value={pts(data.overconfidence)} />
+            <Kpi label="Lower half" value={pct(data.lower)} sub="by model probability" />
+            <Kpi label="Upper half" value={pct(data.upper)} sub="by model probability" />
+          </div>
 
           <h2>Calibration by bucket</h2>
           <Buckets buckets={data.buckets} />
+
+          <h2>Today's slate</h2>
+          <Slate slate={slate} />
 
           <h2>Recent days</h2>
           <Days days={data.by_day} />
@@ -213,7 +262,6 @@ function Admin() {
 export default function App() {
   const [me, setMe] = useState(undefined)          // undefined = still checking
   const { data: feed } = useJson('/api/hits')
-  const { data: slate } = useJson('/api/slate')
 
   useEffect(() => {
     fetch('/api/me')

@@ -1,17 +1,27 @@
-/* ── tokens ──────────────────────────────────────────────────────────────── */
+/* ── tokens ──────────────────────────────────────────────────────────────────
+   Dark ground kept; the boxes are gone. The old look leaned on bordered,
+   rounded, surface-filled cards — a stat tile, a note, a table and a list were
+   four nested rectangles before a single number was read. This pass is
+   Baseball-Reference density in the same palette: hairline rules instead of
+   containers, uppercase micro-labels, tight rows, numerals that line up.
+   ------------------------------------------------------------------------- */
 :root {
   color-scheme: dark;
   --bg:      #000;
-  --surface: rgba(255, 255, 255, .035);
-  --line:    rgba(255, 255, 255, .13);
-  --line-strong: rgba(255, 255, 255, .3);
+  /* Only ever a hover wash now. Nothing is "a surface" — no element earns a
+     fill just for existing, which is what made the page read as boxes. */
+  --surface: rgba(255, 255, 255, .03);
+  --line:    rgba(255, 255, 255, .12);   /* row rules */
+  --line-strong: rgba(255, 255, 255, .26); /* section + header rules */
   --text:    #f5f5f5;
-  --muted:   rgba(255, 255, 255, .52);
+  --muted:   rgba(255, 255, 255, .54);
+  --dim:     rgba(255, 255, 255, .38);   /* column heads, micro-labels */
   --good:    #4ade80;
   --warn:    #fbbf24;
   --bad:     #f87171;
-  --radius:  22px;          /* generous — the "bubbly" look, still rectangular */
-  --radius-sm: 12px;
+  /* Radii survive only where a control needs a visible edge (inputs, buttons).
+     Data never gets a corner. */
+  --r: 4px;
 }
 
 * { box-sizing: border-box; }
@@ -21,81 +31,139 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  font-size: 15px;
-  line-height: 1.55;
-  /* Inter's optical sizing + tabular figures keep stat columns from shifting width
-     as digits change — the reason it's worth loading over a system stack here. */
-  font-feature-settings: 'tnum' 1, 'cv05' 1;
+  font-size: 14px;
+  line-height: 1.45;
+  /* NOTE: no global `tnum` here, deliberately. Tabular figures give every digit
+     the width of a zero, which is right for a column and wrong for a display
+     number — at 48px a tabular "121" reads visibly loose. Tabular is applied to
+     table cells and sub-labels only; big values keep proportional figures. */
+  font-feature-settings: 'cv05' 1;
   -webkit-font-smoothing: antialiased;
 }
 
-main { max-width: 56rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+main { max-width: 64rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 
-h1 { font-size: 1.45rem; font-weight: 600; letter-spacing: -.02em; margin: 0 0 .25rem; }
-h2 {
-  font-size: .78rem; font-weight: 600; text-transform: uppercase;
-  letter-spacing: .09em; color: var(--muted); margin: 2.25rem 0 .75rem;
+h1 {
+  font-size: 1.1rem; font-weight: 600; letter-spacing: -.01em;
+  text-transform: uppercase; letter-spacing: .04em;
+  margin: 0;
 }
+
+/* Section head = label + full-width rule. The whole structural vocabulary of a
+   reference page, and it replaces every card border on the screen. */
+h2 {
+  font-size: .66rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .11em; color: var(--muted);
+  margin: 2.1rem 0 .6rem; padding-bottom: .3rem;
+  border-bottom: 1px solid var(--line-strong);
+}
+
 code { font-family: ui-monospace, 'SF Mono', monospace; font-size: .88em; }
 a { color: inherit; }
+p { margin: .5rem 0; }
 
-.bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .5rem; }
-.bar nav { display: flex; gap: 1.25rem; white-space: nowrap; }
+.bar {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+  padding-bottom: .55rem; border-bottom: 1px solid var(--line-strong);
+}
+.bar nav { display: flex; gap: 1.1rem; white-space: nowrap; }
 .bar nav a {
-  font-size: .82rem; color: var(--muted); text-decoration: none;
-  transition: color .15s;
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); text-decoration: none; transition: color .15s;
 }
 .bar nav a:hover { color: var(--text); }
 
+/* Standing disclaimer: a line of text between rules, not a panel. */
 .note {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: .8rem 1.05rem;
-  margin: 1.25rem 0 1.75rem;
-  font-size: .875rem;
-  color: var(--muted);
+  font-size: .76rem; color: var(--muted);
+  margin: 0 0 1.4rem; padding: .5rem 0;
+  border-bottom: 1px solid var(--line);
 }
-.note strong { color: var(--text); }
+.note strong { color: var(--text); font-weight: 600; }
 
-/* ── stat tiles ──────────────────────────────────────────────────────────── */
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: .8rem; margin: 1.25rem 0; }
-.stat {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  padding: .95rem 1.1rem;
+/* ── hero figure ─────────────────────────────────────────────────────────────
+   Exactly one per view: the number the page exists to report. Same sans as
+   everything else, proportional figures, and the qualifier sits under it so the
+   number is never read without its interval. */
+.hero { margin: 1.25rem 0 .5rem; }
+.hero-label {
+  font-size: .62rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .11em; color: var(--dim);
 }
-.stat-label { font-size: .7rem; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
-.stat-value { font-size: 1.75rem; font-weight: 600; letter-spacing: -.03em; margin-top: .15rem; }
-.stat-sub   { font-size: .78rem; color: var(--muted); }
+.hero-value {
+  font-size: 3.25rem; line-height: 1.02; font-weight: 600; letter-spacing: -.035em;
+  margin-top: .1rem;
+}
+.hero-note { font-size: .8rem; color: var(--muted); margin-top: .3rem; }
+.hero-note .ci { font-variant-numeric: tabular-nums; }
 
-/* ── tables ──────────────────────────────────────────────────────────────── */
+/* ── KPI row ─────────────────────────────────────────────────────────────────
+   Divided by hairlines, not boxed. Rules top and bottom close the band without
+   drawing four borders per figure. */
+.kpis {
+  display: flex; flex-wrap: wrap; margin: 1.1rem 0 .25rem;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+.kpi {
+  flex: 1 1 8.5rem; min-width: 8.5rem;
+  padding: .65rem 1.1rem; border-left: 1px solid var(--line);
+}
+.kpi:first-child { border-left: 0; padding-left: 0; }
+.kpi-label {
+  font-size: .6rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--dim); white-space: nowrap;
+}
+.kpi-value { font-size: 1.35rem; font-weight: 600; letter-spacing: -.02em; margin-top: .05rem; }
+.kpi-sub { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ── tables ──────────────────────────────────────────────────────────────────
+   No outer border, no radius, no header fill. A double rule under the column
+   heads and a hairline between rows is the entire chrome. */
 table {
-  border-collapse: separate; border-spacing: 0;
-  width: 100%; margin: .5rem 0 1rem;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
+  width: 100%; border-collapse: collapse;
+  margin: 0 0 1.1rem; font-size: .83rem;
 }
-th, td { text-align: left; padding: .55rem .9rem; border-bottom: 1px solid var(--line); }
-tr:last-child td { border-bottom: 0; }
 th {
-  font-size: .7rem; font-weight: 600; text-transform: uppercase;
-  letter-spacing: .07em; color: var(--muted); background: var(--surface);
+  font-size: .62rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .09em; color: var(--dim); text-align: left;
+  padding: .3rem .55rem .32rem; white-space: nowrap;
+  border-bottom: 1px solid var(--line-strong);
+  /* Sticky so a long slate keeps its headings while scrolling. Needs an opaque
+     background or rows show through as it passes under. */
+  position: sticky; top: 0; background: var(--bg); z-index: 1;
 }
-td { font-variant-numeric: tabular-nums; }
+td {
+  padding: .36rem .55rem; border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+tbody tr:hover td { background: var(--surface); }
+th:first-child, td:first-child { padding-left: 0; }
+th:last-child,  td:last-child  { padding-right: 0; }
+/* Numbers right-align so magnitudes compare down the column; names stay left. */
+th.n, td.n { text-align: right; }
+/* A 3- or 5-column table stretched to the full 64rem puts a quarter-page of dead
+   space between a label and its first number, which reads as sparse rather than
+   dense. Narrow tables size to their content; the 9-column slate still fills. */
+table.narrow { width: auto; min-width: min(34rem, 100%); }
+table.narrow th, table.narrow td { padding-left: 1.6rem; }
+table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
 
 .muted { color: var(--muted); }
+.dim   { color: var(--dim); }
 .good  { color: var(--good); }
 .warn  { color: var(--warn); }
 .bad   { color: var(--bad); }
 .neutral { color: var(--muted); }
+/* Status is never carried by hue alone — these always sit beside a signed number
+   or a worded verdict. */
+.verdict { font-size: .83rem; font-weight: 600; }
 
-/* ── ambient falling-hit feed ────────────────────────────────────────────── */
+.row-strong td { font-weight: 600; }
+
+/* ── ambient falling-hit feed (sign-in only) ─────────────────────────────── */
 .feed {
   position: relative; height: 40vh; min-height: 15rem; overflow: hidden;
-  margin: 1.5rem 0 2rem; border-radius: var(--radius);
+  margin: 1.5rem 0 2rem;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 15%, #000 78%, transparent 100%);
           mask-image: linear-gradient(to bottom, transparent 0%, #000 15%, #000 78%, transparent 100%);
 }
@@ -118,23 +186,22 @@ td { font-variant-numeric: tabular-nums; }
   100% { transform: translate(var(--drift), 44vh) scale(1); opacity: 0; }
 }
 
-/* ── sign-in screen ──────────────────────────────────────────────────────── */
+/* ── sign-in screen ──────────────────────────────────────────────────────────
+   The one place a container is still correct: a form needs a visible edge. The
+   radius is tightened from 28px to match the new language instead of reading as
+   a leftover from the bubbly pass. */
 .login-screen {
   position: relative; min-height: 100vh; overflow: hidden;
   background: var(--bg);
-  /* Grid centring, not `top:50%` + translate — that offsets from the element's normal
-     flow position, which pushed the card off the top of the viewport. */
   display: grid; place-items: center;
 }
 
 .login-bg {
   position: absolute; inset: 0; z-index: 0; pointer-events: none;
-  /* Spatial fade at the screen edges. The keyframes ramp opacity too, but that is
-     time-based — an item pops in visibly at the top if its timing lands wrong. */
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 74%, transparent 100%);
           mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 74%, transparent 100%);
 }
-.login-bg .feed { height: 100vh; margin: 0; border-radius: 0; mask-image: none; -webkit-mask-image: none; }
+.login-bg .feed { height: 100vh; margin: 0; mask-image: none; -webkit-mask-image: none; }
 
 @keyframes fall-full {
   0%   { transform: translate(0, -6vh) scale(1); opacity: 0; }
@@ -146,89 +213,96 @@ td { font-variant-numeric: tabular-nums; }
 
 .login-card {
   position: relative; z-index: 1;
-  width: min(23rem, calc(100% - 2.5rem));
-  display: flex; flex-direction: column; gap: .9rem;
-  padding: 2.4rem 2rem;
+  width: min(22rem, calc(100% - 2.5rem));
+  display: flex; flex-direction: column; gap: .85rem;
+  padding: 2rem 1.75rem;
   border: 1px solid var(--line-strong);
-  border-radius: 28px;                     /* bubblier than the rest, still a rectangle */
+  border-radius: var(--r);
   background: #000;
 }
-.login-card h1 { font-size: 1.25rem; margin: 0; }
-.login-card p  { margin: -.55rem 0 .5rem; font-size: .875rem; color: var(--muted); }
+.login-card h1 {
+  font-size: .8rem; margin: 0; letter-spacing: .11em;
+}
+.login-card p  { margin: -.4rem 0 .4rem; font-size: .82rem; color: var(--muted); }
 .login-card label {
-  display: flex; flex-direction: column; gap: .35rem;
-  font-size: .7rem; font-weight: 500; text-transform: uppercase;
-  letter-spacing: .08em; color: var(--muted);
+  display: flex; flex-direction: column; gap: .3rem;
+  font-size: .6rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--dim);
 }
 .login-card input {
   font: inherit; text-transform: none; letter-spacing: normal; color: var(--text);
-  padding: .7rem .9rem;
+  padding: .6rem .7rem;
   border: 1px solid var(--line-strong);
-  border-radius: 14px;
+  border-radius: var(--r);
   background: #000;
   transition: border-color .15s;
 }
 .login-card input:focus { outline: none; border-color: #fff; }
 .login-card button {
-  font: inherit; font-weight: 600; margin-top: .5rem; padding: .72rem;
-  border: 1px solid #fff; border-radius: 14px; cursor: pointer;
+  font: inherit; font-weight: 600; font-size: .72rem;
+  text-transform: uppercase; letter-spacing: .09em;
+  margin-top: .4rem; padding: .65rem;
+  border: 1px solid #fff; border-radius: var(--r); cursor: pointer;
   background: #fff; color: #000;
   transition: opacity .15s;
 }
 .login-card button:hover:not(:disabled) { opacity: .85; }
 .login-card button:disabled { opacity: .3; cursor: not-allowed; }
-.login-error { margin: 0 !important; font-size: .85rem !important; color: var(--bad) !important; }
+.login-error { margin: 0 !important; font-size: .82rem !important; color: var(--bad) !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  .login-bg { display: none; }        /* a static list behind a form is just clutter */
+  .login-bg { display: none; }
   .drop { animation: none; opacity: .9; position: static; display: block; margin: .3rem 0; }
   .feed { height: auto; min-height: 0; overflow: visible; mask-image: none; -webkit-mask-image: none; }
 }
 
-/* ── recent-hits list (dashboard; the animation is sign-in only) ──────────── */
+/* ── recent hits ─────────────────────────────────────────────────────────────
+   Was a bordered, rounded, zebra-striped list. Now the same grid with hairline
+   rules and no container, so it reads as a continuation of the tables above it
+   rather than another panel. */
 .hits {
-  list-style: none; margin: .35rem 0 1rem; padding: 0;
-  border: 1px solid var(--line); border-radius: var(--radius-sm);
-  /* Fixed viewport instead of an ever-growing page. overflow-x stays hidden so the
-     rounded corners still clip the rows; only the y axis scrolls. */
-  max-height: 26rem;
+  list-style: none; margin: 0 0 1.1rem; padding: 0;
+  max-height: 24rem;
   overflow: hidden auto;
-  overscroll-behavior: contain;   /* stop the page scrolling once the list bottoms out */
+  overscroll-behavior: contain;
 }
-.hits::-webkit-scrollbar { width: 10px; }
+.hits::-webkit-scrollbar { width: 9px; }
 .hits::-webkit-scrollbar-thumb {
-  background: rgba(255,255,255,.16); border-radius: 6px;
+  background: rgba(255,255,255,.16);
   border: 3px solid transparent; background-clip: content-box;
 }
 .hits::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.3); background-clip: content-box; }
 .hits { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.18) transparent; }
-.list-meta { font-size: .8rem; margin: 0 0 .1rem; }
+.list-meta { font-size: .72rem; margin: 0 0 .35rem; color: var(--dim); }
 .hits li {
   display: grid;
-  grid-template-columns: 1fr auto 10rem 6rem;
-  align-items: baseline; gap: .75rem;
-  padding: .6rem .95rem;
+  grid-template-columns: 1fr 5rem 6rem;
+  align-items: baseline; gap: .6rem;
+  padding: .36rem 0;
   border-bottom: 1px solid var(--line);
+  font-size: .83rem;
 }
-.hits li:last-child { border-bottom: 0; }
-.hits li:nth-child(odd) { background: var(--surface); }
+.hits li:hover { background: var(--surface); }
 .hit-name  { font-weight: 600; }
 .hit-count { color: var(--good); font-weight: 600; font-variant-numeric: tabular-nums; }
-.hit-meta  { color: var(--muted); font-size: .85rem; }
-.hit-date  { color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; text-align: right; }
+.hit-meta  { color: var(--muted); }
+.hit-date  { color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
 
 @media (max-width: 34rem) {
-  .hits li { grid-template-columns: 1fr auto; row-gap: .15rem; }
-  .hit-meta { grid-column: 1; font-size: .8rem; }
+  .hits li { grid-template-columns: 1fr auto; row-gap: .1rem; }
   .hit-date { grid-column: 2; }
 }
 
 /* ── today's slate ───────────────────────────────────────────────────────── */
-.slate-meta { font-size: .85rem; margin: .25rem 0 .75rem; }
-table.slate td:nth-child(n+3) { font-variant-numeric: tabular-nums; white-space: nowrap; }
-table.slate tr.clears td { background: rgba(74, 222, 128, .07); }
+.slate-meta { font-size: .76rem; margin: 0 0 .5rem; color: var(--muted); }
+.slate-meta .sep { color: var(--dim); margin: 0 .4rem; }
+/* The gate marker is a left rule on the row, not a filled block — a tinted
+   table row is a box by another name. */
+table.slate tr.clears td:first-child { box-shadow: inset 2px 0 0 var(--good); padding-left: .5rem; }
+table.slate td.blocked { color: var(--dim); font-size: .76rem; }
 .link-btn {
-  font: inherit; font-size: .85rem; color: var(--muted);
-  background: none; border: 0; padding: .25rem 0; cursor: pointer; text-decoration: underline;
+  font: inherit; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); background: none; border: 0; padding: .3rem 0; cursor: pointer;
+  border-bottom: 1px solid var(--line-strong);
 }
 .link-btn:hover { color: var(--text); }

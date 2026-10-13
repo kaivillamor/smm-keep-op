@@ -20,9 +20,13 @@ export default function HitsList({ hits, limit = 60 }) {
       <ul className="hits">
       {shown.map((h, i) => (
         <li key={`${h.date}-${h.name}-${i}`}>
-          <span className="hit-name">{h.name}</span>
+          {/* Name and team share a cell, the same pattern the slate table uses, so the
+              two views read as one system and the count keeps its own column. */}
+          <span>
+            <span className="hit-name">{h.name}</span>{' '}
+            <span className="hit-meta">{h.team}</span>
+          </span>
           <span className="hit-count">+{h.hits} {h.hits === 1 ? 'Hit' : 'Hits'}</span>
-          <span className="hit-meta">{h.team}</span>
           <span className="hit-date">{h.date}</span>
         </li>
       ))}
