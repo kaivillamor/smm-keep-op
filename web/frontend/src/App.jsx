@@ -159,19 +159,21 @@ function Home() {
       </header>
       <Banner />
 
+      {/* No KPI band here, deliberately. /api/summary returns four numbers and the hero
+          plus its note already state all four — a band of "legs graded / hit rate /
+          model says" was three restatements of what sits directly above it. Admin keeps
+          its band because six of those figures appear nowhere else on the page. */}
       {sum && sum.graded > 0 && (
-        <>
-          <Hero
-            label="Hit rate, graded legs"
-            value={pct(sum.actual)}
-            note={<>model said {pct(sum.predicted)} over {num(sum.graded)} graded legs</>}
-          />
-          <div className="kpis">
-            <Kpi label="Legs graded" value={num(sum.graded)} sub={`${num(sum.logged)} logged`} />
-            <Kpi label="Hit rate" value={pct(sum.actual)} />
-            <Kpi label="Model says" value={pct(sum.predicted)} />
-          </div>
-        </>
+        <Hero
+          label="Hit rate, graded legs"
+          value={pct(sum.actual)}
+          note={
+            <>
+              model said {pct(sum.predicted)} over {num(sum.graded)} graded legs
+              <span className="dim"> · {num(sum.logged)} logged</span>
+            </>
+          }
+        />
       )}
 
       <h2>Recent hits</h2>
