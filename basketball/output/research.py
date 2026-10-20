@@ -23,7 +23,16 @@ prediction without its line is meaningless, which is not true in baseball.
 """
 import os
 import sqlite3
-from datetime import date, datetime, timezone
+import sys
+from datetime import datetime, timezone
+
+# Run as a script (see the docstring's CLI lines) only output/ lands on sys.path, so
+# `pipeline` would not import. Put the package root on the path BEFORE the import below.
+# The baseball twin learned this by breaking `research.py report` outright.
+if __package__ is None and __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pipeline.calendar import game_slate_date, season_phase, slate_date
 
 RESEARCH_DB = os.getenv("NBA_RESEARCH_DB_PATH") or "data/history/research.db"
 
@@ -37,7 +46,13 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS predictions (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            date          TEXT    NOT NULL,
+            date          TEXT    NOT NULL,   -- the GAME's Eastern slate date, from
+                                              --  tip-off, NOT the date collection ran.
+                                              --  Baseball used the collection date here
+                                              --  and duplicated 20% of its corpus (§29).
+            season_phase  TEXT DEFAULT NULL,  -- preseason | regular | postseason | NULL.
+                                              --  Preseason minutes are not real minutes
+                                              --  and minutes drive every prop here.
             game_id       TEXT    NOT NULL,      -- ESPN ids are strings, not ints
             player_id     TEXT    NOT NULL,
             player_name   TEXT,
@@ -51,7 +66,27 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             owner_adj     REAL,                  -- personal-logic delta, kept measurable
             book_odds     INTEGER,
             book_implied  REAL,
+            book          TEXT,                -- WHICH sportsbook priced it. Baseball
+                                               --  computed this and threw it away, so a
+                                               --  verified-wrong feed stayed invisible
+                                               --  for two months (§28). Logged from row
+                                               --  one here; an unattributed price is
+                                               --  suspect by definition.
+            calibrated_prob REAL,              -- model_prob shrunk toward the base rate.
+                                               --  The number a betting gate compares,
+                                               --  NOT model_prob. Baseball computed it
+                                               --  and discarded it, which hid a gate
+                                               --  that could not fire for three weeks
+                                               --  (§29). There is no gate yet — the
+                                               --  column exists so there never can be
+                                               --  one whose input is unlogged.
             -- model inputs, stored so a later refit can be run properly
+            stats_season  TEXT,                  -- WHICH season the averages came from.
+                                               --  On opening night there are no current-
+                                               --  season games, so form falls back to
+                                               --  last season. Unlogged, that is a silent
+                                               --  method change mid-corpus — §24.
+            stat_sd       REAL,                  -- sample SD of this player's own log
             season_avg    REAL,                  -- season average for this market
             recent_avg    REAL,                  -- last-N-games average
             recent_games  INTEGER,
@@ -73,7 +108,9 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
 
 
 _FIELDS = ("game_id", "player_id", "player_name", "team", "opponent", "market", "line",
-           "model_prob", "base_prob", "owner_adj", "book_odds", "book_implied",
+           "model_prob", "base_prob", "owner_adj", "calibrated_prob",
+           "book_odds", "book_implied", "book",
+           "stats_season", "stat_sd",
            "season_avg", "recent_avg", "recent_games", "minutes_avg", "vs_opp_avg",
            "vs_opp_games", "usage_proxy", "days_rest", "is_home", "opp_def_rating")
 
@@ -89,41 +126,98 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
     if not candidates:
         return 0
     conn = _connect(db_path)
-    today = str(date.today())
+    default_date = slate_date()   # only for a candidate carrying no tipoff of its own
     now = datetime.now(timezone.utc).isoformat()
-    cols = ", ".join(("date",) + _FIELDS + ("created_at",))
-    marks = ", ".join("?" * (len(_FIELDS) + 2))
+    cols = ", ".join(("date", "season_phase") + _FIELDS + ("created_at",))
+    marks = ", ".join("?" * (len(_FIELDS) + 3))
     sql = (f"INSERT INTO predictions ({cols}) VALUES ({marks}) "
            "ON CONFLICT(date, game_id, player_id, market) DO UPDATE SET "
            "  model_prob=excluded.model_prob, base_prob=excluded.base_prob, "
            "  owner_adj=excluded.owner_adj, "
+           "  calibrated_prob=excluded.calibrated_prob, "
            "  line=COALESCE(excluded.line, predictions.line), "
            "  book_odds=COALESCE(excluded.book_odds, predictions.book_odds), "
-           "  book_implied=COALESCE(excluded.book_implied, predictions.book_implied)")
+           "  book_implied=COALESCE(excluded.book_implied, predictions.book_implied), "
+           # `book` MUST refresh with the odds it describes. Baseball omitted it, so a row
+           # that gained a price on a later run kept book=NULL and its provenance backfill
+           # then stamped 219 good prices as coming from the discredited feed (§29).
+           "  book=COALESCE(excluded.book, predictions.book)")
     n = 0
+    slates: set[str] = set()
     for c in candidates:
-        conn.execute(sql, (today, *(c.get(f) for f in _FIELDS), now))
+        game_date = c.get("game_date") or game_slate_date(c.get("tipoff")) or default_date
+        slates.add(game_date)
+        conn.execute(sql, (game_date, season_phase(game_date),
+                           *(c.get(f) for f in _FIELDS), now))
         n += 1
     conn.commit()
     conn.close()
-    print(f"[research] logged {n} prediction(s) for {today} (research only — not bets)")
+    print(f"[research] logged {n} prediction(s) for {', '.join(sorted(slates)) or default_date} "
+          f"(research only — not bets)")
     return n
 
 
 def grade_predictions(db_path: str = RESEARCH_DB) -> int:
-    """TODO — needs the ESPN box-score fetcher, which is not built yet.
+    """Grades pending predictions against ESPN box scores.
 
-    Shape of the work (mirrors the baseball version, which proved these points the hard
-    way):
-      * fetch ONE box score per game, not one per player
-      * only grade FINAL games — box scores populate live, and baseball graded a player
-        'loss' before his game started because of this
-      * treat postponed/suspended as 'void', never 'loss'
-      * outcome = 'win' if actual_value > line else 'loss'; a push (value == line) is
-        'void', which has no baseball analogue since Over-0.5 lines cannot push
+    Three rules, each learned the hard way in baseball:
+      * ONE box score per GAME, not per player — a 200-row slate is ~11 calls, not 200.
+      * Only FINAL games. Box scores populate live, and baseball graded a player a loss
+        before his game had started by trusting a non-final one.
+      * A player who did not appear is 'void', never 'loss'. A DNP is not a failed
+        prediction, and scoring it as one would bias every calibration bucket downward.
     """
-    raise NotImplementedError(
-        "ESPN box-score grading not built. See basketball/pipeline/stats_fetcher.py.")
+    from pipeline.stats_fetcher import MARKET_STAT, fetch_boxscore, fetch_scoreboard
+
+    conn = _connect(db_path)
+    pending = [dict(r) for r in conn.execute(
+        "SELECT id, date, game_id, player_id, market, line FROM predictions "
+        "WHERE outcome IS NULL")]
+    if not pending:
+        conn.close()
+        print("[research] no pending predictions.")
+        return 0
+
+    finals: dict[str, bool] = {}
+    for day in sorted({p["date"] for p in pending}):
+        for g in fetch_scoreboard(day):
+            finals[str(g["game_id"])] = g["final"]
+
+    by_game: dict[str, list] = {}
+    for p in pending:
+        by_game.setdefault(str(p["game_id"]), []).append(p)
+
+    graded = skipped = 0
+    for game_id, rows in by_game.items():
+        if not finals.get(game_id):
+            skipped += len(rows)
+            continue
+        box = fetch_boxscore(game_id)
+        if not box:
+            skipped += len(rows)
+            continue
+        for r in rows:
+            stat = MARKET_STAT.get(r["market"])
+            line = r["line"]
+            line_val = None if line is None else float(line)
+            player = box.get(str(r["player_id"]))
+            actual = None if (player is None or stat is None) else player.get(stat)
+
+            if actual is None or line_val is None:
+                outcome, actual_value = "void", actual
+            else:
+                outcome = "win" if actual > line_val else "loss"
+                actual_value = actual
+
+            conn.execute(
+                "UPDATE predictions SET outcome=?, actual_value=? WHERE id=?",
+                (outcome, actual_value, r["id"]))
+            graded += 1
+
+    conn.commit()
+    conn.close()
+    print(f"[research] graded {graded}, skipped {skipped} (game not final yet)")
+    return graded
 
 
 def report(db_path: str = RESEARCH_DB) -> None:

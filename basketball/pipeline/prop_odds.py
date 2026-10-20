@@ -110,8 +110,33 @@ def normalize_name(name: str) -> str:
 
 
 # Restrict to a single book so a 2-leg parlay is actually placeable (you can't
-# parlay a DraftKings leg with a FanDuel leg). Default FanDuel — the only book the
-# user bets. Pass book="draftkings" or book=None (best-of-all) to widen coverage.
+# parlay a DraftKings leg with a FanDuel leg). FanDuel — the only book the user bets.
+#
+# FEED VERIFIED 2026-10-20, before a single row was collected (§27 #2). This is the check
+# baseball skipped, and skipping it cost two months of analysis built on prices that were
+# wrong by 5-10 implied points (§28). Opening-night board, market=player_points:
+#
+#     main lines only      players   over  under
+#       draftkings             161    163    157   balanced
+#       fanduel                152    147    144   balanced
+#     same player + same line, both books: 93 comparisons
+#       mean implied gap (DK - FD)  +0.12 pts
+#       DK cheaper on 37/93 (40%)   direction varies
+#
+# Compare with baseball's failure signature: FanDuel returned ZERO unders, and DraftKings
+# looked cheaper on 37 of 37 players by a mean 8 points. A ~100% directional result is a
+# data bug, never an arbitrage. Nothing like that here — the two books disagree in both
+# directions by fractions of a point, which is what two real books look like.
+#
+# So FanDuel STAYS the default here. Do not copy baseball's switch to DraftKings: that was
+# forced by a broken feed, not a preference, and switching would make every logged price
+# unplaceable on the book actually being bet. The portable lesson is "record which book
+# priced it and verify the feed", not "use DraftKings".
+#
+# What this check CANNOT prove: that the absolute level is right. It shows the books are
+# not one feed mislabelled and neither is systematically shifted. Only comparing a couple
+# of players against the live app does the rest — do that on an early slate.
+# Re-verify periodically; a feed that is right today can break silently.
 DEFAULT_BOOK = "fanduel"
 
 

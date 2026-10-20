@@ -26,6 +26,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+import subprocess
 import sys
 
 # The pipeline is written to run from inside baseball/ — its default DB and cache paths
@@ -387,6 +388,34 @@ COLLECT_HOURS = {int(h) for h in
                  (os.getenv("COLLECT_HOURS") or "19,20,21,22,23,0,1,2").split(",")}
 GRADE_HOUR = int(os.getenv("GRADE_HOUR") or 13)
 
+# NBA runs later than MLB: tips are 23:00-03:00 UTC (7pm-10pm ET), so collection sits a
+# couple of hours earlier and grading waits until every West Coast game has finished.
+BASKETBALL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "basketball"))
+NBA_COLLECT_HOURS = {int(h) for h in
+                     (os.getenv("NBA_COLLECT_HOURS") or "21,22,23,0,1").split(",")}
+NBA_GRADE_HOUR = int(os.getenv("NBA_GRADE_HOUR") or 11)
+NBA_ENABLED = (os.getenv("NBA_ENABLED") or "1") not in ("0", "false", "False")
+
+
+def _run_basketball(arg: str) -> None:
+    """Run the NBA collector as a SUBPROCESS, not an import.
+
+    basketball/ deliberately duplicates baseball/ rather than sharing a package, so both
+    define `main`, `output.research` and `pipeline.*`. This process already has
+    BASEBALL_DIR on sys.path, and Python caches modules by name — so an in-process
+    `import main` here would silently return BASEBALL's module and collect the wrong
+    sport into the wrong database. A subprocess with its own cwd gets a clean namespace
+    and makes the relative data/ paths resolve correctly, and an NBA crash cannot take
+    the web process down with it.
+    """
+    proc = subprocess.run([sys.executable, "main.py", arg], cwd=BASKETBALL_DIR,
+                          capture_output=True, text=True, timeout=1800)
+    for line in (proc.stdout or "").splitlines()[-25:]:
+        print(f"[nba] {line}", flush=True)
+    if proc.returncode != 0:
+        print(f"[nba] {arg} exited {proc.returncode}: "
+              f"{(proc.stderr or '').strip()[-400:]}", flush=True)
+
 
 def _scheduler():
     """Replaces Railway cron. Collection is idempotent (_already_collected skips games
@@ -406,10 +435,22 @@ def _scheduler():
                     from main import _collect_predictions
                     _collect_predictions()
                     done.add(key)
+
+            # NBA keyed separately: its hours overlap MLB's, and sharing `done` would let
+            # whichever sport ran first mark the hour complete for both.
+            nba_key = f"nba-{key}"
+            if NBA_ENABLED and nba_key not in done:
+                if now.hour == NBA_GRADE_HOUR:
+                    _run_basketball("--grade")
+                    done.add(nba_key)
+                elif now.hour in NBA_COLLECT_HOURS:
+                    _run_basketball("--collect")
+                    done.add(nba_key)
             if len(done) > 60:
                 done.clear()
         except Exception as e:
             # Never let a bad run kill the thread — that would silently stop collection
             # for the rest of the season with the web server still looking healthy.
+            # This now covers two sports, so one sport failing must not stop the other.
             print(f"[scheduler] run failed: {type(e).__name__}: {e}", flush=True)
         time.sleep(600)
