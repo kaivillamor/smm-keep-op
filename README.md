@@ -11,9 +11,9 @@ probabilities actually mean anything before any money is risked.
 
 ### MLB
 
-- **Game-line value bets.** Models moneyline and total probabilities across a 3-layer
-  pipeline (quant stats, then rules, then optional LLM review) and flags legs where the
-  model disagrees with the book after removing vig, assembled into small parlays.
+- **Game-line value bets.** Models moneyline and total probabilities from team and
+  pitcher stats, park, and weather, and flags legs where the model disagrees with the
+  book after removing vig, assembled into small parlays.
 - **Hit parlays.** Estimates each batter's probability of getting 1+ hit, pairs the best
   into 2-leg parlays, and prices them against real sportsbook odds to rank by expected
   value.
@@ -28,6 +28,10 @@ probabilities actually mean anything before any money is risked.
 - **Player props.** Points, rebounds, assists and made threes. Every player with a posted
   line is scored against it from their own game log (season and recent form, minutes, a
   usage proxy, and the spread of their own results), then graded against the box score.
+- **Hand-written rules, next.** NBA is where personal basketball knowledge goes in, as
+  rules written down per player and market. Each rule returns an adjustment that is
+  logged separately from the quant model's probability, so the two can be scored against
+  each other rather than blended out of sight.
 - Collection started on opening night, 2026-10-20. There is deliberately no betting gate
   yet: the model gets measured first.
 
@@ -47,7 +51,10 @@ It reports:
   and it is judged on the interval's lower bound rather than the point estimate, so more
   data can't make the verdict worse on its own.
 - **A/B against hand-written rules.** Personal adjustments are stored separately from the
-  quant output, so both can be scored on identical outcomes as a paired test.
+  quant output, so both can be scored on identical outcomes as a paired test. Rules are
+  written down first and measured forward, never tuned after reading the comparison,
+  which would fit noise. Built for NBA; MLB never had rules written, so it has nothing to
+  compare yet.
 
 And it guards the data it measures:
 
@@ -86,7 +93,14 @@ subprocess, so one sport failing can't stop the other.
 - **MLB Stats API** and **Baseball Savant** for baseball stats, lineups, and Statcast
 - **ESPN** for NBA schedules, rosters, game logs, and box scores
 - **OpenWeather** for ballpark conditions (game-line model)
-- **Anthropic** for optional qualitative leg review
+
+### Built, but not in active use
+
+- **LLM leg review (Anthropic).** A step that can annotate game-line legs with
+  qualitative context. It is skipped with `--no-llm`, has no live news source wired in,
+  and isn't part of any result below. A model with no current news can only guess.
+- **MLB hand-written rules.** The hooks exist for game lines and hits, but no rules were
+  ever written, so every MLB prediction is the quant model alone.
 
 ## Setup
 
