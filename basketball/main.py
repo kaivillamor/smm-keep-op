@@ -14,7 +14,7 @@ import sys
 
 from model.prop_model import prop_probability
 from output.research import grade_predictions, log_predictions, report
-from pipeline.calendar import game_slate_date, season_phase, slate_date
+from pipeline.calendar import game_slate_date, slate_date
 from pipeline.prop_odds import DEFAULT_BOOK, NBA_MARKETS, fetch_prop_odds, normalize_name
 from pipeline.stats_fetcher import (build_player_index, days_rest, fetch_gamelog,
                                     fetch_scoreboard, pick_season, player_form)
@@ -29,10 +29,16 @@ def collect(day: str | None = None) -> int:
     calibration measurable in days instead of months.
     """
     day = day or slate_date()
-    phase = season_phase(day)
-    print(f"[main] slate {day} ({phase or 'unknown phase'}) — research only, no bets")
+    print(f"[main] slate {day} — research only, no bets")
 
-    games = [g for g in fetch_scoreboard(day) if not g["final"]]
+    # Scheduled games only. Not `not final` — that includes in-progress games, and
+    # re-scoring one replaces a bettable pre-tip line with a live-market number.
+    all_games = fetch_scoreboard(day)
+    games = [g for g in all_games if not g["started"]]
+    if len(games) != len(all_games):
+        print(f"[main] skipping {len(all_games) - len(games)} game(s) already underway")
+    # ESPN's own season type, per game. The date-based calendar is only a fallback now.
+    phase_by_game = {g["game_id"]: g.get("phase") for g in games}
     if not games:
         print("[main] no scheduled games on this slate.")
         return 0
@@ -76,6 +82,7 @@ def collect(day: str | None = None) -> int:
                 "team": who["team"], "opponent": who["opponent"],
                 "market": market, "line": entry.get("line"),
                 "tipoff": who["tipoff"],
+                "season_phase": phase_by_game.get(who["game_id"]),
                 # base_prob is the quant number and owner_adj the personal-logic delta,
                 # kept separate so either can be measured alone. There is no personal
                 # logic yet, hence 0.0 — and it is LOGGED as 0.0 rather than omitted.

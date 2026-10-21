@@ -59,7 +59,7 @@ SEASONS = (
     {
         "label":            "2026-27",
         "preseason_start":  "2026-09-28",
-        "regular_start":    "2026-10-21",
+        "regular_start":    "2026-10-20",   # corrected from §23's estimate, per ESPN
         "postseason_start": None,          # 2027 playoff start — fill in when scheduled
         "season_end":       None,
     },
@@ -67,7 +67,15 @@ SEASONS = (
 
 
 def season_phase(game_date: str | None) -> str | None:
-    """'preseason' | 'regular' | 'postseason', or None when the date is outside every
+    """FALLBACK ONLY — prefer the per-game `phase` ESPN returns on the scoreboard.
+
+    This function guesses from a hardcoded date, and on day one it guessed wrong: §23
+    estimated the 2026-27 opener as 2026-10-21, the real date was 2026-10-20, and a
+    slate of genuine regular-season games was tagged preseason. Kept for the paths with
+    no scoreboard to hand (backfills, ad-hoc queries); anything collecting live should
+    read stats_fetcher's `phase`.
+
+    'preseason' | 'regular' | 'postseason', or None when the date is outside every
     recorded season or past an unrecorded boundary.
 
     Preseason is the NBA-specific reason this column exists on day one, and it matters

@@ -44,6 +44,13 @@ STAT_INDEX = {
     "steals": 10, "fouls": 11, "turnovers": 12, "points": 13,
 }
 
+# ESPN states the season type on every event, so the phase is READ, never inferred from a
+# date. A hardcoded boundary got this wrong on day one: PROJECT.md §23 estimated the 2026-27
+# regular season would start 2026-10-21, the opener was actually 2026-10-20, and 134 real
+# regular-season rows were logged as preseason. An authoritative field needs no annual
+# maintenance and cannot drift.
+ESPN_SEASON_TYPE = {1: "preseason", 2: "regular", 3: "postseason", 4: "allstar"}
+
 # The prop market -> the stat it resolves against. Adding a market without adding its
 # mapping here would silently grade every row of it as a loss.
 MARKET_STAT = {
@@ -139,6 +146,17 @@ def fetch_scoreboard(day: str) -> list[dict]:
             "home": ((sides.get("home") or {}).get("team") or {}).get("abbreviation"),
             "away": ((sides.get("away") or {}).get("team") or {}).get("abbreviation"),
             "status": status.get("name"),
+            # 'pre' | 'in' | 'post'. `completed` alone is NOT enough to decide whether to
+            # collect: it is False for an IN-PROGRESS game as well as a scheduled one, so
+            # a `not final` filter re-scores live games and overwrites their pre-tip price
+            # with an in-play one. A prop you can no longer bet is not the price the model
+            # should be measured against. MLB guards this with game_has_started().
+            "state": status.get("state"),
+            "started": status.get("state") != "pre",
+            # None for an unrecognised type rather than a guess — the same rule the date
+            # fallback follows, for the same reason.
+            "phase": ESPN_SEASON_TYPE.get((ev.get("season") or {}).get("type")),
+            "season_year": (ev.get("season") or {}).get("year"),
             # Only FINAL games may be graded. Box scores populate live, and baseball
             # graded a player a loss before his game started by trusting a non-final one.
             "final": bool(status.get("completed")),

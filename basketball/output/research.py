@@ -134,6 +134,11 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
            "ON CONFLICT(date, game_id, player_id, market) DO UPDATE SET "
            "  model_prob=excluded.model_prob, base_prob=excluded.base_prob, "
            "  owner_adj=excluded.owner_adj, "
+           # season_phase is derived metadata about the GAME, not a prediction, so a
+           # re-run correcting it to ESPN's authoritative value is a fix, not the kind of
+           # overwrite §24 forbids. This is what repairs a row first logged from the
+           # date-based fallback.
+           "  season_phase=COALESCE(excluded.season_phase, predictions.season_phase), "
            "  calibrated_prob=excluded.calibrated_prob, "
            "  line=COALESCE(excluded.line, predictions.line), "
            "  book_odds=COALESCE(excluded.book_odds, predictions.book_odds), "
@@ -147,7 +152,9 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
     for c in candidates:
         game_date = c.get("game_date") or game_slate_date(c.get("tipoff")) or default_date
         slates.add(game_date)
-        conn.execute(sql, (game_date, season_phase(game_date),
+        # ESPN's season type when the caller has it, the date calendar only as fallback.
+        phase = c.get("season_phase") or season_phase(game_date)
+        conn.execute(sql, (game_date, phase,
                            *(c.get(f) for f in _FIELDS), now))
         n += 1
     conn.commit()
