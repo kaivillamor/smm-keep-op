@@ -395,6 +395,9 @@ NBA_COLLECT_HOURS = {int(h) for h in
                      (os.getenv("NBA_COLLECT_HOURS") or "21,22,23,0,1").split(",")}
 NBA_GRADE_HOUR = int(os.getenv("NBA_GRADE_HOUR") or 11)
 NBA_ENABLED = (os.getenv("NBA_ENABLED") or "1") not in ("0", "false", "False")
+# Pause switch for MLB in the offseason. An empty COLLECT_HOURS can't do it — `or` treats
+# "" as unset and falls back to the default hours — so it needs its own flag.
+MLB_ENABLED = (os.getenv("MLB_ENABLED") or "1") not in ("0", "false", "False")
 
 
 def _run_basketball(arg: str) -> None:
@@ -426,7 +429,7 @@ def _scheduler():
         try:
             now = datetime.now(timezone.utc)
             key = f"{now:%Y-%m-%d}-{now.hour}"
-            if key not in done:
+            if MLB_ENABLED and key not in done:
                 if now.hour == GRADE_HOUR:
                     from output.research import grade_predictions
                     grade_predictions()

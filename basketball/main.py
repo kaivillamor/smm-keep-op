@@ -12,6 +12,7 @@ without anyone noticing (PROJECT.md §29). Collect and measure first.
 """
 import sys
 
+from model.factors.owner_logic import apply_prop_owner_logic
 from model.prop_model import prop_probability
 from output.research import grade_predictions, log_predictions, report
 from pipeline.calendar import game_slate_date, slate_date
@@ -75,6 +76,14 @@ def collect(day: str | None = None) -> int:
 
             form = player_form(rows, market) if rows else {}
             prob = prop_probability(form, market, entry.get("line"))
+            # Your rules, as a DELTA on top of the quant number — never a replacement.
+            # Only applied when the quant model produced a probability: a rule nudging a
+            # number that doesn't exist would invent a prediction from nothing.
+            adj = 0.0
+            if prob is not None:
+                adj = apply_prop_owner_logic(entry.get("player_name") or name, market,
+                                             who["opponent"], entry.get("line"), prob)
+            final = None if prob is None else round(min(max(prob + adj, 0.0), 1.0), 4)
 
             candidates.append({
                 "game_id": who["game_id"], "player_id": pid,
@@ -83,10 +92,12 @@ def collect(day: str | None = None) -> int:
                 "market": market, "line": entry.get("line"),
                 "tipoff": who["tipoff"],
                 "season_phase": phase_by_game.get(who["game_id"]),
-                # base_prob is the quant number and owner_adj the personal-logic delta,
-                # kept separate so either can be measured alone. There is no personal
-                # logic yet, hence 0.0 — and it is LOGGED as 0.0 rather than omitted.
-                "base_prob": prob, "owner_adj": 0.0, "model_prob": prob,
+                # base_prob is the quant number, owner_adj your rules' delta, model_prob
+                # the clamped sum. Kept separate so compare_owner_logic() can score the
+                # rules against the quant model on identical outcomes. Until 2026-10-26
+                # this hardcoded 0.0 and never called the rules at all, so anything
+                # written in owner_logic.py would have silently done nothing.
+                "base_prob": prob, "owner_adj": adj, "model_prob": final,
                 # calibrated_prob stays NULL on purpose. No NBA calibration has been
                 # fitted — there is no data to fit one on — and inventing a slope is
                 # exactly what made MLB's gate unfireable. The column is here so that

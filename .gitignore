@@ -16,6 +16,9 @@ baseball/data/stats/*
 baseball/data/lineups/*
 baseball/data/weather/*
 !baseball/data/**/.gitkeep
+basketball/data/odds/*
+basketball/data/stats/*
+!basketball/data/**/.gitkeep
 
 # macOS
 .DS_Store
