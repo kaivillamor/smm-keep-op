@@ -99,10 +99,26 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             opp_def_rating REAL,
             outcome       TEXT DEFAULT NULL,      -- 'win' | 'loss' | 'void'
             actual_value  REAL DEFAULT NULL,      -- what the player actually recorded
-            created_at    TEXT NOT NULL,
+            created_at    TEXT NOT NULL,          -- first time this row was seen
+            open_line     REAL,                   -- FIRST line observed. Collection runs
+            open_odds     INTEGER,                --  hourly and overwrites line/book_odds,
+            open_priced_at TEXT,                  --  so without these the opening number
+                                                  --  is lost and line movement — closing
+                                                  --  line value, the standard test of
+                                                  --  whether a bet had edge — cannot be
+                                                  --  measured. Set once, never updated.
+            updated_at    TEXT,                   -- when line/book_odds were last refreshed
             UNIQUE(date, game_id, player_id, market)
         );
     """)
+    # Migration for databases created before 2026-10-26. Rows logged earlier keep these
+    # NULL rather than being backfilled from line/book_odds: those hold the LAST snapshot,
+    # not the opening one, and copying them in would record a closing price as an open.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
+    for col, decl in (("open_line", "REAL"), ("open_odds", "INTEGER"),
+                      ("open_priced_at", "TEXT"), ("updated_at", "TEXT")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {decl}")
     conn.commit()
     return conn
 
@@ -128,8 +144,9 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
     conn = _connect(db_path)
     default_date = slate_date()   # only for a candidate carrying no tipoff of its own
     now = datetime.now(timezone.utc).isoformat()
-    cols = ", ".join(("date", "season_phase") + _FIELDS + ("created_at",))
-    marks = ", ".join("?" * (len(_FIELDS) + 3))
+    cols = ", ".join(("date", "season_phase") + _FIELDS +
+                     ("created_at", "open_line", "open_odds", "open_priced_at", "updated_at"))
+    marks = ", ".join("?" * (len(_FIELDS) + 7))
     sql = (f"INSERT INTO predictions ({cols}) VALUES ({marks}) "
            "ON CONFLICT(date, game_id, player_id, market) DO UPDATE SET "
            "  model_prob=excluded.model_prob, base_prob=excluded.base_prob, "
@@ -146,7 +163,14 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
            # `book` MUST refresh with the odds it describes. Baseball omitted it, so a row
            # that gained a price on a later run kept book=NULL and its provenance backfill
            # then stamped 219 good prices as coming from the discredited feed (§29).
-           "  book=COALESCE(excluded.book, predictions.book)")
+           "  book=COALESCE(excluded.book, predictions.book), "
+           # The open columns keep the EXISTING value first — the reverse of the latest-
+           # price columns above — so the first non-NULL observation sticks. A row first
+           # logged before its price posted gets its open from the first run that sees one.
+           "  open_line=COALESCE(predictions.open_line, excluded.open_line), "
+           "  open_odds=COALESCE(predictions.open_odds, excluded.open_odds), "
+           "  open_priced_at=COALESCE(predictions.open_priced_at, excluded.open_priced_at), "
+           "  updated_at=excluded.updated_at")
     n = 0
     slates: set[str] = set()
     for c in candidates:
@@ -154,8 +178,10 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
         slates.add(game_date)
         # ESPN's season type when the caller has it, the date calendar only as fallback.
         phase = c.get("season_phase") or season_phase(game_date)
-        conn.execute(sql, (game_date, phase,
-                           *(c.get(f) for f in _FIELDS), now))
+        priced = c.get("book_odds") is not None
+        conn.execute(sql, (game_date, phase, *(c.get(f) for f in _FIELDS), now,
+                           c.get("line") if priced else None,
+                           c.get("book_odds"), now if priced else None, now))
         n += 1
     conn.commit()
     conn.close()

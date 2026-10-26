@@ -126,13 +126,16 @@ def fetch_scoreboard(day: str) -> list[dict]:
     keys every prediction row — see pipeline/calendar.game_slate_date.
     """
     compact = day.replace("-", "")
-    cached = _read_cache(_cache_path("scoreboard", compact, day))
-    data = cached or _get(f"{SITE_API}/scoreboard", {"dates": compact})
+    # NEVER cached. Rosters and game logs are stable within a day; the scoreboard is the
+    # one response whose meaning changes during it — game status goes pre -> in -> post.
+    # It used to be cached per day like the rest, so the evening collect run stored every
+    # game as 'pre', and the next morning's grade run read that file, saw no final games,
+    # and skipped the whole slate. Six days, 2,533 rows, zero graded (2026-10-20..26).
+    # One call per run is cheap; a stale status is not.
+    data = _get(f"{SITE_API}/scoreboard", {"dates": compact})
     if data is None:
         print(f"[espn] scoreboard unavailable for {day}")
         return []
-    if cached is None:
-        _write_cache(_cache_path("scoreboard", compact, day), data)
 
     games = []
     for ev in data.get("events", []):
