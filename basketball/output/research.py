@@ -91,12 +91,25 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             recent_avg    REAL,                  -- last-N-games average
             recent_games  INTEGER,
             minutes_avg   REAL,                  -- the single biggest NBA prop driver
-            vs_opp_avg    REAL,                  -- this market vs this opponent
-            vs_opp_games  INTEGER,
+            vs_opp_avg    REAL,                  -- this market vs this opponent, both
+            vs_opp_games  INTEGER,               --  seasons. Logged; noisy at 2-8 games
             usage_proxy   REAL,                  -- FGA + 0.44*FTA + TOV (ESPN lacks true USG%)
             days_rest     INTEGER,               -- back-to-backs matter far more than in MLB
             is_home       INTEGER,
-            opp_def_rating REAL,
+            opp_allow_factor REAL,               -- what tonight's opponent ALLOWS in this
+                                                 --  market vs the league (1.05 = 5% more),
+                                                 --  shrunk toward last season. See
+                                                 --  pipeline/team_defense. Was named
+                                                 --  opp_def_rating, never populated, and
+                                                 --  renamed 2026-10-26: "defensive rating"
+                                                 --  means points per 100 possessions in
+                                                 --  the NBA, which this is not.
+            injury_status TEXT,                  -- 'active' | 'out' | 'day-to-day' from the
+                                                 --  injury report; NULL = report unavailable
+                                                 --  that run, NOT "healthy"
+            teammate_minutes_out REAL,           -- this-season minutes of teammates listed
+                                                 --  out: the role a player may absorb.
+                                                 --  NULL = report unavailable
             outcome       TEXT DEFAULT NULL,      -- 'win' | 'loss' | 'void'
             actual_value  REAL DEFAULT NULL,      -- what the player actually recorded
             created_at    TEXT NOT NULL,          -- first time this row was seen
@@ -110,25 +123,73 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             updated_at    TEXT,                   -- when line/book_odds were last refreshed
             UNIQUE(date, game_id, player_id, market)
         );
+
+        -- Final regular-season team box totals, one row per team per game: the raw
+        -- material for opp_allow_factor. Stored rather than cached because a finished
+        -- slate never changes, and the volume keeps it across redeploys.
+        CREATE TABLE IF NOT EXISTS team_games (
+            game_id      TEXT NOT NULL,
+            date         TEXT NOT NULL,
+            season_year  INTEGER,
+            team_id      TEXT NOT NULL,
+            team         TEXT,
+            opponent_id  TEXT NOT NULL,
+            opponent     TEXT,
+            points       REAL,
+            rebounds     REAL,
+            assists      REAL,
+            threes       REAL,
+            PRIMARY KEY (game_id, team_id)
+        );
+        -- Dates whose games are all final and stored, so the backfill never refetches.
+        CREATE TABLE IF NOT EXISTS team_sync (
+            date       TEXT PRIMARY KEY,
+            synced_at  TEXT
+        );
     """)
     # Migration for databases created before 2026-10-26. Rows logged earlier keep these
     # NULL rather than being backfilled from line/book_odds: those hold the LAST snapshot,
     # not the opening one, and copying them in would record a closing price as an open.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
+    # Rename, not add-and-abandon: opp_def_rating was NULL on every row ever written, so
+    # nothing is lost, and a dead column next to its replacement is bloat.
+    if "opp_def_rating" in cols and "opp_allow_factor" not in cols:
+        conn.execute("ALTER TABLE predictions RENAME COLUMN opp_def_rating TO opp_allow_factor")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
     for col, decl in (("open_line", "REAL"), ("open_odds", "INTEGER"),
-                      ("open_priced_at", "TEXT"), ("updated_at", "TEXT")):
+                      ("open_priced_at", "TEXT"), ("updated_at", "TEXT"),
+                      ("injury_status", "TEXT"), ("teammate_minutes_out", "REAL")):
         if col not in cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {decl}")
     conn.commit()
     return conn
 
 
+# A prediction and the inputs that produced it, refreshed TOGETHER on conflict. When a run
+# produces a prediction the row takes everything that run computed; when it doesn't (the
+# line was pulled, a log fetch failed) the row keeps the previous run's everything.
+#
+# Before 2026-10-26 only model_prob refreshed. Game logs are cached per day, so normally
+# every run computes identical inputs and the gap was invisible — until code changed
+# mid-day: rows written by the afternoon's deploy kept its unblended season averages while
+# model_prob was recomputed from the new blended ones. A row whose stored inputs cannot
+# reproduce its own prediction is what §24 forbids. The same rule also stops a run with no
+# prediction from overwriting a good one with NULL.
+_RUN_FIELDS = ("model_prob", "base_prob", "owner_adj", "calibrated_prob",
+               "stats_season", "stat_sd", "season_avg", "recent_avg", "recent_games",
+               "minutes_avg", "usage_proxy", "days_rest", "vs_opp_avg", "vs_opp_games",
+               "opp_allow_factor")
+_RUN_UPDATE = ", ".join(
+    f"{f}=CASE WHEN excluded.model_prob IS NOT NULL THEN excluded.{f} ELSE predictions.{f} END"
+    for f in _RUN_FIELDS)
+
 _FIELDS = ("game_id", "player_id", "player_name", "team", "opponent", "market", "line",
            "model_prob", "base_prob", "owner_adj", "calibrated_prob",
            "book_odds", "book_implied", "book",
            "stats_season", "stat_sd",
            "season_avg", "recent_avg", "recent_games", "minutes_avg", "vs_opp_avg",
-           "vs_opp_games", "usage_proxy", "days_rest", "is_home", "opp_def_rating")
+           "vs_opp_games", "usage_proxy", "days_rest", "is_home", "opp_allow_factor",
+           "injury_status", "teammate_minutes_out")
 
 
 def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
@@ -149,14 +210,12 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
     marks = ", ".join("?" * (len(_FIELDS) + 7))
     sql = (f"INSERT INTO predictions ({cols}) VALUES ({marks}) "
            "ON CONFLICT(date, game_id, player_id, market) DO UPDATE SET "
-           "  model_prob=excluded.model_prob, base_prob=excluded.base_prob, "
-           "  owner_adj=excluded.owner_adj, "
+           f"  {_RUN_UPDATE}, "
            # season_phase is derived metadata about the GAME, not a prediction, so a
            # re-run correcting it to ESPN's authoritative value is a fix, not the kind of
            # overwrite §24 forbids. This is what repairs a row first logged from the
            # date-based fallback.
            "  season_phase=COALESCE(excluded.season_phase, predictions.season_phase), "
-           "  calibrated_prob=excluded.calibrated_prob, "
            "  line=COALESCE(excluded.line, predictions.line), "
            "  book_odds=COALESCE(excluded.book_odds, predictions.book_odds), "
            "  book_implied=COALESCE(excluded.book_implied, predictions.book_implied), "
@@ -170,6 +229,12 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
            "  open_line=COALESCE(predictions.open_line, excluded.open_line), "
            "  open_odds=COALESCE(predictions.open_odds, excluded.open_odds), "
            "  open_priced_at=COALESCE(predictions.open_priced_at, excluded.open_priced_at), "
+           # The injury pair keeps the previous value only when this run's report was
+           # UNAVAILABLE (NULL) — a player cleared since the last run arrives as 'active',
+           # not NULL, and overwrites. Independent of whether a prediction was made.
+           "  injury_status=COALESCE(excluded.injury_status, predictions.injury_status), "
+           "  teammate_minutes_out=COALESCE(excluded.teammate_minutes_out, "
+           "                                predictions.teammate_minutes_out), "
            "  updated_at=excluded.updated_at")
     n = 0
     slates: set[str] = set()
@@ -212,9 +277,15 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
         return 0
 
     finals: dict[str, bool] = {}
+    called_off: set[str] = set()
     for day in sorted({p["date"] for p in pending}):
         for g in fetch_scoreboard(day):
             finals[str(g["game_id"])] = g["final"]
+            # Postponed or cancelled: ESPN reports state 'post' but never completes it. A
+            # book voids props on a game that isn't played, so do the same — otherwise its
+            # rows would sit pending forever. A makeup game is a new event with a new id.
+            if g.get("state") == "post" and not g["final"]:
+                called_off.add(str(g["game_id"]))
 
     by_game: dict[str, list] = {}
     for p in pending:
@@ -222,6 +293,11 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
 
     graded = skipped = 0
     for game_id, rows in by_game.items():
+        if game_id in called_off:
+            for r in rows:
+                conn.execute("UPDATE predictions SET outcome='void' WHERE id=?", (r["id"],))
+                graded += 1
+            continue
         if not finals.get(game_id):
             skipped += len(rows)
             continue

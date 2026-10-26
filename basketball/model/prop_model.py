@@ -14,8 +14,9 @@ Known limits, written down so they are not rediscovered as surprises:
   * A normal is wrong in the tail for a counting stat, and points come in 2s and 3s so it
     is lumpy even near the mean. It is adequate for ranking, which is what the
     ranking-gap test measures.
-  * No opponent adjustment. `opp_def_rating` is logged but unused here — logged first,
-    used later, never the other way round.
+  * No opponent adjustment. `opp_allow_factor` (what the opponent allows in this market)
+    is logged but unused here, as are injury context and vs-opponent history — logged
+    first, used later, never the other way round.
   * No minutes projection. The biggest single driver of an NBA prop is tonight's minutes,
     and we only know the player's recent average, not whether he is on a minutes limit.
   * On opening night the averages come from LAST season (see stats_fetcher.pick_season),

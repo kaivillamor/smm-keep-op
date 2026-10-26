@@ -24,7 +24,9 @@ Every stat arrives as a STRING, and the combined ones as "made-attempted" ("2-3"
 """
 import json
 import os
+import re
 import time
+from collections import Counter
 from datetime import datetime, timezone
 
 import requests
@@ -84,10 +86,31 @@ def _write_cache(path: str, payload) -> None:
         pass          # a cache miss is slower, never wrong
 
 
-def _get(url: str, params: dict | None = None, *, retries: int = 3) -> dict | None:
-    """GET with backoff. Returns None rather than raising: one unreachable player must
-    not take down a whole slate's collection."""
+# Pacing between ESPN requests. A collect run is a burst of ~250 game-log requests (this
+# season and last, per player) plus rosters, and on 2026-10-26 roughly half the last-season
+# requests in one run failed while the same URLs succeeded moments later — throttling. A
+# tenth of a second each adds ~25s to a run that already takes minutes.
+_MIN_INTERVAL = 0.1
+_last_call = 0.0
+
+# Requests that exhausted their retries this process, by endpoint kind. Reported by the
+# collector so a degraded run says so instead of quietly logging worse inputs.
+FETCH_FAILURES: Counter = Counter()
+
+
+def _get(url: str, params: dict | None = None, *, retries: int = 4) -> dict | None:
+    """GET with pacing and backoff. Returns None rather than raising: one unreachable
+    player must not take down a whole slate's collection.
+
+    Throttling (429) and server errors back off and honour Retry-After; a 404 is final.
+    """
+    global _last_call
     for attempt in range(retries):
+        wait = _MIN_INTERVAL - (time.monotonic() - _last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.monotonic()
+        retry_after = 0.0
         try:
             r = requests.get(url, params=params, timeout=_TIMEOUT,
                              headers={"User-Agent": "Mozilla/5.0"})
@@ -95,10 +118,11 @@ def _get(url: str, params: dict | None = None, *, retries: int = 3) -> dict | No
                 return r.json()
             if r.status_code == 404:
                 return None
+            retry_after = _num(r.headers.get("Retry-After")) or 0.0
         except (requests.RequestException, json.JSONDecodeError):
             pass
         if attempt < retries - 1:
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(max(retry_after, 2.0 * (attempt + 1)))
     return None
 
 
@@ -125,6 +149,20 @@ def fetch_scoreboard(day: str) -> list[dict]:
     Returns {game_id, tipoff (ISO-8601 UTC), home, away, status, final}. `tipoff` is what
     keys every prediction row — see pipeline/calendar.game_slate_date.
     """
+    data = scoreboard_data(day)
+    if data is None:
+        print(f"[espn] scoreboard unavailable for {day}")
+        return []
+    return parse_scoreboard(data)
+
+
+def scoreboard_data(day: str) -> dict | None:
+    """Raw scoreboard JSON, or None if the fetch FAILED.
+
+    Kept separate from fetch_scoreboard because that returns [] for both "no games" and
+    "request failed" — fine for collection, fatal for the team-defense backfill, which
+    marks a date as done and would then skip a failed date forever.
+    """
     compact = day.replace("-", "")
     # NEVER cached. Rosters and game logs are stable within a day; the scoreboard is the
     # one response whose meaning changes during it — game status goes pre -> in -> post.
@@ -132,11 +170,25 @@ def fetch_scoreboard(day: str) -> list[dict]:
     # game as 'pre', and the next morning's grade run read that file, saw no final games,
     # and skipped the whole slate. Six days, 2,533 rows, zero graded (2026-10-20..26).
     # One call per run is cheap; a stale status is not.
-    data = _get(f"{SITE_API}/scoreboard", {"dates": compact})
-    if data is None:
-        print(f"[espn] scoreboard unavailable for {day}")
-        return []
+    return _get(f"{SITE_API}/scoreboard", {"dates": compact})
 
+
+def _team_box(competitor: dict) -> dict | None:
+    """A team's own box totals for one game, or None if the game has no box.
+
+    None rather than a dict of Nones: a postponed game reports state 'post' with no
+    statistics at all, and a dict of empty values is still truthy — four postponed
+    2025-26 games were stored as played until this returned None.
+    """
+    st = {x.get("name"): x.get("displayValue") for x in competitor.get("statistics", [])}
+    if _num(st.get("points")) is None:
+        return None
+    return {"points": _num(st.get("points")), "rebounds": _num(st.get("rebounds")),
+            "assists": _num(st.get("assists")),
+            "threes": _num(st.get("threePointFieldGoalsMade"))}
+
+
+def parse_scoreboard(data: dict) -> list[dict]:
     games = []
     for ev in data.get("events", []):
         comps = ev.get("competitions") or [{}]
@@ -148,6 +200,16 @@ def fetch_scoreboard(day: str) -> list[dict]:
             "tipoff": ev.get("date"),
             "home": ((sides.get("home") or {}).get("team") or {}).get("abbreviation"),
             "away": ((sides.get("away") or {}).get("team") or {}).get("abbreviation"),
+            # Team IDS are the join key everywhere a team is matched across endpoints. The
+            # scoreboard writes "NY", "SA", "WSH"; other ESPN endpoints are not guaranteed
+            # to agree, and an abbreviation mismatch would leave a column silently empty.
+            "home_id": str(((sides.get("home") or {}).get("team") or {}).get("id") or ""),
+            "away_id": str(((sides.get("away") or {}).get("team") or {}).get("id") or ""),
+            # Team box totals, final games only — the raw material for opponent defense.
+            "home_box": _team_box(sides["home"]) if status.get("state") == "post"
+                        and sides.get("home") else None,
+            "away_box": _team_box(sides["away"]) if status.get("state") == "post"
+                        and sides.get("away") else None,
             "status": status.get("name"),
             # 'pre' | 'in' | 'post'. `completed` alone is NOT enough to decide whether to
             # collect: it is False for an IN-PROGRESS game as well as a scheduled one, so
@@ -160,8 +222,12 @@ def fetch_scoreboard(day: str) -> list[dict]:
             # fallback follows, for the same reason.
             "phase": ESPN_SEASON_TYPE.get((ev.get("season") or {}).get("type")),
             "season_year": (ev.get("season") or {}).get("year"),
+            # 'STD' for an ordinary game. ESPN's SEASON type cannot be trusted for this:
+            # the 2026 All-Star round robin (teams STARS, STRIPES, WORLD) is tagged season
+            # type 2, regular season, and only the competition type says 'ALLSTAR'.
+            "comp_type": (comp.get("type") or {}).get("abbreviation"),
             # Only FINAL games may be graded. Box scores populate live, and baseball
-            # graded a player a loss before his game started by trusting a non-final one.
+            # graded a player a loss before their game started by trusting a non-final one.
             "final": bool(status.get("completed")),
         })
     return games
@@ -205,10 +271,13 @@ def build_player_index(games: list[dict], day: str, normalize) -> dict:
             if not side:
                 continue
             for p in fetch_roster(side, day):
+                home = side == g["home"]
                 row = {
                     "player_id": p["player_id"], "team": side, "opponent": opp,
+                    "team_id": g["home_id"] if home else g["away_id"],
+                    "opponent_id": g["away_id"] if home else g["home_id"],
                     "game_id": g["game_id"], "tipoff": g["tipoff"],
-                    "is_home": 1 if side == g["home"] else 0,
+                    "is_home": 1 if home else 0,
                 }
                 key = normalize(p["name"])
                 index[key] = row
@@ -225,20 +294,48 @@ def build_player_index(games: list[dict], day: str, normalize) -> dict:
 
 # ── player form ──────────────────────────────────────────────────────────────
 
-def fetch_gamelog(player_id: str, day: str) -> dict:
-    """Dated game log, newest first, grouped by season type.
+def fetch_gamelog(player_id: str, day: str, prior_year: int | None = None) -> dict:
+    """Dated game log, newest first, grouped by season type — this season AND last.
 
-    Returns {season_label: [{event_id, date, stats{...}}, ...]}. Joins the stat arrays in
-    `seasonTypes` with the dates in the top-level `events` map — ESPN splits them, and the
-    stats alone carry no date, so neither half is usable on its own.
+    Returns {season_label: [{event_id, date, stats{...}}, ...]}.
+
+    Two requests, because the endpoint's default is only the LATEST season with games. On
+    opening night that happened to be 2025-26, so both seasons appeared to be there; once
+    a player had played this season it returned 2026-27 alone — two games for a starter —
+    and the blend in pick_season silently had no prior to blend with. Last season has to
+    be asked for by year (`?season=2026` for 2025-26; ESPN labels seasons by the year
+    they end). A finished season never changes, so that half is cached permanently; the
+    current half is cached per day like everything else that is stable within one.
     """
-    cached = _read_cache(_cache_path("gamelog", player_id, day))
-    data = cached or _get(f"{WEB_API}/athletes/{player_id}/gamelog")
-    if data is None:
-        return {}
-    if cached is None:
-        _write_cache(_cache_path("gamelog", player_id, day), data)
+    current = _gamelog_data(player_id, None, _cache_path("gamelog", player_id, day))
+    out = _parse_gamelog(current) if current else {}
+    if prior_year:
+        prior = _gamelog_data(player_id, prior_year,
+                              _cache_path("gamelog", f"{player_id}_{prior_year}", "seasons"))
+        if prior is None:
+            # Not cached on failure, so the next hourly run retries it. Until then this
+            # player is predicted from this season alone — counted so the run reports it.
+            FETCH_FAILURES["prior_gamelog"] += 1
+        if prior:
+            for label, rows in _parse_gamelog(prior).items():
+                out.setdefault(label, rows)
+    return out
 
+
+def _gamelog_data(player_id: str, season: int | None, cache: str) -> dict | None:
+    cached = _read_cache(cache)
+    if cached is not None:
+        return cached
+    data = _get(f"{WEB_API}/athletes/{player_id}/gamelog",
+                {"season": season} if season else None)
+    if data is not None:
+        _write_cache(cache, data)
+    return data
+
+
+def _parse_gamelog(data: dict) -> dict:
+    """Join the stat arrays in `seasonTypes` with the dates in the top-level `events` map —
+    ESPN splits them, and the stats alone carry no date, so neither half is usable alone."""
     meta = data.get("events") or {}
     out: dict[str, list] = {}
     for st in data.get("seasonTypes", []):
@@ -256,6 +353,7 @@ def fetch_gamelog(player_id: str, day: str) -> dict:
                 rows.append({
                     "event_id": ev.get("eventId"),
                     "date": m.get("gameDate"),
+                    "opponent_id": str((m.get("opponent") or {}).get("id") or ""),
                     "minutes": _num(raw[STAT_INDEX["minutes"]]),
                     "points": _num(raw[STAT_INDEX["points"]]),
                     "rebounds": _num(raw[STAT_INDEX["rebounds"]]),
@@ -305,7 +403,8 @@ def pick_season(gamelog: dict) -> tuple[str | None, list]:
 PRIOR_GAMES = 15
 
 
-def player_form(games: list[dict], market: str, recent_n: int = 10) -> dict:
+def player_form(games: list[dict], market: str, recent_n: int = 10,
+                opponent_id: str | None = None) -> dict:
     """Season / recent / minutes / usage inputs for one player and market."""
     stat = MARKET_STAT.get(market)
     if not stat or not games:
@@ -345,7 +444,15 @@ def player_form(games: list[dict], market: str, recent_n: int = 10) -> dict:
     else:
         season = avg(cur or prev)
 
+    # This market against tonight's opponent, across both seasons. LOGGED, not used: two
+    # to eight games is a noisy sample, and MLB found its streak-style inputs carried no
+    # signal at all (§29). It earns a place in the model only if the corpus says so.
+    vs = [g[stat] for g in games
+          if opponent_id and g.get("opponent_id") == opponent_id and g.get(stat) is not None]
+
     return {
+        "vs_opp_avg": avg(vs),
+        "vs_opp_games": len(vs),
         "stat_sd": sd,
         "season_avg": season,
         "recent_avg": avg(recent),
@@ -374,6 +481,56 @@ def days_rest(games: list[dict], tipoff: str | None) -> int | None:
     if b.tzinfo is None:
         b = b.replace(tzinfo=timezone.utc)
     return max((b.date() - a.date()).days, 0)
+
+
+# ── availability ─────────────────────────────────────────────────────────────
+
+_ID_IN_LINK = re.compile(r"/id/(\d+)")
+
+
+def fetch_injuries() -> dict | None:
+    """League injury report: {player_id: {status, team_id, name}}.
+
+    Returns None if the report could not be fetched, which is NOT the same as an empty
+    report. Treating a failed fetch as "nobody is hurt" would log every player healthy on
+    exactly the nights the data is missing — a fallback masquerading as data. Not cached:
+    the report changes through the day, and the latest one before tip is the useful one.
+
+    The injury entries carry no player id field; the id is read from the profile link
+    ('/nba/player/_/id/4712863/...'), which is the same id the rosters and logs use.
+    """
+    data = _get(f"{SITE_API}/injuries")
+    if data is None:
+        return None
+    out: dict[str, dict] = {}
+    for team in data.get("injuries", []):
+        for inj in team.get("injuries", []):
+            a = inj.get("athlete") or {}
+            pid = next((m.group(1) for link in (a.get("links") or [])
+                        if (m := _ID_IN_LINK.search(link.get("href") or ""))), None)
+            if not pid:
+                continue
+            out[pid] = {
+                "status": (inj.get("status") or "").strip().lower() or None,
+                "team_id": str((a.get("team") or {}).get("id") or team.get("id") or ""),
+                "name": a.get("displayName"),
+            }
+    return out
+
+
+def recent_current_minutes(games: list[dict], season_year: int, n: int = 5) -> float:
+    """Average minutes over a player's last n games THIS season; 0.0 if none.
+
+    Filtered by game DATE, not by pick_season's label. A player out since preseason has no
+    current-season games, so pick_season falls back to last season and those rows look
+    "current" — counting their minutes as missing tonight would double-count an absence
+    every teammate's recent averages already reflect. Only minutes a player was actually
+    playing this season are minutes the rotation now has to replace.
+    """
+    start = f"{season_year - 1}-09-01"      # ESPN labels a season by the year it ends
+    cur = [g["minutes"] for g in games
+           if (g.get("date") or "") >= start and g.get("minutes") is not None][:n]
+    return round(sum(cur) / len(cur), 1) if cur else 0.0
 
 
 # ── grading ──────────────────────────────────────────────────────────────────
