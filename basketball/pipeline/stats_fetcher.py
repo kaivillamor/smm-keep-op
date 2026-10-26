@@ -282,8 +282,27 @@ def pick_season(gamelog: dict) -> tuple[str | None, list]:
                if "Regular Season" in k and "Play In" not in k and v}
     if not regular:
         return None, []
-    label = sorted(regular, reverse=True)[0]
-    return label, regular[label]
+    labels = sorted(regular, reverse=True)
+    current = labels[0]
+    if len(labels) == 1:
+        return current, [dict(g, prior=False) for g in regular[current]]
+
+    # BLEND this season with last season rather than switching wholesale. Taking the newest
+    # season with any games meant that after a player's first game, their 70-game log was
+    # dropped for a 1-game one: in week one, 64% of graded rows (1,310) were predicted off
+    # 1-3 games and ranked at AUC 0.512, against 0.536 for rows still on last season's log.
+    # Last season's games ride along tagged `prior`; player_form shrinks toward them.
+    previous = labels[1]
+    rows = ([dict(g, prior=False) for g in regular[current]] +
+            [dict(g, prior=True) for g in regular[previous]])
+    n_cur = len(regular[current])
+    # The label carries the method, because what `season_avg` means changed on 2026-10-26:
+    # before, one season's raw mean; after, a shrunk blend. §24 — a column means one method
+    # forever, so rows have to be able to say which one produced them.
+    return f"{current} ({n_cur}g) + prior {previous}", rows
+
+
+PRIOR_GAMES = 15
 
 
 def player_form(games: list[dict], market: str, recent_n: int = 10) -> dict:
@@ -291,6 +310,8 @@ def player_form(games: list[dict], market: str, recent_n: int = 10) -> dict:
     stat = MARKET_STAT.get(market)
     if not stat or not games:
         return {}
+    cur = [g[stat] for g in games if not g.get("prior") and g.get(stat) is not None]
+    prev = [g[stat] for g in games if g.get("prior") and g.get(stat) is not None]
     vals = [g[stat] for g in games if g.get(stat) is not None]
     mins = [g["minutes"] for g in games if g.get("minutes") is not None]
     recent = [g[stat] for g in games[:recent_n] if g.get(stat) is not None]
@@ -314,9 +335,19 @@ def player_form(games: list[dict], market: str, recent_n: int = 10) -> dict:
         m = sum(vals) / len(vals)
         sd = round((sum((v - m) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5, 3)
 
+    # Shrink this season toward last season by games played: last season counts as
+    # PRIOR_GAMES games' worth of evidence. One game this season moves the average about
+    # 6%; by 15 games it carries half the weight; by 45, three quarters. Not fitted — it
+    # is a sensible prior to be replaced once the corpus can fit one.
+    if cur and prev:
+        prior_mean = sum(prev) / len(prev)
+        season = round((sum(cur) + PRIOR_GAMES * prior_mean) / (len(cur) + PRIOR_GAMES), 3)
+    else:
+        season = avg(cur or prev)
+
     return {
         "stat_sd": sd,
-        "season_avg": avg(vals),
+        "season_avg": season,
         "recent_avg": avg(recent),
         "recent_games": len(recent),
         # Recent minutes, not season: a player whose role just changed is the single most
