@@ -18,11 +18,12 @@ import threading
 import time
 
 from pydantic import BaseModel
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -34,6 +35,9 @@ import sys
 # resolved against it rather than against whatever CWD uvicorn happened to start in.
 BASEBALL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "baseball"))
 sys.path.insert(0, BASEBALL_DIR)
+# basketball/ is deliberately NOT on sys.path: it is only ever run as a subprocess (see
+# _run_basketball), and its data is read with plain sqlite3 (see _nba_db).
+BASKETBALL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "basketball"))
 
 # uvicorn imports this as `web.app` with the REPO ROOT on sys.path, not web/ — so a bare
 # `from users import ...` below would not resolve. Add our own directory explicitly so
@@ -63,6 +67,14 @@ async def lifespan(_: "FastAPI"):
         print("[research] schema ensured", flush=True)
     except Exception as e:
         print(f"[research] schema ensure failed: {type(e).__name__}: {e}", flush=True)
+    # The same window exists for the NBA file, and this process can close it even less:
+    # it opens that file read-only, and basketball/ cannot be imported here. So the
+    # collector's own code applies its migrations, in a subprocess.
+    try:
+        if _run_basketball("--migrate") == 0:
+            print("[nba] schema ensured", flush=True)
+    except Exception as e:
+        print(f"[nba] schema ensure failed: {type(e).__name__}: {e}", flush=True)
     threading.Thread(target=_scheduler, daemon=True).start()
     print("[scheduler] started", flush=True)
     yield
@@ -159,13 +171,17 @@ def _db():
     return conn
 
 
-def stats() -> dict:
-    """Calibration + ranking signal. Mirrors output/research.py report()."""
+def stats(db=_db) -> dict:
+    """Calibration + ranking signal. Mirrors output/research.py report() — and its NBA
+    twin, which computes the same figures from the same model_prob/outcome columns, so
+    one implementation serves both sports. `db` is the connection factory."""
     try:
-        c = _db()
+        c = db()
         rows = [dict(r) for r in c.execute(
             "SELECT model_prob p, outcome, date FROM predictions "
-            "WHERE outcome IN ('win','loss')")]
+            # NBA logs rows with no probability (no usable form), and a NULL would crash
+            # the sums below. MLB has no such graded rows, so this changes nothing there.
+            "WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL")]
         total = c.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
         by_day = [dict(r) for r in c.execute(
             "SELECT date, COUNT(*) n, SUM(outcome IN ('win','loss')) graded "
@@ -355,9 +371,191 @@ def admin():
     return index()
 
 
+@app.get("/nba", response_class=HTMLResponse)
+@app.get("/nba/admin", response_class=HTMLResponse)
+def nba_pages():
+    """Same SPA, for the same reason as /admin."""
+    return index()
+
+
 @app.get("/api/report")
 def api_report(_: tuple = Depends(require_admin)):
     return stats()
+
+
+# ── NBA research views ───────────────────────────────────────────────────────
+# Read with plain sqlite3, never by importing basketball/. This process has BASEBALL_DIR
+# on sys.path, so `output.research` would resolve to BASEBALL's module and `parlay.method`
+# would not exist — the name collision _run_basketball documents. The cost is restating
+# the two small things needed from basketball/; each names its twin.
+
+def _nba_db_path() -> str:
+    """Absolute path to the NBA research DB. Twin of RESEARCH_DB in
+    basketball/output/research.py, anchored to BASKETBALL_DIR the way _research_db_path()
+    anchors baseball's: the collector subprocess runs with that as its cwd."""
+    p = os.getenv("NBA_RESEARCH_DB_PATH") or "data/history/research.db"
+    return p if os.path.isabs(p) else os.path.join(BASKETBALL_DIR, p)
+
+
+def _nba_db():
+    """READ-ONLY. The collector owns this file and its schema (migrated at startup via
+    `main.py --migrate`), and nothing on the web side should write to it. Read-only also
+    makes a missing file an error, rather than a new empty database at a misconfigured
+    path. as_uri() because the local path contains a space."""
+    conn = sqlite3.connect(f"{Path(_nba_db_path()).as_uri()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _nba_stale_cutoff() -> str:
+    """Slate date before which every prediction should already be graded.
+
+    Today's slate is Eastern, a fixed UTC-5 — twin of slate_date() in
+    basketball/pipeline/calendar.py. The 11:00 UTC run grades the previous slate, so
+    yesterday's rows can legitimately still be pending; anything OLDER means grading is
+    stuck. It was, silently, for six days (2026-10-20..26) while collection looked healthy.
+    """
+    today = datetime.now(timezone.utc) - timedelta(hours=5)
+    return (today - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+@app.get("/api/nba/summary")
+def api_nba_summary(who: tuple = Depends(auth)):
+    """Headline NBA numbers for any signed-in user, plus what the page needs in order to
+    say when grading is behind. Buckets, ranking gap and collection health are admin-only
+    via /api/nba/report."""
+    s = stats(_nba_db)
+    out = {"logged": s.get("logged", 0), "graded": s.get("graded", 0),
+           "actual": s.get("actual"), "predicted": s.get("predicted"),
+           "role": who[1], "user": who[0], "error": s.get("error"),
+           "slates": [], "stale_pending": 0, "stale_since": None}
+    if out["error"]:
+        return out
+    try:
+        c = _nba_db()
+        out["slates"] = [r[0] for r in c.execute(
+            "SELECT DISTINCT date FROM predictions ORDER BY date DESC")]
+        out["stale_pending"], out["stale_since"] = c.execute(
+            "SELECT COUNT(*), MIN(date) FROM predictions WHERE outcome IS NULL AND date < ?",
+            (_nba_stale_cutoff(),)).fetchone()
+        c.close()
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+@app.get("/api/nba/slate")
+def api_nba_slate(_: tuple = Depends(auth),
+                  day: str | None = Query(None, alias="date", pattern=r"^\d{4}-\d{2}-\d{2}$")):
+    """Every prop logged for one slate (default: the latest), ranked by model probability.
+
+    No edge column, unlike the MLB slate. NBA has no fitted calibration (calibrated_prob
+    is NULL by design), and model_prob minus the book's implied probability would present
+    an edge the model has not demonstrated. Both numbers are shown and the reader compares.
+    Graded rows carry their outcome, so a past slate doubles as its own results page.
+
+    Players listed OUT are ranked last. The model logs injury status but does not use it,
+    so an out player's stale low line scores near-certain — on 10-26 the two top rows were
+    out players at 98% — and a DNP voids anyway. Display order only; every row is returned.
+    """
+    try:
+        c = _nba_db()
+        day = day or c.execute("SELECT MAX(date) FROM predictions").fetchone()[0]
+        rows = [dict(r) for r in c.execute(
+            "SELECT player_name, team, opponent, market, line, book_odds, book_implied, "
+            "       base_prob, owner_adj, model_prob, hit_l10, injury_status, outcome, "
+            "       actual_value "
+            "FROM predictions WHERE date = ? "
+            "ORDER BY COALESCE(injury_status = 'out', 0), model_prob IS NULL, "
+            "         model_prob DESC LIMIT 800", (day,))] if day else []
+        c.close()
+    except Exception as e:
+        return {"error": str(e), "date": None, "props": []}
+    return {"error": None, "date": day, "count": len(rows), "props": [
+        {"name": r["player_name"], "team": r["team"], "opp": r["opponent"],
+         "market": r["market"], "line": r["line"], "odds": r["book_odds"],
+         "implied": r["book_implied"], "quant": r["base_prob"], "rules": r["owner_adj"],
+         "model": r["model_prob"], "l10": r["hit_l10"], "injury": r["injury_status"],
+         "outcome": r["outcome"], "actual": r["actual_value"]}
+        for r in rows]}
+
+
+@app.get("/api/nba/parlays")
+def api_nba_parlays(_: tuple = Depends(auth), limit: int = 40):
+    """The method's paper parlays, newest first, with their legs and a per-tier record.
+
+    Paper only: these live in the research DB and nothing was staked, so they sit beside
+    the simulated predictions and never beside bets.db (§14). `staked` counts settled
+    win/loss parlays only — a void returns its stake and is neither.
+    """
+    try:
+        c = _nba_db()
+        parlays = [dict(r) for r in c.execute(
+            "SELECT id, date, tier, stake, n_legs, american_odds, profit_if_win, first_tip, "
+            "       outcome, profit "
+            "FROM method_parlays ORDER BY date DESC, stake LIMIT ?", (min(limit, 200),))]
+        legs: dict[int, list] = {}
+        ids = [p["id"] for p in parlays]
+        for r in (c.execute(
+                "SELECT parlay_id, player_name, team, opponent, market, line, main_line, "
+                "       undercut, odds, hit_l10, hit_l20, outcome, actual_value "
+                f"FROM method_legs WHERE parlay_id IN ({','.join('?' * len(ids))}) "
+                "ORDER BY id", ids) if ids else []):
+            legs.setdefault(r["parlay_id"], []).append({
+                "name": r["player_name"], "team": r["team"], "opp": r["opponent"],
+                "market": r["market"], "line": r["line"], "main_line": r["main_line"],
+                "undercut": r["undercut"], "odds": r["odds"], "l10": r["hit_l10"],
+                "l20": r["hit_l20"], "outcome": r["outcome"], "actual": r["actual_value"]})
+        record = [dict(r) for r in c.execute(
+            "SELECT tier, SUM(outcome='win') won, SUM(outcome='loss') lost, "
+            "       SUM(outcome='void') void, "
+            "       SUM(CASE WHEN outcome IN ('win','loss') THEN stake ELSE 0 END) staked, "
+            "       SUM(COALESCE(profit, 0)) profit "
+            "FROM method_parlays WHERE outcome IS NOT NULL "
+            "GROUP BY tier ORDER BY MIN(stake)")]
+        c.close()
+    except Exception as e:
+        return {"error": str(e), "record": [], "parlays": []}
+    return {"error": None, "record": record, "parlays": [
+        {**{k: p[k] for k in ("date", "tier", "stake", "n_legs", "american_odds",
+                               "profit_if_win", "first_tip", "outcome", "profit")},
+         "legs": legs.get(p["id"], [])}
+        for p in parlays]}
+
+
+@app.get("/api/nba/report")
+def api_nba_report(_: tuple = Depends(require_admin)):
+    """NBA calibration (the shared stats()) plus two NBA-only tables.
+
+    `health` is collection AND grading per slate, and the page renders it even when
+    nothing is graded. MLB's admin page hides its by-day table in exactly that case, which
+    is the one case where it matters: NBA collected for six days while every grading run
+    settled zero rows, and nothing on any screen said so.
+    """
+    out = stats(_nba_db)
+    if out.get("error"):
+        return out
+    try:
+        c = _nba_db()
+        out["by_market"] = [dict(r) for r in c.execute(
+            "SELECT market, COUNT(*) n, AVG(model_prob) predicted, AVG(outcome='win') actual "
+            "FROM predictions WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL "
+            "GROUP BY market ORDER BY n DESC")]
+        cutoff = _nba_stale_cutoff()
+        out["health"] = [dict(r, stale=bool(r["pending"]) and r["date"] < cutoff)
+                         for r in c.execute(
+            "SELECT date, COUNT(*) logged, SUM(model_prob IS NOT NULL) scored, "
+            "       SUM(book_odds IS NOT NULL) priced, "
+            # outcome IN (...) is NULL, not 0, on an ungraded row, so a slate with nothing
+            # graded would SUM to NULL — exactly the slate this table exists to show as 0.
+            "       COALESCE(SUM(outcome IN ('win','loss')), 0) graded, "
+            "       COALESCE(SUM(outcome = 'void'), 0) void, "
+            "       SUM(outcome IS NULL) pending "
+            "FROM predictions GROUP BY date ORDER BY date DESC LIMIT 30")]
+        c.close()
+    except Exception as e:
+        out["error"] = str(e)
+    return out
 
 
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
@@ -390,7 +588,6 @@ GRADE_HOUR = int(os.getenv("GRADE_HOUR") or 13)
 
 # NBA runs later than MLB: tips are 23:00-03:00 UTC (7pm-10pm ET), so collection sits a
 # couple of hours earlier and grading waits until every West Coast game has finished.
-BASKETBALL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "basketball"))
 NBA_COLLECT_HOURS = {int(h) for h in
                      (os.getenv("NBA_COLLECT_HOURS") or "21,22,23,0,1").split(",")}
 NBA_GRADE_HOUR = int(os.getenv("NBA_GRADE_HOUR") or 11)
@@ -400,7 +597,7 @@ NBA_ENABLED = (os.getenv("NBA_ENABLED") or "1") not in ("0", "false", "False")
 MLB_ENABLED = (os.getenv("MLB_ENABLED") or "1") not in ("0", "false", "False")
 
 
-def _run_basketball(arg: str) -> None:
+def _run_basketball(arg: str) -> int:
     """Run the NBA collector as a SUBPROCESS, not an import.
 
     basketball/ deliberately duplicates baseball/ rather than sharing a package, so both
@@ -418,6 +615,7 @@ def _run_basketball(arg: str) -> None:
     if proc.returncode != 0:
         print(f"[nba] {arg} exited {proc.returncode}: "
               f"{(proc.stderr or '').strip()[-400:]}", flush=True)
+    return proc.returncode
 
 
 def _scheduler():

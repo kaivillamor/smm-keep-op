@@ -5,6 +5,7 @@ NBA prop research collector.
     python main.py --grade          grade finished games from box scores
     python main.py --collect-grade  grade yesterday, then collect tonight
     python main.py --report         calibration + ranking signal
+    python main.py --migrate        create/upgrade the research DB schema, nothing else
 
 Research only. Nothing here places or records a bet, and there is deliberately no betting
 gate: MLB shipped one before its inputs were logged and it could not fire for three weeks
@@ -249,6 +250,11 @@ if __name__ == "__main__":
         collect()
     elif cmd == "--report":
         report()
+    elif cmd == "--migrate":
+        # The web service runs this at startup. It reads this database READ-ONLY, so it
+        # cannot apply _connect()'s migrations itself — without this, a column added in a
+        # deploy would be missing from the dashboard until the next collect or grade run.
+        _connect().close()
     elif cmd == "--parlays":
         # Tonight's method parlays (or a given slate's): python main.py --parlays 2026-10-27
         conn = _connect()

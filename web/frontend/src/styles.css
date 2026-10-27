@@ -306,3 +306,27 @@ table.slate td.blocked { color: var(--dim); font-size: .76rem; }
   border-bottom: 1px solid var(--line-strong);
 }
 .link-btn:hover { color: var(--text); }
+
+/* ── NBA controls ────────────────────────────────────────────────────────────
+   Slate picker then market filter, on one row. The filter reuses the link
+   button, so it reads as part of the page rather than as a toolbar. */
+.filters {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem 1.1rem;
+  margin: 0 0 .55rem;
+}
+.link-btn.on { color: var(--text); border-bottom-color: var(--text); }
+select {
+  font: inherit; font-size: .76rem; color: var(--text);
+  padding: .2rem .45rem;
+  border: 1px solid var(--line-strong); border-radius: var(--r);
+  background: #000;
+}
+.slate-meta strong { color: var(--text); font-weight: 600; }
+.parlay { margin: 0 0 1.4rem; }
+.nowrap { white-space: nowrap; }
+/* Wide tables scroll inside their own box on a phone rather than being cut off at the
+   edge. Narrow screens only: a scroll container also captures `position: sticky`, and
+   on a desktop the sticky column heads are worth more than the wrapper. */
+@media (max-width: 40rem) {
+  .scroll-x { overflow-x: auto; }
+}
