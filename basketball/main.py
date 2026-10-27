@@ -13,13 +13,15 @@ without anyone noticing (PROJECT.md §29). Collect and measure first.
 import sys
 
 from model.factors.owner_logic import apply_prop_owner_logic
+from parlay import method
 from model.prop_model import prop_probability
 from output.research import _connect, grade_predictions, log_predictions, report
 from pipeline.calendar import game_slate_date, slate_date
-from pipeline.prop_odds import DEFAULT_BOOK, NBA_MARKETS, fetch_prop_odds, normalize_name
-from pipeline.stats_fetcher import (FETCH_FAILURES, build_player_index, days_rest, fetch_gamelog,
-                                    fetch_injuries, fetch_scoreboard, pick_season,
-                                    player_form, recent_current_minutes)
+from pipeline.prop_odds import DEFAULT_BOOK, NBA_MARKETS, fetch_prop_board, normalize_name
+from pipeline.stats_fetcher import (FETCH_FAILURES, MARKET_STAT, build_player_index, days_rest,
+                                    fetch_gamelog, fetch_injuries, fetch_scoreboard,
+                                    pick_season, player_form, recent_current_minutes,
+                                    recent_current_usage)
 from pipeline.team_defense import MARKET_TEAM_STAT, allowance_factors, sync_team_games
 
 
@@ -78,6 +80,7 @@ def collect(day: str | None = None) -> int:
     injuries = fetch_injuries()
     team_ids = {g["home_id"] for g in games} | {g["away_id"] for g in games}
     out_minutes: dict[str, dict[str, float]] = {}       # team_id -> {player_id: minutes}
+    out_usage: dict[str, dict[str, float]] = {}         # team_id -> {player_id: shots}
     if injuries is None:
         print("[main] injury report unavailable this run — injury columns left NULL")
     elif season_year:
@@ -87,14 +90,18 @@ def collect(day: str | None = None) -> int:
                     logs[pid] = pick_season(fetch_gamelog(pid, day, prior_year))
                 out_minutes.setdefault(inj["team_id"], {})[pid] = \
                     recent_current_minutes(logs[pid][1], season_year)
+                out_usage.setdefault(inj["team_id"], {})[pid] = \
+                    recent_current_usage(logs[pid][1], season_year)
         missing = sum(sum(m.values()) for m in out_minutes.values())
         print(f"[main] injuries: {sum(len(m) for m in out_minutes.values())} out on tonight's "
               f"teams, {missing:.0f} min/game of this season's rotation missing")
 
     candidates: list[dict] = []
+    method_legs: list[dict] = []
     unmatched: set[str] = set()
     for market in NBA_MARKETS:
-        board = fetch_prop_odds(market, book=DEFAULT_BOOK)
+        # One fetch gives the main lines AND the alternate ladder (the owner's undercuts).
+        board, ladders = fetch_prop_board(market, book=DEFAULT_BOOK)
         for name, entry in board.items():
             # The board is NOT date-filtered — it carries every slate the provider has up,
             # so on 2026-10-21 it also held 41 players from the 10-20 games. The roster
@@ -117,6 +124,12 @@ def collect(day: str | None = None) -> int:
             season_label, rows = logs[pid]
 
             form = player_form(rows, market, opponent_id=who["opponent_id"]) if rows else {}
+            stat, team_stat = MARKET_STAT.get(market), MARKET_TEAM_STAT.get(market)
+            # The owner's rule inputs at this row's main line — logged for every row.
+            l10 = method.hit_rate(rows, stat, entry["line"], 10)[0] if rows else None
+            l20 = method.hit_rate(rows, stat, entry["line"], 20)[0] if rows else None
+            sim = (method.similar_opponent_avg(rows, stat, who["opponent_id"], factors,
+                                               team_stat) if rows else (None, 0))
             prob = prop_probability(form, market, entry.get("line"))
             # Your rules, as a DELTA on top of the quant number — never a replacement.
             # Only applied when the quant model produced a probability: a rule nudging a
@@ -164,7 +177,26 @@ def collect(day: str | None = None) -> int:
                                   (injuries.get(pid) or {}).get("status") or "active"),
                 "teammate_minutes_out": (None if injuries is None else round(sum(
                     m for p, m in out_minutes.get(who["team_id"], {}).items() if p != pid), 1)),
+                "teammate_usage_out": (None if injuries is None else round(sum(
+                    u for p, u in out_usage.get(who["team_id"], {}).items() if p != pid), 1)),
+                "hit_l10": l10, "hit_l20": l20,
+                "sim_opp_avg": sim[0], "sim_opp_games": sim[1],
             })
+
+            # The owner's method: the main line, plus (points only) every rung 2-5 under it.
+            if market in method.METHOD_MARKETS and rows and entry.get("over") is not None:
+                rungs = [(entry["line"], entry["over"], 0.0)]
+                if market == "player_points":
+                    lo, hi = method.POINTS_UNDERCUT
+                    ladder = next((l for l in ladders.get(name, [])
+                                   if game_slate_date(l["start"]) == day), None)
+                    for line, odds in (ladder or {}).get("rungs", []):
+                        cut = round(entry["line"] - line, 1)
+                        if lo <= cut <= hi:
+                            rungs.append((line, odds, cut))
+                method_legs.extend(method.legs_for(
+                    candidates[-1], rows, stat, rungs, form,
+                    (form.get("vs_opp_avg"), form.get("vs_opp_games") or 0), sim))
 
     if FETCH_FAILURES["prior_gamelog"]:
         print(f"[main] {FETCH_FAILURES['prior_gamelog']} last-season log(s) unavailable — "
@@ -181,7 +213,25 @@ def collect(day: str | None = None) -> int:
 
     scored = sum(1 for c in candidates if c["model_prob"] is not None)
     print(f"[main] {len(candidates)} rows, {scored} with a model probability")
-    return log_predictions(candidates)
+    logged = log_predictions(candidates)
+    _run_method(day, method_legs)
+    return logged
+
+
+def _run_method(day: str, legs: list[dict]) -> None:
+    """Build, store and print the owner's parlays for this slate."""
+    from datetime import datetime, timezone
+
+    passing, reasons = method.qualify(legs)
+    why = ", ".join(f"{k} {v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
+    print(f"[method] {len(legs)} candidate legs, {len(passing)} pass the rules"
+          f"{' — failed: ' + why if why else ''}")
+    parlays = {tier: method.build(passing, tier) for tier in method.TIERS}
+    conn = _connect()
+    for line in method.save(conn, day, parlays, datetime.now(timezone.utc).isoformat()):
+        print(f"[method] {line}")
+    print(method.describe(conn, day))
+    conn.close()
 
 
 def _implied(odds: int | None) -> float | None:
@@ -199,5 +249,10 @@ if __name__ == "__main__":
         collect()
     elif cmd == "--report":
         report()
+    elif cmd == "--parlays":
+        # Tonight's method parlays (or a given slate's): python main.py --parlays 2026-10-27
+        conn = _connect()
+        print(method.describe(conn, sys.argv[2] if len(sys.argv) > 2 else slate_date()))
+        conn.close()
     else:
         collect()

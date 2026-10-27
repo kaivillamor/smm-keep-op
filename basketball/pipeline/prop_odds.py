@@ -175,20 +175,48 @@ def fetch_prop_odds(market: str, book: str | None = DEFAULT_BOOK,
     Over and Under arrive as SEPARATE rows for the same player+line, so they are paired
     here — a caller wanting to price both sides needs them together.
     """
+    rows = _board_rows(market)
+    if rows is None:
+        return {}
+    return _parse_main(rows, market, book, main_line_only)
+
+
+def _board_rows(market: str) -> list | None:
+    """Every row on the board for one market — main AND alternate lines, both books.
+    One paginated fetch; callers parse what they need from it."""
     if not PROP_ODDS_API_KEY or not _BASE:
         print(f"[prop_odds] PROP_ODDS_API_KEY / PROP_ODDS_BASE_URL not set — skipping {market}")
-        return {}
+        return None
     try:
-        rows = _paginate("odds", {"league": "nba", "market": market})
+        return _paginate("odds", {"league": "nba", "market": market})
     except Exception as e:
         print(f"[prop_odds] {market} fetch failed: {e}")
-        return {}
+        return None
 
+
+def _pregame(r: dict) -> bool:
+    """A row the method may use: a current PREGAME price.
+
+    The feed carries in-game lines on the same board — 276 of 2,273 points rows at
+    00:05 UTC on 2026-10-27 were `is_live` — and they look exactly like pregame rows apart
+    from that flag. One slipped into a replay as James Harden "points over 10.5 at -118":
+    a live line for a game already underway, which a pregame model reads as a near-certain
+    leg at even money. The collector's started-game check catches most of these
+    indirectly; this catches them directly, along with prices the feed itself marks stale
+    or inactive.
+    """
+    return (not r.get("is_live") and r.get("is_active") is not False
+            and not r.get("is_stale_pregame_price"))
+
+
+def _parse_main(rows: list, market: str, book: str | None, main_line_only: bool) -> dict:
     out: dict[str, dict] = {}
     for r in rows:
         if not r.get("is_player_prop") or r.get("market_type") != market:
             continue
         if main_line_only and not r.get("is_main_line"):
+            continue
+        if not _pregame(r):
             continue
         if book and r.get("sportsbook") != book:
             continue
@@ -213,3 +241,77 @@ def fetch_prop_odds(market: str, book: str | None = DEFAULT_BOOK,
     print(f"[prop_odds] {len(out)} players with {market} lines"
           f"{' [' + book + ']' if book else ''} ({len(rows)} rows scanned)")
     return out
+
+
+def _decimal(odds: int) -> float:
+    return 1.0 + (odds / 100.0 if odds > 0 else 100.0 / abs(odds))
+
+
+def _parse_ladders(rows: list, market: str, book: str | None) -> tuple[dict, int]:
+    """Alternate OVER lines below each player's main line, per game.
+
+    Returns ({name: [ladder, ...]}, rungs_dropped). A ladder is
+    {player_name, event_id, start, main_line, main_over, rungs: [(line, odds), ...]} with
+    rungs nearest-first. A list per name rather than one ladder, because the board is not
+    date-filtered and a player can be priced for two games at once.
+
+    SANITIZED. Going down from the main line, each rung must be priced at least as short
+    as the one above it — a lower line over can never be less likely. On 2026-10-26, 37 of
+    1,367 FanDuel rungs broke that, e.g. Pascal Siakam "over 4.5 at +600" beside "over
+    13.5 at -2500" — almost certainly an UNDER price mislabelled as an over. Scored on its
+    own record, a near-certain leg at +600 looks like the best value on the board, so it is
+    exactly what a leg picker would grab. Violators are dropped, never repaired, and
+    counted so a feed that degrades shows up in the log (§28: verify the feed).
+    """
+    groups: dict[tuple, list] = {}
+    for r in rows:
+        if not r.get("is_player_prop") or r.get("market_type") != market:
+            continue
+        if book and r.get("sportsbook") != book:
+            continue
+        if r.get("selection_type") != "over" or not _pregame(r):
+            continue
+        if not r.get("player_name") or r.get("line") is None or r.get("odds_american") is None:
+            continue
+        groups.setdefault((normalize_name(r["player_name"]), r.get("event_id")), []).append(r)
+
+    out: dict[str, list] = {}
+    dropped = 0
+    for (key, event_id), rs in groups.items():
+        main = next((r for r in rs if r.get("is_main_line")), None)
+        if main is None:
+            continue                  # nothing to undercut FROM
+        m_line, m_odds = main["line"], main["odds_american"]
+        below = sorted({(r["line"], r["odds_american"]) for r in rs if r["line"] < m_line},
+                       key=lambda x: (-x[0], _decimal(x[1])))
+        ceiling, kept = _decimal(m_odds), []
+        for line, odds in below:
+            if _decimal(odds) <= ceiling + 1e-9:
+                kept.append((line, odds))
+                ceiling = _decimal(odds)
+            else:
+                dropped += 1
+        out.setdefault(key, []).append({
+            "player_name": main["player_name"], "event_id": event_id,
+            "start": main.get("event_start_time"), "main_line": m_line,
+            "main_over": m_odds, "rungs": kept,
+        })
+    return out, dropped
+
+
+def fetch_prop_board(market: str, book: str | None = DEFAULT_BOOK) -> tuple[dict, dict]:
+    """Main lines AND the alternate ladder for one market, from ONE paginated fetch.
+
+    The alternate lines were always in the response; until 2026-10-26 they were filtered
+    out and thrown away. Parsing both from the same rows costs no extra API calls against
+    a ~12 request/minute limit.
+    """
+    rows = _board_rows(market)
+    if rows is None:
+        return {}, {}
+    main = _parse_main(rows, market, book, True)
+    ladders, dropped = _parse_ladders(rows, market, book)
+    rungs = sum(len(l["rungs"]) for ls in ladders.values() for l in ls)
+    print(f"[prop_odds] {market} ladders: {rungs} alternate rungs across {len(ladders)} "
+          f"players; {dropped} dropped as priced backwards")
+    return main, ladders

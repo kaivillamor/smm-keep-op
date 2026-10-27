@@ -533,6 +533,17 @@ def recent_current_minutes(games: list[dict], season_year: int, n: int = 5) -> f
     return round(sum(cur) / len(cur), 1) if cur else 0.0
 
 
+def recent_current_usage(games: list[dict], season_year: int, n: int = 5) -> float:
+    """Shots a player was taking per game THIS season — FGA + 0.44*FTA + TOV over their
+    last n games; 0.0 if none. Date-filtered for the same reason as the minutes version:
+    an absence that predates this season is already in everyone's recent numbers."""
+    start = f"{season_year - 1}-09-01"
+    cur = [g["fga"] + 0.44 * g["fta"] + g["turnovers"] for g in games
+           if (g.get("date") or "") >= start and g.get("fga") is not None
+           and g.get("fta") is not None and g.get("turnovers") is not None][:n]
+    return round(sum(cur) / len(cur), 1) if cur else 0.0
+
+
 # ── grading ──────────────────────────────────────────────────────────────────
 
 def fetch_boxscore(game_id: str) -> dict:

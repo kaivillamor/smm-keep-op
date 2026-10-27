@@ -110,6 +110,16 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             teammate_minutes_out REAL,           -- this-season minutes of teammates listed
                                                  --  out: the role a player may absorb.
                                                  --  NULL = report unavailable
+            teammate_usage_out REAL,             -- this-season shots (FGA + 0.44*FTA + TOV)
+                                                 --  of teammates listed out — the owner's
+                                                 --  "who takes shots from them". NULL as above
+            -- The owner's parlay rules, read at THIS row's main line, logged for every
+            -- row rather than only the method's picks, so each rule can be tested on the
+            -- whole corpus: do players who cleared 7 of 10 actually hit more often?
+            hit_l10       REAL,                   -- share of last 10 games over this line
+            hit_l20       REAL,                   -- share of last 20
+            sim_opp_avg   REAL,                   -- avg vs the 5 defenses most like tonight's
+            sim_opp_games INTEGER,                --  opponent in this market (opponent excluded)
             outcome       TEXT DEFAULT NULL,      -- 'win' | 'loss' | 'void'
             actual_value  REAL DEFAULT NULL,      -- what the player actually recorded
             created_at    TEXT NOT NULL,          -- first time this row was seen
@@ -146,6 +156,53 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             date       TEXT PRIMARY KEY,
             synced_at  TEXT
         );
+
+        -- The owner's parlay method, paper-tracked: one parlay per tier per slate, frozen
+        -- once its first leg tips, graded against box scores. See parlay/method.py.
+        CREATE TABLE IF NOT EXISTS method_parlays (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            date           TEXT NOT NULL,
+            tier           TEXT NOT NULL,        -- '$5' | '$10'
+            stake          REAL NOT NULL,
+            n_legs         INTEGER,
+            decimal_odds   REAL,
+            american_odds  INTEGER,
+            profit_if_win  REAL,
+            record_score   REAL,                 -- product of smoothed hit rates: a RANKING
+                                                 --  score, not a probability
+            first_tip      TEXT,
+            generated_at   TEXT NOT NULL,
+            outcome        TEXT,                 -- 'win' | 'loss' | 'void'
+            profit         REAL,
+            UNIQUE(date, tier)
+        );
+        CREATE TABLE IF NOT EXISTS method_legs (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            parlay_id          INTEGER NOT NULL REFERENCES method_parlays(id),
+            game_id            TEXT,
+            player_id          TEXT,
+            player_name        TEXT,
+            team               TEXT,
+            opponent           TEXT,
+            tipoff             TEXT,
+            market             TEXT,
+            line               REAL,             -- the line actually picked
+            main_line          REAL,             -- the main line it undercuts
+            undercut           REAL,             -- 0 = main line
+            odds               INTEGER,
+            hit_l10            REAL,
+            hit_l20            REAL,
+            minutes_avg        REAL,
+            season_avg         REAL,
+            recent_avg         REAL,
+            h2h_avg            REAL,
+            h2h_games          INTEGER,
+            sim_avg            REAL,
+            sim_games          INTEGER,
+            teammate_usage_out REAL,
+            outcome            TEXT,             -- 'win' | 'loss' | 'void'
+            actual_value       REAL
+        );
     """)
     # Migration for databases created before 2026-10-26. Rows logged earlier keep these
     # NULL rather than being backfilled from line/book_odds: those hold the LAST snapshot,
@@ -158,7 +215,10 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
     for col, decl in (("open_line", "REAL"), ("open_odds", "INTEGER"),
                       ("open_priced_at", "TEXT"), ("updated_at", "TEXT"),
-                      ("injury_status", "TEXT"), ("teammate_minutes_out", "REAL")):
+                      ("injury_status", "TEXT"), ("teammate_minutes_out", "REAL"),
+                      ("teammate_usage_out", "REAL"), ("hit_l10", "REAL"),
+                      ("hit_l20", "REAL"), ("sim_opp_avg", "REAL"),
+                      ("sim_opp_games", "INTEGER")):
         if col not in cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {decl}")
     conn.commit()
@@ -178,7 +238,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
 _RUN_FIELDS = ("model_prob", "base_prob", "owner_adj", "calibrated_prob",
                "stats_season", "stat_sd", "season_avg", "recent_avg", "recent_games",
                "minutes_avg", "usage_proxy", "days_rest", "vs_opp_avg", "vs_opp_games",
-               "opp_allow_factor")
+               "opp_allow_factor", "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games")
 _RUN_UPDATE = ", ".join(
     f"{f}=CASE WHEN excluded.model_prob IS NOT NULL THEN excluded.{f} ELSE predictions.{f} END"
     for f in _RUN_FIELDS)
@@ -189,7 +249,8 @@ _FIELDS = ("game_id", "player_id", "player_name", "team", "opponent", "market", 
            "stats_season", "stat_sd",
            "season_avg", "recent_avg", "recent_games", "minutes_avg", "vs_opp_avg",
            "vs_opp_games", "usage_proxy", "days_rest", "is_home", "opp_allow_factor",
-           "injury_status", "teammate_minutes_out")
+           "injury_status", "teammate_minutes_out", "teammate_usage_out",
+           "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games")
 
 
 def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
@@ -235,6 +296,8 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
            "  injury_status=COALESCE(excluded.injury_status, predictions.injury_status), "
            "  teammate_minutes_out=COALESCE(excluded.teammate_minutes_out, "
            "                                predictions.teammate_minutes_out), "
+           "  teammate_usage_out=COALESCE(excluded.teammate_usage_out, "
+           "                              predictions.teammate_usage_out), "
            "  updated_at=excluded.updated_at")
     n = 0
     slates: set[str] = set()
@@ -261,24 +324,35 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
     Three rules, each learned the hard way in baseball:
       * ONE box score per GAME, not per player — a 200-row slate is ~11 calls, not 200.
       * Only FINAL games. Box scores populate live, and baseball graded a player a loss
-        before his game had started by trusting a non-final one.
+        before their game had started by trusting a non-final one.
       * A player who did not appear is 'void', never 'loss'. A DNP is not a failed
         prediction, and scoring it as one would bias every calibration bucket downward.
     """
+    from parlay.method import grade as grade_method
     from pipeline.stats_fetcher import MARKET_STAT, fetch_boxscore, fetch_scoreboard
 
     conn = _connect(db_path)
     pending = [dict(r) for r in conn.execute(
         "SELECT id, date, game_id, player_id, market, line FROM predictions "
         "WHERE outcome IS NULL")]
-    if not pending:
+    method_dates = {r[0] for r in conn.execute(
+        "SELECT DISTINCT date FROM method_parlays WHERE outcome IS NULL")}
+    if not pending and not method_dates:
         conn.close()
         print("[research] no pending predictions.")
         return 0
 
+    # One box score per game, shared by the predictions and the method's legs.
+    boxes: dict[str, dict] = {}
+
+    def box_for(game_id: str) -> dict:
+        if game_id not in boxes:
+            boxes[game_id] = fetch_boxscore(game_id)
+        return boxes[game_id]
+
     finals: dict[str, bool] = {}
     called_off: set[str] = set()
-    for day in sorted({p["date"] for p in pending}):
+    for day in sorted({p["date"] for p in pending} | method_dates):
         for g in fetch_scoreboard(day):
             finals[str(g["game_id"])] = g["final"]
             # Postponed or cancelled: ESPN reports state 'post' but never completes it. A
@@ -301,7 +375,7 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
         if not finals.get(game_id):
             skipped += len(rows)
             continue
-        box = fetch_boxscore(game_id)
+        box = box_for(game_id)
         if not box:
             skipped += len(rows)
             continue
@@ -324,8 +398,10 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
             graded += 1
 
     conn.commit()
+    method_graded = grade_method(conn, finals, called_off, box_for)
     conn.close()
-    print(f"[research] graded {graded}, skipped {skipped} (game not final yet)")
+    print(f"[research] graded {graded}, skipped {skipped} (game not final yet); "
+          f"method legs graded {method_graded}")
     return graded
 
 
