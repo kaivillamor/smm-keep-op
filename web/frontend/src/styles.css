@@ -291,9 +291,13 @@ table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
 .hit-meta  { color: var(--muted); }
 .hit-date  { color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
 
+/* The phone tables' two-line row: name over team on the left, the count on the
+   name's line and the date on the team's, both right-aligned. */
 @media (max-width: 34rem) {
-  .hits li { grid-template-columns: 1fr auto; row-gap: .1rem; }
-  .hit-date { grid-column: 2; }
+  .hits li { grid-template-columns: 1fr auto; row-gap: 0; }
+  .hits li > span:first-child { grid-row: span 2; }
+  .hits .hit-name { display: block; }
+  .hit-count, .hit-date { grid-column: 2; text-align: right; }
 }
 
 /* ── today's slate ───────────────────────────────────────────────────────── */
