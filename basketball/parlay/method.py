@@ -8,8 +8,8 @@ noise and the record would stop being evidence. Change a setting because the met
 changed, never because last week's parlays lost.
 
 What it does each slate:
-  1. score every FanDuel points and rebounds leg the owner would consider — main lines,
-     plus points rungs 2-5 under the main line;
+  1. score every FanDuel points, rebounds and assists leg the owner would consider — main
+     lines, plus points rungs 2-5 under the main line;
   2. keep the legs that pass the owner's rules (trust, consistency, average, matchup,
      price);
   3. build the best $5 and $10 parlays inside the owner's payout targets;
@@ -23,8 +23,9 @@ from math import prod
 # ── the owner's settings, in the owner's words ──────────────────────────────────
 
 # "For rebounds we check the head to head and their consistency." Points and rebounds are
-# the markets the method was described for; assists and threes are not part of it.
-METHOD_MARKETS = ("player_points", "player_rebounds")
+# the markets the method was first described for. Assists joined 2026-10-27, for starters
+# and sixth men alike, at the owner's word. Threes are not part of it.
+METHOD_MARKETS = ("player_points", "player_rebounds", "player_assists")
 
 # "take 5 points under ... It's even better if you can find alt lines where I undercut by
 # 4 points and 2 points if the odds are good." Every FanDuel rung 2-5 points under the main
@@ -35,6 +36,12 @@ POINTS_UNDERCUT = (2.0, 5.0)
 # stretch in the 4th quarter." Recent minutes is the measurable stand-in: 28+ a game is a
 # starter or a closer. ESPN's free data has no quarter-by-quarter minutes.
 TRUST_MINUTES = 28.0
+
+# "You're better off judging sixth man's by their points or assists in terms of
+# consistency." A bench player on 20+ minutes is trusted in those two markets only, and
+# still has to pass every rule below. Under 20 is not a sixth man (the owner, 2026-10-27).
+SIXTH_MAN_MINUTES = 20.0
+SIXTH_MAN_MARKETS = ("player_points", "player_assists")
 
 # "The main thing I look for is consistency." Cleared this exact line in 7+ of the last 10
 # games and 12+ of the last 20.
@@ -108,11 +115,33 @@ def similar_opponent_avg(rows: list, stat: str, opponent_id: str, factors: dict,
     return (round(sum(vals) / len(vals), 2) if vals else None), len(vals)
 
 
-def legs_for(candidate: dict, rows: list, stat: str, rungs: list, form: dict,
-             h2h: tuple, similar: tuple) -> list[dict]:
+def player_inputs(rows: list, stat: str, opponent_id: str | None) -> dict:
+    """Minutes, averages and head-to-head, read straight from the game log.
+
+    The method's own reads, never the model's player_form(), so tuning the model cannot
+    change which legs this method takes. It did once: from 10-26 player_form() shrank this
+    season toward last season, and the average rule read that blend (about three quarters
+    last season, five games in), though nothing in the owner's description asks for one.
+    Season average here is this season's games alone, or last season's before the first.
+    """
+    avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
+    this = [g[stat] for g in rows if not g.get("prior") and g.get(stat) is not None]
+    last = [g[stat] for g in rows if g.get("prior") and g.get(stat) is not None]
+    recent = [g[stat] for g in rows[:10] if g.get(stat) is not None]
+    mins = ([g["minutes"] for g in rows[:10] if g.get("minutes") is not None]
+            or [g["minutes"] for g in rows if g.get("minutes") is not None])
+    h2h = [g[stat] for g in rows
+           if opponent_id and g.get("opponent_id") == opponent_id and g.get(stat) is not None]
+    return {"minutes_avg": avg(mins), "season_avg": avg(this or last),
+            "recent_avg": avg(recent), "h2h_avg": avg(h2h), "h2h_games": len(h2h)}
+
+
+def legs_for(candidate: dict, rows: list, stat: str, rungs: list, own: dict,
+             similar: tuple) -> list[dict]:
     """One leg per rung for a player-market, with every input the rules read.
 
-    `rungs` is [(line, odds, undercut), ...] — the main line first (undercut 0).
+    `rungs` is [(line, odds, undercut), ...] — the main line first (undercut 0). `own` is
+    player_inputs() for this player and market.
     """
     legs = []
     for line, odds, undercut in rungs:
@@ -132,9 +161,9 @@ def legs_for(candidate: dict, rows: list, stat: str, rungs: list, form: dict,
             "hit_l20": r20, "hits_l20": h20, "games_l20": n20,
             "smoothed": smooth,
             "worth": (smooth / implied(odds)) if smooth else None,
-            "minutes_avg": form.get("minutes_avg"),
-            "season_avg": form.get("season_avg"), "recent_avg": form.get("recent_avg"),
-            "h2h_avg": h2h[0], "h2h_games": h2h[1],
+            "minutes_avg": own["minutes_avg"],
+            "season_avg": own["season_avg"], "recent_avg": own["recent_avg"],
+            "h2h_avg": own["h2h_avg"], "h2h_games": own["h2h_games"],
             "sim_avg": similar[0], "sim_games": similar[1],
             "teammate_usage_out": candidate.get("teammate_usage_out"),
             "sweetener": odds <= MAX_FAVORITE,
@@ -143,6 +172,22 @@ def legs_for(candidate: dict, rows: list, stat: str, rungs: list, form: dict,
 
 
 # ── the rules ────────────────────────────────────────────────────────────────────
+
+def untrusted(minutes: float | None, market: str) -> str | None:
+    """None if the owner trusts this player in this market, else why not.
+
+    Starters and closers in every method market, sixth men in points and assists. The
+    research report reads this too, so its "trusted" cut cannot drift from the method's.
+    """
+    minutes = minutes or 0
+    if market not in METHOD_MARKETS:
+        return "not_a_method_market"
+    if minutes >= TRUST_MINUTES:
+        return None
+    if minutes >= SIXTH_MAN_MINUTES:
+        return None if market in SIXTH_MAN_MARKETS else "sixth_man_market"
+    return "not_trusted_minutes"
+
 
 def fails(leg: dict) -> str | None:
     """None if the leg passes the owner's rules, else the first rule it fails.
@@ -153,8 +198,9 @@ def fails(leg: dict) -> str | None:
     line = leg["line"]
     if leg.get("injury_status") != "active":
         return "not_confirmed_active"     # out, day-to-day, or no report to check against
-    if (leg.get("minutes_avg") or 0) < TRUST_MINUTES:
-        return "not_trusted_minutes"
+    why = untrusted(leg.get("minutes_avg"), leg["market"])
+    if why:
+        return why
     if leg["games_l10"] < 10 or leg["games_l20"] < 20:
         return "short_history"
     if leg["hit_l10"] < CONSISTENCY_L10 or leg["hit_l20"] < CONSISTENCY_L20:
@@ -326,7 +372,8 @@ def grade(conn, finals: dict, called_off: set, box_for) -> int:
 
 # ── display ──────────────────────────────────────────────────────────────────────
 
-_MARKET_WORD = {"player_points": "points", "player_rebounds": "rebounds"}
+_MARKET_WORD = {"player_points": "points", "player_rebounds": "rebounds",
+                "player_assists": "assists"}
 
 
 def describe(conn, day: str) -> str:

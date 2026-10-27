@@ -171,21 +171,24 @@ def _db():
     return conn
 
 
-def stats(db=_db) -> dict:
+def stats(db=_db, where: str = "") -> dict:
     """Calibration + ranking signal. Mirrors output/research.py report() — and its NBA
     twin, which computes the same figures from the same model_prob/outcome columns, so
-    one implementation serves both sports. `db` is the connection factory."""
+    one implementation serves both sports. `db` is the connection factory. `where` is an
+    SQL condition written in this file, never request input, and narrows every figure."""
+    only = f" WHERE {where}" if where else ""
     try:
         c = db()
         rows = [dict(r) for r in c.execute(
-            "SELECT model_prob p, outcome, date FROM predictions "
+            "SELECT model_prob p, outcome, date, book_implied bi FROM predictions "
             # NBA logs rows with no probability (no usable form), and a NULL would crash
             # the sums below. MLB has no such graded rows, so this changes nothing there.
-            "WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL")]
-        total = c.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+            "WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL"
+            + (f" AND ({where})" if where else ""))]
+        total = c.execute(f"SELECT COUNT(*) FROM predictions{only}").fetchone()[0]
         by_day = [dict(r) for r in c.execute(
             "SELECT date, COUNT(*) n, SUM(outcome IN ('win','loss')) graded "
-            "FROM predictions GROUP BY date ORDER BY date DESC LIMIT 10")]
+            f"FROM predictions{only} GROUP BY date ORDER BY date DESC LIMIT 10")]
         c.close()
     except Exception as e:
         return {"error": str(e), "graded": 0, "logged": 0, "by_day": []}
@@ -199,6 +202,9 @@ def stats(db=_db) -> dict:
     out["predicted"] = sum(r["p"] for r in rows) / n
     out["actual"] = hit(rows)
     out["overconfidence"] = out["predicted"] - out["actual"]
+    # What the book's prices implied on the same rows: the hit rate a bet needed.
+    priced = [r["bi"] for r in rows if r["bi"] is not None]
+    out["priced"] = sum(priced) / len(priced) if priced else None
 
     rows.sort(key=lambda r: r["p"])
     half = n // 2
@@ -387,7 +393,16 @@ def api_report(_: tuple = Depends(require_admin)):
 # Read with plain sqlite3, never by importing basketball/. This process has BASEBALL_DIR
 # on sys.path, so `output.research` would resolve to BASEBALL's module and `parlay.method`
 # would not exist — the name collision _run_basketball documents. The cost is restating
-# the two small things needed from basketball/; each names its twin.
+# the few small things needed from basketball/; each names its twin.
+
+# Twins of untrusted() and the consistency settings in basketball/parlay/method.py: the
+# players the owner's method would consider, which the admin page leads with. Starters and
+# closers in every method market, sixth men in points and assists.
+NBA_TRUSTED_SQL = ("(minutes_avg >= 28 AND market IN ('player_points', 'player_rebounds', "
+                   "'player_assists')) OR (minutes_avg >= 20 AND market IN ('player_points', "
+                   "'player_assists'))")
+NBA_TRUSTED_RULE = "28+ minutes in points, rebounds or assists, or 20+ in points or assists"
+NBA_CONSISTENT_SQL = "hit_l10 >= 0.7 AND hit_l20 >= 0.6"
 
 def _nba_db_path() -> str:
     """Absolute path to the NBA research DB. Twin of RESEARCH_DB in
@@ -525,16 +540,30 @@ def api_nba_parlays(_: tuple = Depends(auth), limit: int = 40):
 
 @app.get("/api/nba/report")
 def api_nba_report(_: tuple = Depends(require_admin)):
-    """NBA calibration (the shared stats()) plus two NBA-only tables.
+    """NBA calibration (the shared stats()) plus three NBA-only tables.
 
     `health` is collection AND grading per slate, and the page renders it even when
     nothing is graded. MLB's admin page hides its by-day table in exactly that case, which
     is the one case where it matters: NBA collected for six days while every grading run
     settled zero rows, and nothing on any screen said so.
+
+    `trusted` and `pools` lead the page with the players the method would consider, since
+    much of the board is players it would never take. The trust rule alone carries the
+    headline: the full filter adds consistency, logged from the 10-26 slate, and only 14
+    of that night's 450 props passed it, so it needs months to read.
     """
     out = stats(_nba_db)
     if out.get("error"):
         return out
+    out["trusted"] = {**stats(_nba_db, NBA_TRUSTED_SQL), "label": "Trusted",
+                      "rule": NBA_TRUSTED_RULE}
+    keep = ("label", "graded", "predicted", "actual", "priced", "gap", "gap_ci_low",
+            "gap_ci_high")
+    out["pools"] = [{k: s.get(k) for k in keep} for s in (
+        {**stats(_nba_db, f"({NBA_TRUSTED_SQL}) AND {NBA_CONSISTENT_SQL}"),
+         "label": "Trusted, 7/10, 12/20"},
+        out["trusted"],
+        {**out, "label": "Everyone"})]
     try:
         c = _nba_db()
         out["by_market"] = [dict(r) for r in c.execute(

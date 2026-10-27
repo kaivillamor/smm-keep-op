@@ -5,9 +5,10 @@ DELIBERATELY SEPARATE from any betting record, exactly as in baseball: nothing i
 a bet. These are model predictions for every player scored on a slate, graded against box
 scores, so we can measure whether the probabilities mean anything.
 
-SHARED ORIGIN. `report()` and `compare_owner_logic()` are verbatim copies — they only read
-model_prob / base_prob / owner_adj / outcome, which every sport has. Fix a logic bug in one
-and check the twin (PROJECT.md §25).
+SHARED ORIGIN. `compare_owner_logic()` is a verbatim copy, and so is the calibration and
+ranking math in `report()` — they only read model_prob / base_prob / owner_adj / outcome,
+which every sport has. Fix a logic bug in one and check the twin (PROJECT.md §25). The
+player-pool cut that `report()` leads with is NBA only.
 
 SCHEMA DIFFERS from baseball, because the prediction is a different shape:
 
@@ -21,6 +22,7 @@ prediction without its line is meaningless, which is not true in baseball.
     python output/research.py owner      # your logic vs the quant model
     python output/research.py grade      # grade pending predictions
 """
+import math
 import os
 import sqlite3
 import sys
@@ -32,6 +34,8 @@ from datetime import datetime, timezone
 if __package__ is None and __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from parlay.method import (CONSISTENCY_L10, CONSISTENCY_L20, METHOD_MARKETS, SIXTH_MAN_MARKETS,
+                           SIXTH_MAN_MINUTES, TRUST_MINUTES, untrusted)
 from pipeline.calendar import game_slate_date, season_phase, slate_date
 
 RESEARCH_DB = os.getenv("NBA_RESEARCH_DB_PATH") or "data/history/research.db"
@@ -120,6 +124,10 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             hit_l20       REAL,                   -- share of last 20
             sim_opp_avg   REAL,                   -- avg vs the 5 defenses most like tonight's
             sim_opp_games INTEGER,                --  opponent in this market (opponent excluded)
+            season_avg_raw REAL,                  -- this season alone (last season before
+                                                  --  its first game): the average the
+                                                  --  method's rule reads. season_avg above
+                                                  --  is the model's blend with last season
             outcome       TEXT DEFAULT NULL,      -- 'win' | 'loss' | 'void'
             actual_value  REAL DEFAULT NULL,      -- what the player actually recorded
             created_at    TEXT NOT NULL,          -- first time this row was seen
@@ -218,7 +226,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                       ("injury_status", "TEXT"), ("teammate_minutes_out", "REAL"),
                       ("teammate_usage_out", "REAL"), ("hit_l10", "REAL"),
                       ("hit_l20", "REAL"), ("sim_opp_avg", "REAL"),
-                      ("sim_opp_games", "INTEGER")):
+                      ("sim_opp_games", "INTEGER"), ("season_avg_raw", "REAL")):
         if col not in cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {decl}")
     conn.commit()
@@ -238,7 +246,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
 _RUN_FIELDS = ("model_prob", "base_prob", "owner_adj", "calibrated_prob",
                "stats_season", "stat_sd", "season_avg", "recent_avg", "recent_games",
                "minutes_avg", "usage_proxy", "days_rest", "vs_opp_avg", "vs_opp_games",
-               "opp_allow_factor", "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games")
+               "opp_allow_factor", "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games",
+               "season_avg_raw")
 _RUN_UPDATE = ", ".join(
     f"{f}=CASE WHEN excluded.model_prob IS NOT NULL THEN excluded.{f} ELSE predictions.{f} END"
     for f in _RUN_FIELDS)
@@ -250,7 +259,7 @@ _FIELDS = ("game_id", "player_id", "player_name", "team", "opponent", "market", 
            "season_avg", "recent_avg", "recent_games", "minutes_avg", "vs_opp_avg",
            "vs_opp_games", "usage_proxy", "days_rest", "is_home", "opp_allow_factor",
            "injury_status", "teammate_minutes_out", "teammate_usage_out",
-           "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games")
+           "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games", "season_avg_raw")
 
 
 def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
@@ -405,17 +414,37 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
     return graded
 
 
+def _ranking_gap(rows: list[dict]) -> tuple[float, float, float, float, float]:
+    """(lower-half hit rate, upper-half hit rate, gap, CI low, CI high), the last three in
+    points. Upper and lower halves by model probability; needs at least two rows.
+
+    The INTERVAL decides, not the point estimate. A threshold on the gap alone reads
+    noise as a finding: +6.9 pts on 696 rows carries a 95% CI of [-0.2, +14.0], which
+    is indistinguishable from zero, yet a bare `gap > 3` test calls it real.
+    """
+    rows = sorted(rows, key=lambda r: r["p"])
+    n, half = len(rows), len(rows) // 2
+    lo = sum(r["y"] for r in rows[:half]) / half
+    hi = sum(r["y"] for r in rows[half:]) / (n - half)
+    gap = (hi - lo) * 100
+    se = math.sqrt(lo * (1 - lo) / half + hi * (1 - hi) / (n - half)) * 100
+    return lo, hi, gap, gap - 1.96 * se, gap + 1.96 * se
+
+
 def report(db_path: str = RESEARCH_DB) -> None:
     """Calibration + ranking-signal report. The ranking test is the important one:
-    a model worth betting has its higher-probability half hit MORE often."""
+    a model worth betting has its higher-probability half hit MORE often.
+
+    Leads with the players the owner's method would consider, because much of the board
+    is players it would never take. Whole-board figures follow as context."""
     conn = _connect(db_path)
     rows = [dict(r) for r in conn.execute(
-        "SELECT model_prob p, outcome FROM predictions "
-        "WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL")]
+        "SELECT model_prob p, outcome, market, minutes_avg, hit_l10, hit_l20, book_implied "
+        "FROM predictions WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL")]
     total = conn.execute("SELECT COUNT(*) c FROM predictions").fetchone()["c"]
     conn.close()
 
-    w = 56
+    w = 72
     print(f"\n{'=' * w}\n  MODEL CALIBRATION (research only — not bets)\n{'=' * w}")
     print(f"  predictions logged : {total}")
     print(f"  graded             : {len(rows)}")
@@ -427,6 +456,31 @@ def report(db_path: str = RESEARCH_DB) -> None:
     n = len(rows)
     for r in rows:
         r["y"] = 1 if r["outcome"] == "win" else 0
+
+    # The method's player filters, then wider. Trusted is the method's own rule, read from
+    # untrusted(). Consistency is logged from the 10-26 slate, so rows before it can only
+    # enter the trusted cut, never the full pool.
+    trusted = [r for r in rows if untrusted(r["minutes_avg"], r["market"]) is None]
+    pool = [r for r in trusted if r["hit_l10"] is not None and r["hit_l20"] is not None
+            and r["hit_l10"] >= CONSISTENCY_L10 and r["hit_l20"] >= CONSISTENCY_L20]
+    words = lambda markets: "/".join(m.split("_", 1)[1] for m in markets)
+    print(f"{'─' * w}\n  BY PLAYER POOL (the method's filters first)")
+    print(f"    trusted = {TRUST_MINUTES:g}+ min in {words(METHOD_MARKETS)}, "
+          f"{SIXTH_MAN_MINUTES:g}+ in {words(SIXTH_MAN_MARKETS)}")
+    print(f"    {'':22}{'n':>5}  {'model':>6} {'hit':>6} {'priced':>6}{'gap':>7}  95% CI")
+    for label, g in ((f"trusted, {CONSISTENCY_L10 * 10:g}/10, {CONSISTENCY_L20 * 20:g}/20",
+                      pool), ("trusted", trusted), ("everyone", rows)):
+        if len(g) < 20:
+            print(f"    {label:22}{len(g):>5}  too few graded to read")
+            continue
+        priced = [r["book_implied"] for r in g if r["book_implied"] is not None]
+        _, _, gap, ci_lo, ci_hi = _ranking_gap(g)
+        print(f"    {label:22}{len(g):>5}  {sum(r['p'] for r in g) / len(g) * 100:5.1f}%"
+              f" {sum(r['y'] for r in g) / len(g) * 100:5.1f}%"
+              f" {sum(priced) / len(priced) * 100 if priced else float('nan'):5.1f}%"
+              f"  {gap:+5.1f}  [{ci_lo:+.1f}, {ci_hi:+.1f}]")
+
+    print(f"{'─' * w}\n  EVERYONE")
     actual = sum(r["y"] for r in rows) / n
     mean_p = sum(r["p"] for r in rows) / n
     print(f"  model says         : {mean_p * 100:.1f}%")
@@ -442,23 +496,10 @@ def report(db_path: str = RESEARCH_DB) -> None:
         pm  = sum(r["p"] for r in b) / len(b)
         print(f"    {lo*100:3.0f}-{hi*100:3.0f}%: n={len(b):4}  predicted={pm*100:5.1f}%  actual={hit*100:5.1f}%")
 
-    rows.sort(key=lambda r: r["p"])
-    half = n // 2
-    lo_rate = sum(r["y"] for r in rows[:half]) / half
-    hi_rate = sum(r["y"] for r in rows[half:]) / (n - half)
+    lo_rate, hi_rate, gap, ci_lo, ci_hi = _ranking_gap(rows)
     print(f"{'─' * w}\n  RANKING SIGNAL (the test that matters)")
     print(f"    lower half by model prob → hit {lo_rate * 100:.1f}%")
     print(f"    upper half by model prob → hit {hi_rate * 100:.1f}%")
-    gap = (hi_rate - lo_rate) * 100
-    # The INTERVAL decides, not the point estimate. A threshold on the gap alone reads
-    # noise as a finding: +6.9 pts on 696 rows carries a 95% CI of [-0.2, +14.0], which
-    # is indistinguishable from zero, yet a bare `gap > 3` test calls it real.
-    import math
-    # lo_rate/hi_rate, NOT lo/hi — those are bucket BOUNDS left over from the loop
-    # above, so using them here would silently compute the SE of (0.80, 1.01).
-    _se = math.sqrt(lo_rate * (1 - lo_rate) / max(half, 1)
-                    + hi_rate * (1 - hi_rate) / max(n - half, 1)) * 100
-    ci_lo, ci_hi = gap - 1.96 * _se, gap + 1.96 * _se
     verdict = ("inverted — ranks WORSE than chance" if ci_hi < 0 else
                "inconclusive — interval still contains zero" if ci_lo <= 0 else
                "usable signal" if gap >= 8 else "weak but real signal")

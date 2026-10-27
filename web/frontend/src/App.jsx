@@ -94,6 +94,47 @@ function Buckets({ buckets, label = 'Predicted range' }) {
   )
 }
 
+/**
+ * The model's figures on the players the owner's method would consider, then wider.
+ * Actually hit against Priced at is what a bet on those rows needed; the gap is the
+ * model's own ranking within them.
+ */
+function Pools({ rows }) {
+  if (!rows?.length) return null
+  return (
+    <div className="scroll-x">
+      <table className="narrow">
+        <thead>
+          <tr>
+            <th>Players</th>
+            <th className="n">N</th>
+            <th className="n">Model says</th>
+            <th className="n">Actually hit</th>
+            <th className="n">Priced at</th>
+            <th className="n">Ranking gap</th>
+            <th className="n">95% CI</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td className="nowrap">{r.label}</td>
+              <td className="n">{num(r.graded)}</td>
+              <td className="n">{pct(r.predicted)}</td>
+              <td className="n">{pct(r.actual)}</td>
+              <td className="n dim">{pct(r.priced)}</td>
+              <td className="n">{pts(r.gap)}</td>
+              <td className="n dim nowrap">
+                {r.gap_ci_low == null ? '—' : `[${pts(r.gap_ci_low)}, ${pts(r.gap_ci_high)}]`}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function Days({ days }) {
   if (!days?.length) return null
   return (
@@ -163,13 +204,13 @@ function Health({ rows }) {
  * is identical for every sport, because each sport's report() computes it the same way
  * from model_prob and outcome.
  */
-function Calibration({ data }) {
+function Calibration({ data, label = 'Ranking gap' }) {
   const v = verdictFor(data.gap, data.gap_ci_low, data.gap_ci_high)
   return (
     <>
       {/* The gap is the number this page exists to report, so it leads. */}
       <Hero
-        label="Ranking gap"
+        label={label}
         value={pts(data.gap)}
         tone={v.tone}
         note={
@@ -426,9 +467,20 @@ function NbaAdmin() {
         </p>
       ) : (
         <>
-          <Calibration data={data} />
+          {/* Players the method would consider lead: much of the board is players it would
+              never take. The trust rule alone carries the headline because the full filter
+              fills slowly — 14 of 450 props passed it on 10-26. */}
+          <Calibration data={data.trusted} label={`Ranking gap · ${data.trusted.label}`} />
 
-          <h2>By market</h2>
+          <h2>By player pool</h2>
+          <p className="slate-meta">
+            Trusted is the method's rule: {data.trusted.rule}. The first row adds its
+            consistency check at the main line, logged from the 10-26 slate on, so it fills
+            slowly.
+          </p>
+          <Pools rows={data.pools} />
+
+          <h2>By market · everyone</h2>
           <Buckets
             label="Market"
             buckets={data.by_market?.map((m) => ({ ...m, range: MARKET[m.market] || m.market }))}

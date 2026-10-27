@@ -127,6 +127,7 @@ def collect(day: str | None = None) -> int:
             form = player_form(rows, market, opponent_id=who["opponent_id"]) if rows else {}
             stat, team_stat = MARKET_STAT.get(market), MARKET_TEAM_STAT.get(market)
             # The owner's rule inputs at this row's main line — logged for every row.
+            own = method.player_inputs(rows, stat, who["opponent_id"]) if rows else {}
             l10 = method.hit_rate(rows, stat, entry["line"], 10)[0] if rows else None
             l20 = method.hit_rate(rows, stat, entry["line"], 20)[0] if rows else None
             sim = (method.similar_opponent_avg(rows, stat, who["opponent_id"], factors,
@@ -182,6 +183,7 @@ def collect(day: str | None = None) -> int:
                     u for p, u in out_usage.get(who["team_id"], {}).items() if p != pid), 1)),
                 "hit_l10": l10, "hit_l20": l20,
                 "sim_opp_avg": sim[0], "sim_opp_games": sim[1],
+                "season_avg_raw": own.get("season_avg"),
             })
 
             # The owner's method: the main line, plus (points only) every rung 2-5 under it.
@@ -195,9 +197,7 @@ def collect(day: str | None = None) -> int:
                         cut = round(entry["line"] - line, 1)
                         if lo <= cut <= hi:
                             rungs.append((line, odds, cut))
-                method_legs.extend(method.legs_for(
-                    candidates[-1], rows, stat, rungs, form,
-                    (form.get("vs_opp_avg"), form.get("vs_opp_games") or 0), sim))
+                method_legs.extend(method.legs_for(candidates[-1], rows, stat, rungs, own, sim))
 
     if FETCH_FAILURES["prior_gamelog"]:
         print(f"[main] {FETCH_FAILURES['prior_gamelog']} last-season log(s) unavailable — "
