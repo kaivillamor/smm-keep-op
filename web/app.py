@@ -175,7 +175,8 @@ def stats(db=_db, where: str = "") -> dict:
     """Calibration + ranking signal. Mirrors output/research.py report() — and its NBA
     twin, which computes the same figures from the same model_prob/outcome columns, so
     one implementation serves both sports. `db` is the connection factory. `where` is an
-    SQL condition written in this file, never request input, and narrows every figure."""
+    SQL condition written in code (this file, or research.EVIDENCE_SQL), never request
+    input, and narrows every figure."""
     only = f" WHERE {where}" if where else ""
     try:
         c = db()
@@ -231,6 +232,16 @@ def stats(db=_db, where: str = "") -> dict:
     return out
 
 
+def _mlb_stats() -> dict:
+    """MLB calibration on the evidence rows: everything but the postseason, whose base
+    rate is a different regime (§29). The predicate is research.EVIDENCE_SQL itself, so
+    this page and `research.py report` cannot drift apart. It narrows every figure,
+    `logged` and the recent-days table included, so the counts describe the same rows
+    as the rates."""
+    from output.research import EVIDENCE_SQL
+    return stats(where=EVIDENCE_SQL)
+
+
 @app.get("/healthz")
 def healthz():
     """Unauthenticated so Railway can health-check without credentials."""
@@ -276,7 +287,7 @@ def api_me(request: Request):
 def api_summary(who: tuple = Depends(auth)):
     """Headline numbers any signed-in user may see. Deliberately excludes buckets,
     ranking gap and slope — those are admin-only via /api/report."""
-    s = stats()
+    s = _mlb_stats()
     return {"logged": s.get("logged", 0), "graded": s.get("graded", 0),
             "actual": s.get("actual"), "predicted": s.get("predicted"),
             "role": who[1], "user": who[0], "error": s.get("error")}
@@ -386,7 +397,7 @@ def nba_pages():
 
 @app.get("/api/report")
 def api_report(_: tuple = Depends(require_admin)):
-    return stats()
+    return _mlb_stats()
 
 
 # ── NBA research views ───────────────────────────────────────────────────────
@@ -657,14 +668,20 @@ def _scheduler():
             now = datetime.now(timezone.utc)
             key = f"{now:%Y-%m-%d}-{now.hour}"
             if MLB_ENABLED and key not in done:
-                if now.hour == GRADE_HOUR:
-                    from output.research import grade_predictions
-                    grade_predictions()
-                    done.add(key)
-                elif now.hour in COLLECT_HOURS:
-                    from main import _collect_predictions
-                    _collect_predictions()
-                    done.add(key)
+                # Its own try. A failure here used to jump straight to the handler below,
+                # skipping NBA for the pass, and again every pass while it kept failing.
+                # Not marked done, so it retries next pass.
+                try:
+                    if now.hour == GRADE_HOUR:
+                        from output.research import grade_predictions
+                        grade_predictions()
+                        done.add(key)
+                    elif now.hour in COLLECT_HOURS:
+                        from main import _collect_predictions
+                        _collect_predictions()
+                        done.add(key)
+                except Exception as e:
+                    print(f"[scheduler] MLB run failed: {type(e).__name__}: {e}", flush=True)
 
             # NBA keyed separately: its hours overlap MLB's, and sharing `done` would let
             # whichever sport ran first mark the hour complete for both.

@@ -42,8 +42,8 @@ MIN_LEG_PROB      = 0.50
 
 # ── Betting-gate calibration (added 2026-09-09, refit 2026-09-30) ─────────────
 # The model overstates its own confidence: regressed against reality, only a fraction of
-# each predicted point survives. So the gate compares a SHRUNK probability against
-# MIN_HIT_PROB, via calibrated_hit_prob().
+# each predicted point survives. So the per-leg EV gate below decides on a SHRUNK
+# probability, calibrated_hit_prob(), against each leg's own price.
 #
 # The raw number is still what gets logged as predictions.model_prob — compressing that
 # would split the calibration series into two model versions and make the sample
@@ -55,19 +55,15 @@ MIN_LEG_PROB      = 0.50
 # Refit 2026-09-30 on 2,598 deduplicated graded rows (the original used 240):
 #   slope 0.2570 ± 0.0804, 95% CI [0.099, 0.415]   base = observed rate 0.6455
 # The old 0.17 sits inside that interval, so it was never wrong — only fitted on 10x
-# less data. Fitted on what the model ACTUALLY emits, pathological rows included: while
-# _pitcher_hits_per_9 still floors at 0.5 the live model keeps producing them, so the
-# calibration has to map its real output. Excluding them gives 0.2893 ± 0.0908.
+# less data. Fitted on what the model ACTUALLY emitted, pathological rows included. Every
+# one of those rows predates 2026-09-30, when _pitcher_hits_per_9 stopped flooring H/9 at
+# 0.5 and began shrinking it by innings; excluding them gives 0.2893 ± 0.0908. A refit
+# on rows scored the current way is PROJECT.md §27 #4.
 #
-# MIN_HIT_PROB derivation (2026-09-30). For a parlay of equally-priced legs the per-leg
-# break-even equals the single-leg implied probability, so the gate is the implied prob
-# of the median price actually available. Verified DraftKings, 915 graded priced rows:
-#   p25 -219 (68.7%) | median -189 (65.4%) | p75 -163 (62.0%)
-# -> 0.654. This REPLACES the old 0.73, which came from a -270 median the broken FanDuel
-# feed invented (PROJECT.md §28). Known limitation: a constant derived from the median
-# does not protect against selection — on the 2,598-row corpus the legs that clear this
-# gate are priced at a mean 72.1% implied, not 65.4%, for a -4.1pt edge. The per-leg EV
-# gate (compare calibrated_prob to each leg's own book_implied) is the agreed fallback.
+# This first fed a constant threshold, MIN_HIT_PROB (0.73, then 0.654 from the median
+# verified DraftKings price). A threshold set from the median cannot protect against
+# selection — legs clearing 0.654 were priced at a mean 72.1% implied — so the per-leg
+# EV gate replaced it on 2026-10-12. The derivation is in PROJECT.md §29.
 CALIBRATION_SLOPE = 0.257   # how much of a predicted point survives contact with reality
 CALIBRATION_BASE  = 0.6455  # observed base rate the shrink pulls toward
 
@@ -199,7 +195,8 @@ _PA_BY_POS = {
 # 0.73: clearing it needed a raw probability of 1.316. Zero of 2,598 graded rows cleared
 # it, and from outside that looked like a finding ("the market is priced past the model")
 # rather than a bug, because the compared value was never logged. Two constants, each
-# defensible alone, were jointly impossible.
+# defensible alone, were jointly impossible. The guard now checks MIN_LEG_PROB, the floor
+# that replaced MIN_HIT_PROB on 2026-10-12, so the same trap cannot reopen there.
 #
 # The bound that matters is the model's STRUCTURAL ceiling, not calibrated_hit_prob(1.0):
 # raw output is capped by MAX_ADJUSTED_BA over the most plate appearances any scored
@@ -229,7 +226,6 @@ def score_batter_hit_prob(
     park_factor: float = 1.0,
     h2h_stats: dict | None = None,
     recent_ba_stats: dict | None = None,
-    venue_stats: dict | None = None,   # accepted but IGNORED — see §4 below
     pitcher_recent: dict | None = None,
     team_recent: dict | None = None,
     is_day_game: bool = False,
@@ -238,16 +234,19 @@ def score_batter_hit_prob(
     Returns P(batter gets 1+ hits) for one game.
 
     Batter BA layers (applied in order):
-      1. Season BA vs pitcher handedness (L/R split)
-      2. H2H career avg vs this specific pitcher   — 40% blend
-      3. Recent form (L14d BA) hot/cold multiplier — 20%
-      4. Venue career avg                          —  5%
-      5. Team recent offensive form                — 10%
-      6. Day game penalty                          — flat –0.010
+      1. Season BA vs pitcher handedness (L/R split); league average under MIN_SPLIT_AB
+      2. H2H career avg vs this pitcher — up to H2H_WEIGHT, scaled by sample size
+      3. Recent form (L14d BA) hot/cold multiplier — RECENT_WEIGHT
+      4. (venue layer removed 2026-09-08 — see §4 below)
+      5. Team recent offensive form — TEAM_RECENT_WEIGHT
+      6. Day game penalty — flat −DAY_GAME_BA_PENALTY
 
     Pitcher quality factor:
-      Season H/9 blended 60/40 with last-3-starts H/9.
-      Days-rest deviation from 4-day norm adjusts quality factor ±1%/day.
+      Season H/9, shrunk toward league average by innings, blended with last-3-starts
+      H/9 at PITCHER_RECENT_WEIGHT. No days-rest adjustment (removed — see below).
+
+    Then park at 30% of its runs factor, a cap of MAX_ADJUSTED_BA per at-bat, and
+    1 − (1 − BA)^AB over the lineup slot's expected at-bats.
     """
     # ── 1. Base BA from season L/R split ─────────────────────────────────────
     split_key = "vs_rhp" if pitcher_hand == "R" else "vs_lhp"
@@ -279,8 +278,7 @@ def score_batter_hit_prob(
     # shrink toward each batter's career average while contributing zero park signal.
     # Not repaired, because park effects are already handled correctly and independently
     # by park_factors.get_park_factor (Coors 1.37, SF 0.93) further down — a working
-    # venue blend would only double-count it. `venue_stats` is still accepted so the
-    # frozen versions/8leg_10 caller keeps working, but it is ignored.
+    # venue blend would only double-count it.
 
     # ── 5. Team recent offense multiplier ────────────────────────────────────
     if team_recent and team_recent.get("avg") is not None:

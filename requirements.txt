@@ -5,7 +5,7 @@
 requests==2.34.2
 pandas==3.0.3
 python-dotenv==1.2.2
-anthropic==0.120.2
+# anthropic was dropped 2026-10-27 with its only importer, the game-line LLM review.
 
 # Dashboard service (web/app.py) — always-on, also hosts the collection scheduler.
 fastapi==0.141.1

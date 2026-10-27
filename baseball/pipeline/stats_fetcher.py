@@ -18,10 +18,11 @@ MLB_API = "https://statsapi.mlb.com/api/v1"
 SAVANT_BASE = "https://baseballsavant.mlb.com"
 
 # MLB schedules a "game day" in Eastern time — a 10pm ET game belongs to that day's
-# slate even though it's already tomorrow in UTC. lineup_fetcher already keys off ET,
-# so anything that must line up with it (probable pitchers, per-day caches) has to use
-# the same basis. Using UTC here silently fetched the NEXT day's probables after 8pm ET,
-# so no game_pk matched a lineup and every pipeline produced zero candidates.
+# slate even though it's already tomorrow in UTC. Everything keyed by slate (lineups,
+# probable pitchers, per-day caches) must share one basis, so it lives here and
+# lineup_fetcher calls slate_date() rather than keeping a copy. Using UTC here silently
+# fetched the NEXT day's probables after 8pm ET, so no game_pk matched a lineup and
+# every pipeline produced zero candidates.
 _ET_OFFSET = timedelta(hours=5)
 
 
@@ -161,7 +162,6 @@ def _prune_old_caches(keep_days: int = 3) -> None:
     """Delete day-cache files older than keep_days. The service writes ~600 small
     files per slate; without this the volume grows for the whole season. Failures
     are ignored — pruning is housekeeping and must never break a run."""
-    import time
     cutoff = time.time() - keep_days * 86400
     try:
         for name in os.listdir(_CACHE_DIR):
@@ -249,23 +249,15 @@ def fetch_stats() -> dict:
         if pid
     }
 
+    # MLB Stats API only. Savant's xERA, read by nothing but the HR/FB proxy, is fetched
+    # by prop_pipeline: here it ran unguarded, so one Savant timeout failed every hit
+    # research run, and the hit model never reads it.
     pitcher_stats = {str(pid): _fetch_pitcher_season_stats(pid, year) for pid in pitcher_ids}
-    savant   = _fetch_savant_pitcher_leaderboard(year)
-    hr_fb    = _fetch_savant_pitcher_hr_fb(year)
-
-    for pid, stats in pitcher_stats.items():
-        stats.update(savant.get(str(pid), {}))
-        stats.update(hr_fb.get(str(pid), {}))
-
-    standings = fetch_standings(year)
-    offense   = fetch_team_offense(year)
 
     result = {
         "date": date_str,
         "probable_pitchers": probable,
         "pitcher_stats": pitcher_stats,
-        "standings": standings,
-        "offense": offense,
     }
 
     _save(result, date_str)
@@ -307,6 +299,21 @@ def _fetch_probable_pitchers(date_str: str) -> dict:
     return probable
 
 
+def _match_probable(game_pk, probable: dict) -> dict | None:
+    """One game's entry from _fetch_probable_pitchers' output, or None on a miss.
+
+    Game IDs arrive as int from the schedule API and str from the saved lineup JSON, so
+    try both. A non-numeric ID returns None rather than raising — a lookup miss should
+    never take down the caller. The single copy for both pipelines and the watcher: the
+    two it replaces disagreed, one returning {} and raising on a non-numeric ID.
+    """
+    try:
+        hit = probable.get(int(game_pk))
+    except (TypeError, ValueError):
+        hit = None
+    return hit or probable.get(str(game_pk)) or None
+
+
 _FIP_CONSTANT = 3.12   # league-average FIP constant (roughly stable year-to-year)
 
 
@@ -345,25 +352,26 @@ def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
         # FIP = ((13*HR) + (3*(BB+HBP)) - (2*K)) / IP + constant
         fip = round((13 * hr + 3 * (bb + hbp) - 2 * k) / ip + _FIP_CONSTANT, 2) if ip > 0 else None
 
+        # whip/bb_per_9/opp_avg/innings_pitched feed hit_model._pitcher_hits_per_9; fip
+        # feeds prop_pipeline's HR/FB proxy. Nothing else reads these.
         return {
-            "era": _safe_float(stat.get("era")),
             "whip": _safe_float(stat.get("whip")),
             "fip": fip,
-            "k_per_9": _safe_float(stat.get("strikeoutsPer9Inn")),
             "bb_per_9": _safe_float(stat.get("walksPer9Inn")),
             "opp_avg": _safe_float(stat.get("avg")),
             "innings_pitched": ip,
-            "games_started": int(stat.get("gamesStarted", 0)),
         }
     except (IndexError, KeyError):
         return {}
 
 
-def _fetch_savant_pitcher_leaderboard(year: str) -> dict:
-    """
-    Fetches xERA (expected ERA from Statcast contact quality) for all pitchers.
-    The custom leaderboard p_fip/xfip columns are empty; expected_statistics has real values.
-    xERA is used as our xfip proxy in _pitcher_run_delta.
+def fetch_pitcher_xera(year: str) -> dict:
+    """xERA (expected ERA, from Statcast contact quality) for every pitcher, as
+    {player_id (str): {"xera": float}}. Empty on any failure, so its one reader degrades.
+
+    Read only by prop_pipeline's HR/FB proxy, which fetches it. The custom leaderboard's
+    p_fip/xfip columns are empty; expected_statistics has real values. Stored under
+    "xfip" until 2026-10-27, which made the proxy look like the FIP − xFIP signal it is not.
     """
     url = f"{SAVANT_BASE}/leaderboard/expected_statistics"
     params = {
@@ -373,193 +381,16 @@ def _fetch_savant_pitcher_leaderboard(year: str) -> dict:
         "team": "",
         "csv": "true",
     }
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-
-    df = pd.read_csv(io.StringIO(resp.text))
-
-    savant = {}
-    for _, row in df.iterrows():
-        pid = str(int(row.get("player_id", 0)))
-        savant[pid] = {
-            "xfip": _safe_float(row.get("xera")),   # xERA ≈ xFIP: both normalize ERA for true contact quality
-        }
-
-    return savant
-
-
-def _fetch_savant_pitcher_hr_fb(year: str) -> dict:
-    """
-    Fetches HR/FB rate for all pitchers from Baseball Savant custom leaderboard.
-    HR/FB = home runs allowed per fly ball — higher means more homer-prone.
-    League average is ~10-12%. Returns {player_id (str): {"hr_fb_rate": float}}.
-    """
-    url = f"{SAVANT_BASE}/leaderboard/custom"
-    params = {
-        "year": year,
-        "type": "pitcher",
-        "filter": "",
-        "sort": "4",
-        "sortDir": "desc",
-        "min": "1",
-        "selections": "p_home_run_pct",
-        "player_type": "pitcher",
-        "csv": "true",
-    }
     try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
-
-        col = next((c for c in df.columns if "home_run" in c.lower()), None)
-        if not col:
-            print(f"[stats_fetcher] HR/FB column not found in Savant pitcher leaderboard. Columns: {list(df.columns[:10])}")
+        text = _savant_csv_get(url, params)
+        if text is None:
+            print("[stats_fetcher] fetch_pitcher_xera: Savant unavailable after retries")
             return {}
-
-        result = {}
-        for _, row in df.iterrows():
-            pid = str(int(row.get("player_id", 0)))
-            val = _safe_float(row.get(col))
-            if val is not None:
-                result[pid] = {"hr_fb_rate": round(val, 1)}
-        return result
+        df = pd.read_csv(io.StringIO(text))
+        return {str(int(row.get("player_id", 0))): {"xera": _safe_float(row.get("xera"))}
+                for _, row in df.iterrows()}
     except Exception as e:
-        print(f"[stats_fetcher] _fetch_savant_pitcher_hr_fb: {e}")
-        return {}
-
-
-def fetch_standings(year: str) -> dict:
-    """
-    Fetches current season win% and run differential for all 30 teams.
-    Returns {team_name: {win_pct, run_diff, wins, losses}}.
-    Falls back to empty dict on failure — probability model uses 0.0 quality adj.
-    """
-    url = f"{MLB_API}/standings"
-    params = {
-        "leagueId": "103,104",
-        "season": year,
-        "standingsType": "regularSeason",
-    }
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        standings = {}
-        for record in data.get("records", []):
-            for tr in record.get("teamRecords", []):
-                name     = tr["team"]["name"]
-                wins     = tr.get("wins", 0)
-                losses   = tr.get("losses", 0)
-                total    = wins + losses
-                run_diff = tr.get("runDifferential", 0)
-                standings[name] = {
-                    "win_pct":          round(wins / total, 4) if total > 0 else 0.500,
-                    "run_diff":         run_diff,
-                    "run_diff_per_game": round(run_diff / total, 3) if total > 0 else 0.0,
-                    "wins":             wins,
-                    "losses":           losses,
-                }
-
-        print(f"[stats_fetcher] Standings: {len(standings)} teams loaded")
-        return standings
-    except Exception as e:
-        print(f"[stats_fetcher] fetch_standings: {e}")
-        return {}
-
-
-
-_WOBA_W = {"bb": 0.690, "hbp": 0.722, "1b": 0.881, "2b": 1.254, "3b": 1.569, "hr": 2.058}
-_WOBA_SCALE = 1.157  # converts wOBA to runs per PA; stable across recent seasons
-
-
-def fetch_team_offense(year: str) -> dict:
-    """
-    Computes team wRC+ from MLB Stats API batting stats.
-    wRC+ = 100 × wRC / (lgR/PA × BPF × PA)
-    100 = league avg, 115 = 15% above avg.
-    Returns {team_full_name: wrc_plus (float)}.
-    Falls back to empty dict on failure — quality_adj uses run_diff + win% only.
-    """
-    from model.factors.park_factors import get_runs_factor
-
-    url = f"{MLB_API}/teams/stats"
-    params = {"stats": "season", "group": "hitting", "season": year, "sportId": "1"}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        splits = resp.json().get("stats", [{}])[0].get("splits", [])
-        if not splits:
-            return {}
-
-        rows = []
-        for s in splits:
-            st = s.get("stat", {})
-            pa = st.get("plateAppearances", 0)
-            ab = st.get("atBats", 0)
-            bb = st.get("baseOnBalls", 0)
-            ibb = st.get("intentionalWalks", 0)
-            hbp = st.get("hitByPitch", 0)
-            h   = st.get("hits", 0)
-            dbl = st.get("doubles", 0)
-            trp = st.get("triples", 0)
-            hr  = st.get("homeRuns", 0)
-            sf  = st.get("sacFlies", 0)
-            runs = st.get("runs", 0)
-            singles = max(h - dbl - trp - hr, 0)
-            denom = ab + (bb - ibb) + sf + hbp
-            woba = (
-                _WOBA_W["bb"] * (bb - ibb)
-                + _WOBA_W["hbp"] * hbp
-                + _WOBA_W["1b"] * singles
-                + _WOBA_W["2b"] * dbl
-                + _WOBA_W["3b"] * trp
-                + _WOBA_W["hr"] * hr
-            ) / denom if denom > 0 else 0.0
-            rows.append({
-                "name": s["team"]["name"], "pa": pa, "woba": woba, "runs": runs,
-                "ab": ab, "bb": bb, "ibb": ibb, "hbp": hbp,
-                "singles": singles, "dbl": dbl, "trp": trp, "hr": hr, "sf": sf,
-            })
-
-        # League totals
-        lg_pa   = sum(r["pa"] for r in rows)
-        lg_runs = sum(r["runs"] for r in rows)
-        lg_denom = sum(
-            r["ab"] + (r["bb"] - r["ibb"]) + r["sf"] + r["hbp"] for r in rows
-        )
-        lg_woba_num = sum(
-            _WOBA_W["bb"] * (r["bb"] - r["ibb"])
-            + _WOBA_W["hbp"] * r["hbp"]
-            + _WOBA_W["1b"] * r["singles"]
-            + _WOBA_W["2b"] * r["dbl"]
-            + _WOBA_W["3b"] * r["trp"]
-            + _WOBA_W["hr"] * r["hr"]
-            for r in rows
-        )
-        lg_woba = lg_woba_num / lg_denom if lg_denom > 0 else 0.315
-        lg_r_per_pa = lg_runs / lg_pa if lg_pa > 0 else 0.112
-
-        result = {}
-        for r in rows:
-            name = r["name"]
-            pa   = r["pa"]
-            if pa == 0:
-                continue
-            woba  = r["woba"]
-            wraa  = ((woba - lg_woba) / _WOBA_SCALE) * pa
-            wrc   = wraa + (lg_r_per_pa * pa)
-            # BPF: teams play ~half home, half away; home park factor blended with neutral away
-            park_factor = get_runs_factor(name)
-            bpf = (park_factor + 1.0) / 2.0
-            denom = lg_r_per_pa * bpf * pa
-            wrc_plus = round((wrc / denom) * 100, 1) if denom > 0 else 100.0
-            result[name] = wrc_plus
-
-        print(f"[stats_fetcher] Team wRC+: {len(result)} teams computed")
-        return result
-    except Exception as e:
-        print(f"[stats_fetcher] fetch_team_offense: {e}")
+        print(f"[stats_fetcher] fetch_pitcher_xera: {e}")
         return {}
 
 
@@ -680,7 +511,8 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
     Filters to batted balls only (hfBBT) so estimated_woba_using_speedangle is populated
     and the dataset is smaller. Aggregates xwOBA by zone.
     Returns {zone_id (int): xwoba (float)} for zones 1-14.
-    Uses start_dt/end_dt instead of hfSea — hfSea is unreliable in the statcast_search endpoint.
+    Season-scoped by game_date_gt/lt, not hfSea (unreliable) or start_dt/end_dt (ignored
+    by this endpoint, which then returns career data) — see the params note below.
     """
     cache_path = _day_cache_path("batter_zone", batter_id)
     cached = _read_day_cache(cache_path, int_keys=True)
@@ -733,7 +565,8 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
     """
     Fetches a pitcher's pitch frequency by Statcast zone for the season.
     Returns {zone_id (int): fraction_of_total_pitches (float)}.
-    Uses start_dt/end_dt instead of hfSea — hfSea is unreliable in the statcast_search endpoint.
+    Season-scoped by game_date_gt/lt, not hfSea (unreliable) or start_dt/end_dt (ignored
+    by this endpoint, which then returns career data) — see the params note below.
     """
     cache_path = _day_cache_path("pitcher_zone", pitcher_id)
     cached = _read_day_cache(cache_path, int_keys=True)
@@ -801,7 +634,10 @@ _TEAM_IDS: dict[str, int] = {
     "Minnesota Twins":       142,
     "New York Mets":         121,
     "New York Yankees":      147,
-    "Oakland Athletics":     133,
+    # The MLB API has said "Athletics" all of 2026 (147 cached occurrences, none of the
+    # old name). Keyed "Oakland Athletics", no A's batter ever got team form: 90 of 90
+    # logged rows have it NULL, against 4.6% across the other 29 teams.
+    "Athletics":             133,
     "Philadelphia Phillies": 143,
     "Pittsburgh Pirates":    134,
     "San Diego Padres":      135,
@@ -817,10 +653,6 @@ _TEAM_IDS: dict[str, int] = {
 
 def get_team_id(team_name: str) -> int | None:
     return _TEAM_IDS.get(team_name)
-
-
-# MLB venue IDs — stable, update only when a team moves or opens a new park.
-
 
 
 def fetch_pitcher_recent_form(pitcher_id: int, num_starts: int = 3) -> dict:
@@ -964,8 +796,8 @@ def fetch_batter_recent_ba(batter_id: int, days: int = 14) -> dict:
         _write_day_cache(cache_path, result)
         return result
     except (IndexError, KeyError):
-        # Genuinely no such record (never faced him / no games in window). That is a
-        # real answer and worth caching — it is the common case for H2H.
+        # No games in the window (injured list, a call-up, an off stretch). That is a
+        # real answer and worth caching.
         _write_day_cache(cache_path, {})
         return {}
     except requests.RequestException:

@@ -41,9 +41,9 @@ def score_batter_hr_props(
         "zone_fit":            _zone_fit_score(batter_zones, pitcher_zones),
         "pitcher_hr_fb":       round(pitcher_hr_fb, 1) if pitcher_hr_fb is not None else None,
     }
-    passes = _check_gate(scores)
-    scores["passes_gate"]    = passes
-    scores["gate_triggered"] = _which_gate(scores) if passes else None
+    gate = _which_gate(scores)
+    scores["passes_gate"]    = gate is not None
+    scores["gate_triggered"] = gate
     return scores
 
 
@@ -109,7 +109,12 @@ def _zone_fit_score(batter_zones: dict, pitcher_zones: dict) -> float | None:
 # ── gate ──────────────────────────────────────────────────────────────────────
 
 def _which_gate(scores: dict) -> str | None:
-    """Returns a short label for the first gate condition that triggered."""
+    """Returns a short label for the first gate condition that triggered, or None.
+
+    This IS the gate: a batter passes when it returns a label. A separate _check_gate
+    restated the same four conditions until 2026-10-27, and two copies of one rule can
+    drift apart.
+    """
     barrel       = scores.get("barrel_rate")
     sweet_spot   = scores.get("sweet_spot")
     hard_contact = scores.get("recent_hard_contact")
@@ -126,40 +131,6 @@ def _which_gate(scores: dict) -> str | None:
     if pitcher_hrfb is not None and pitcher_hrfb >= HR_FB_THRESHOLD and barrel is not None and barrel >= BARREL_SOFT:
         return "pitcher_hrfb"
     return None
-
-
-def _check_gate(scores: dict) -> bool:
-    """
-    Four ways to pass (thresholds are the module constants, not hardcoded):
-      1. Barrel >= BARREL_THRESHOLD (11%)                      elite contact quality alone
-      2. Sweet Spot >= 65% AND Hard Contact >= 65%             angle + power
-      3. Zone Fit >= 65% AND Hard Contact >= 65%               matchup + power
-      4. Pitcher HR/FB >= 15% AND Barrel >= BARREL_SOFT (8%)   homer-prone pitcher + pop
-    """
-    barrel       = scores.get("barrel_rate")
-    sweet_spot   = scores.get("sweet_spot")
-    hard_contact = scores.get("recent_hard_contact")
-    zone_fit     = scores.get("zone_fit")
-    pitcher_hrfb = scores.get("pitcher_hr_fb")
-
-    t = HR_GATE_THRESHOLD
-
-    if barrel is not None and barrel >= BARREL_THRESHOLD:
-        return True
-
-    if (sweet_spot   is not None and sweet_spot   >= t and
-            hard_contact is not None and hard_contact >= t):
-        return True
-
-    if (zone_fit     is not None and zone_fit     >= t and
-            hard_contact is not None and hard_contact >= t):
-        return True
-
-    if (pitcher_hrfb is not None and pitcher_hrfb >= HR_FB_THRESHOLD and
-            barrel   is not None and barrel        >= BARREL_SOFT):
-        return True
-
-    return False
 
 
 def rank_score(scores: dict) -> float:

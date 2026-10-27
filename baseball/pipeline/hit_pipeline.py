@@ -9,6 +9,7 @@ from pipeline.stats_fetcher import (
     game_slate_date,
     is_day_game,
     season_phase,
+    _match_probable,
 )
 from model.factors.hit_model import (
     score_batter_hit_prob,
@@ -29,7 +30,8 @@ def analyze_hit_props(lineups: dict, stats: dict,
                       all_candidates_out: list | None = None) -> list[dict]:
     """
     Scores batters in positions 1–MAX_LINEUP_DEPTH of every confirmed lineup
-    on P(1+ hit) for today's matchup. Returns the top HIT_PARLAY_LEGS candidates.
+    on P(1+ hit) for today's matchup. Returns up to HIT_PARLAY_LEGS legs that clear
+    the per-leg EV gate, ranked by edge (see _select_legs).
 
     lineups : from fetch_lineups()
     stats   : from fetch_stats() — needs probable_pitchers and pitcher_stats
@@ -159,11 +161,9 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     "h2h_avg":         h2h_stats.get("avg"),
                     "recent_ab":       recent_stats.get("ab", 0),
                     "recent_avg":      recent_stats.get("avg"),
-                    # Venue lookup removed 2026-09-08 — the API ignored venueId, so this
-                    # was the batter's career line, not a park split. Logged as NULL now;
-                    # park effects come from park_factors. Saves ~150 API calls per run.
-                    "venue_ab":          None,
-                    "venue_avg":         None,
+                    # No venue_ab/venue_avg: the lookup was removed 2026-09-08 (the API
+                    # ignored venueId and returned the career line), so research.db logs
+                    # those columns NULL. Park effects come from park_factors.
                     "pitcher_recent_h9": pitcher_recent.get("h_per_9"),
                     "pitcher_days_rest": pitcher_recent.get("days_rest"),
                     "team_recent_avg":   team_recent.get("avg"),
@@ -201,11 +201,8 @@ def analyze_hit_props(lineups: dict, stats: dict,
     if all_candidates_out is not None:
         all_candidates_out.extend(candidates)
 
+    # Already ranked by edge, which is the same number as `ev` (both are leg_edge).
     top = _select_legs(candidates, HIT_PARLAY_LEGS)
-    # Rank by EV descending; legs with no posted line (ev=None) sort to the bottom.
-    # Use -inf rather than `or -1` so an EV of exactly 0.0 isn't mis-sorted as negative.
-    top.sort(key=lambda c: c["ev"] if c.get("ev") is not None else float("-inf"),
-             reverse=True)
 
     print(
         f"[hit_pipeline] {len(candidates)} batters scored | "
@@ -269,12 +266,13 @@ def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
     legs: list[dict] = []
     rejected: dict[str, int] = {}
 
-    ranked = sorted(
-        candidates,
-        key=lambda c: (leg_edge(c.get("calibrated_prob"), c.get("book_implied"))
-                       if leg_edge(c.get("calibrated_prob"), c.get("book_implied"))
-                          is not None else float("-inf")),
-        reverse=True)
+    def _edge_key(c: dict) -> float:
+        # -inf rather than `or -1`, so an unpriced leg sorts last and an edge of exactly
+        # 0.0 is not mistaken for a missing one.
+        edge = leg_edge(c.get("calibrated_prob"), c.get("book_implied"))
+        return edge if edge is not None else float("-inf")
+
+    ranked = sorted(candidates, key=_edge_key, reverse=True)
 
     for c in ranked:
         why = leg_gate_reason(c.get("calibrated_prob"), c.get("book_implied"),
@@ -300,17 +298,6 @@ def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
               f"(min edge {MIN_EDGE_PTS:.1%}) — not padding with weaker legs. "
               f"Rejected: {detail or 'none'}")
     return legs
-
-
-def _match_probable(game_pk, probable: dict) -> dict | None:
-    """Game IDs arrive as int from the schedule API and str from the saved lineup
-    JSON, so try both. A non-numeric ID returns None rather than raising — a lookup
-    miss should never take down the caller."""
-    try:
-        hit = probable.get(int(game_pk))
-    except (TypeError, ValueError):
-        hit = None
-    return hit or probable.get(str(game_pk)) or None
 
 
 def _normalize_batting_pos(batting_order, fallback_idx: int) -> int:

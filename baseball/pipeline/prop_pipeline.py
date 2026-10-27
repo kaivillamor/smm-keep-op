@@ -4,7 +4,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pipeline.stats_fetcher import (
     fetch_batter_recent_stats,
     fetch_batter_zone_stats,
+    fetch_pitcher_xera,
     fetch_pitcher_zone_tendencies,
+    _match_probable,
 )
 from model.factors.hr_prop_model import score_batter_hr_props, rank_score, RECENT_DAYS, BARREL_THRESHOLD
 from pipeline.prop_odds import fetch_hr_prop_odds, normalize_name
@@ -15,22 +17,26 @@ _SEASON_PREFILTER        = 55.0
 _BARREL_PREFILTER        = BARREL_THRESHOLD - 3.0  # catches borderline barrel + pitcher_hrfb gate guys
 _TOP_N                   = 5    # max candidates to surface after gate + ranking (2/18 hit at top-8 vs ~20% break-even)
 
-# Savant's p_home_run_pct leaderboard returns all NaN in 2026. Proxy HR/FB from
-# FIP-xFIP gap instead: a pitcher allowing more HRs than expected has FIP > xFIP.
-# Calibration: ~4 pts of HR/FB per 1.0 FIP-xFIP unit above league avg (11%).
+# Savant's p_home_run_pct leaderboard returns all NaN in 2026, so HR/FB is proxied from
+# FIP minus xERA: FIP charges a pitcher for the homers he allowed, xERA for the contact
+# he allowed, so FIP running above xERA reads as homer-prone. It is NOT the textbook
+# FIP − xFIP signal, though the leaderboard stored xERA under an "xfip" key until
+# 2026-10-27: xFIP isolates HR/FB luck, while xERA also moves with contact quality on
+# balls in play, so this gap is the noisier of the two.
+# Calibration: ~4 pts of HR/FB per 1.0 unit of gap above league avg (11%).
 _LEAGUE_AVG_HRFB = 11.0
 _HRFB_PER_FIP_UNIT = 4.0
 
 
 def _pitcher_hrfb_proxy(p_stats: dict) -> float | None:
-    """Estimate HR/FB from the FIP−xFIP gap. Clamped at 0: a pitcher massively
-    outperforming his xFIP (e.g. 2.00 vs 5.00) produced a negative rate, which is
+    """Estimate HR/FB from the FIP − xERA gap. Clamped at 0: a pitcher massively
+    outperforming his xERA (e.g. 2.00 vs 5.00) produced a negative rate, which is
     impossible and silently failed the gate for the wrong reason."""
     fip  = p_stats.get("fip")
-    xfip = p_stats.get("xfip")
-    if fip is None or xfip is None:
+    xera = p_stats.get("xera")
+    if fip is None or xera is None:
         return None
-    proxy = _LEAGUE_AVG_HRFB + (fip - xfip) * _HRFB_PER_FIP_UNIT
+    proxy = _LEAGUE_AVG_HRFB + (fip - xera) * _HRFB_PER_FIP_UNIT
     return round(max(proxy, 0.0), 1)
 
 
@@ -41,11 +47,13 @@ def analyze_hr_props(
     pitcher_stats: dict | None = None,
 ) -> list[dict]:
     """
-    Runs the 65/65/65 HR gate across every batter in confirmed lineups.
+    Runs the HR gate (hr_prop_model.score_batter_hr_props, four ways to pass) across
+    every batter in confirmed lineups.
 
     lineups              : from fetch_lineups()
     season_batter_stats  : from fetch_batter_statcast_season()
     probable_pitchers    : from stats["probable_pitchers"]
+    pitcher_stats        : from stats["pitcher_stats"] — supplies FIP for the HR/FB proxy
 
     Returns a list of candidates who pass the gate, each with batter info + scores.
     Additional HR prop logic can be added here as new scoring functions in
@@ -72,7 +80,7 @@ def analyze_hr_props(
     # Collect the unique probable-pitcher IDs across eligible games (no network).
     pitcher_ids: set[int] = set()
     for game_pk, lineup_entry in eligible.items():
-        probable = _match_probable(game_pk, probable_pitchers)
+        probable = _match_probable(game_pk, probable_pitchers) or {}
         for pid, batters in (
             (probable.get("away_pitcher_id"), lineup_entry.get("home_lineup", [])),
             (probable.get("home_pitcher_id"), lineup_entry.get("away_lineup", [])),
@@ -94,10 +102,15 @@ def analyze_hr_props(
                 print(f"[prop_pipeline] pitcher zone fetch error ({pid}): {e}")
                 pitcher_zone_cache[pid] = {}
 
+    # xERA for the HR/FB proxy, fetched here by its only reader. It used to come from
+    # fetch_stats(), unguarded, so a Savant outage failed hit research collection, which
+    # never reads it. Empty on failure: the proxy is then None and gate condition 4 is off.
+    xera = fetch_pitcher_xera(year) if pitcher_ids else {}
+
     # Build the work queue: one entry per (batter, pitcher, side, game) that passes pre-filter.
     work_items = []
     for game_pk, lineup_entry in eligible.items():
-        probable = _match_probable(game_pk, probable_pitchers)
+        probable = _match_probable(game_pk, probable_pitchers) or {}
         batter_groups = [
             (lineup_entry.get("home_lineup", []), probable.get("away_pitcher_id"), "home"),
             (lineup_entry.get("away_lineup", []), probable.get("home_pitcher_id"), "away"),
@@ -109,7 +122,7 @@ def analyze_hr_props(
 
             pitcher_zones = pitcher_zone_cache.get(pitcher_id, {})
             p_stats       = (pitcher_stats or {}).get(str(pitcher_id), {})
-            hr_fb_rate    = _pitcher_hrfb_proxy(p_stats)
+            hr_fb_rate    = _pitcher_hrfb_proxy({**p_stats, **xera.get(str(pitcher_id), {})})
 
             for batter in batters:
                 batter_id = batter.get("id")
@@ -200,15 +213,6 @@ def _attach_hr_odds(cands: list[dict]) -> None:
         else:
             c["book_odds"] = c["book_implied"] = c["book"] = None
     print(f"[prop_pipeline] matched HR odds for {matched}/{len(cands)} candidates")
-
-
-def _match_probable(game_pk, probable_pitchers: dict) -> dict:
-    """Handles both int and str game_pk keys from the MLB Stats API."""
-    return (
-        probable_pitchers.get(int(game_pk))
-        or probable_pitchers.get(str(game_pk))
-        or {}
-    )
 
 
 def _passes_season_prefilter(season_stats: dict) -> bool:

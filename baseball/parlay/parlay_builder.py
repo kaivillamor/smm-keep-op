@@ -1,30 +1,3 @@
-def build_parlay(legs: list[dict]) -> dict:
-    if not legs:
-        return {}
-
-    combined_odds = _calculate_combined_odds(legs)
-    total_edge    = sum(abs(l["edge"]) for l in legs)
-
-    return {
-        "legs":          legs,
-        "num_legs":      len(legs),
-        "combined_odds": combined_odds,
-        "total_edge":    round(total_edge, 4),
-    }
-
-
-def _calculate_combined_odds(legs: list[dict]) -> int:
-    """
-    Converts each leg to decimal odds, multiplies them together,
-    then converts the result back to American odds.
-    """
-    decimal = 1.0
-    for leg in legs:
-        decimal *= _american_to_decimal(leg["odds"])
-
-    return _decimal_to_american(decimal)
-
-
 def combine_odds(american_odds: list[int]) -> int | None:
     """Combine a list of American odds into a single parlay price.
     Returns None if any leg's odds are missing (can't price the parlay)."""

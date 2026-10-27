@@ -1,71 +1,35 @@
 import argparse
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
-from pipeline.odds_fetcher import fetch_odds, check_usage
 from pipeline.stats_fetcher import fetch_stats, fetch_batter_statcast_season
 from pipeline.lineup_fetcher import fetch_lineups
-from pipeline.weather_fetcher import fetch_weather
 from pipeline.prop_pipeline import analyze_hr_props
 from pipeline.hit_pipeline import analyze_hit_props
-from model.probability_model import build_probabilities
-from model.edge_detector import detect_edges
 from model.factors.hr_prop_model import RECENT_DAYS, HR_PARLAY_STAKE
-from model.factors.hit_model import HIT_BASE_STAKE, HIT_PROFIT_FLOOR, HIT_MAX_STAKE
-from parlay.leg_selector import select_legs
-from parlay.parlay_builder import build_parlay, stake_to_win, profit_for_stake, combine_odds, recommended_stake
-from llm.context_analyzer import analyze_context
-from output.daily_slip import print_slip
-from output.backtest import log_parlays, log_hit_parlay, log_hit_parlays, log_hr_candidates, log_hr_parlays, record_hit_payout, record_hit_odds
+from model.factors.hit_model import HIT_BASE_STAKE, HIT_PROFIT_FLOOR, HIT_MAX_STAKE, HIT_PARLAY_LEGS
+from parlay.parlay_builder import stake_to_win, profit_for_stake, combine_odds, recommended_stake
+from output.backtest import log_hit_parlay, log_hit_parlays, log_hr_candidates, log_hr_parlays, record_hit_payout, record_hit_odds
 from output.result_tracker import resolve_pending
 
 
-def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
+def run(run_props: bool = False, run_hits: bool = False,
         run_hits_2: bool = False, run_all: bool = False):
+    # Game lines (moneylines + totals, with the LLM review and weather) were retired on
+    # 2026-10-27 after 3-26 on real money; their parlays stay in bets.db for the summary.
     if run_all:
         run_props = True
         run_hits  = True
     print("\n[main] Fetching data...")
-    odds    = fetch_odds()
     stats   = fetch_stats()
     lineups = fetch_lineups()
-    weather = fetch_weather(odds)
 
-    if not odds:
+    if not lineups:
         print("[main] No games found today.")
         return
 
-    # ── game lines (moneylines + totals) ─────────────────────────────────────
-    print(f"\n[main] Building probabilities for {len(odds)} games...")
-    probabilities = build_probabilities(odds, stats, lineups, weather)
-
-    print("[main] Detecting edges...")
-    edges = detect_edges(probabilities)
-
-    if not edges:
-        print("[main] No edges found today — no parlay generated.")
-    else:
-        print("[main] Selecting legs...")
-        legs = select_legs(edges)
-
-        if not legs:
-            print("[main] No legs passed filters today.")
-        else:
-            if use_llm:
-                print("[main] Running LLM context check...")
-                legs = analyze_context(legs)
-            else:
-                print("[main] Skipping LLM layer.")
-
-            game_pairs = _pair_game_legs(legs)
-            parlays = [build_parlay(pair) for pair in game_pairs]
-            for i, parlay in enumerate(parlays, 1):
-                print_slip(parlay, num=i if len(parlays) > 1 else None)
-            log_parlays(parlays)
-
-    # ── HR props (65/65/65 gate) ──────────────────────────────────────────────
+    # ── HR props (hr_prop_model gate — four ways to pass) ─────────────────────
     if run_props:
         print("\n[main] Running HR prop analysis...")
-        from datetime import datetime
         year = str(datetime.now(timezone.utc).year)
         season_batter_stats = fetch_batter_statcast_season(year)
         candidates = analyze_hr_props(lineups, season_batter_stats, stats["probable_pitchers"], stats["pitcher_stats"])
@@ -77,13 +41,13 @@ def run(use_llm: bool = True, run_props: bool = False, run_hits: bool = False,
 
     # ── Hit parlay (1+ hit, top-6 lineup spots) ───────────────────────────────
     if run_hits:
-        print("\n[main] Running hit parlay analysis (8-leg)...")
+        print("\n[main] Running hit parlay analysis (single parlay)...")
         hit_legs = analyze_hit_props(lineups, stats)
         _print_hit_parlay(hit_legs)
         log_hit_parlay(hit_legs)
 
     if run_hits_2:
-        print("\n[main] Running hit parlay analysis (4×2-leg split)...")
+        print("\n[main] Running hit parlay analysis (2-leg pairs)...")
         hit_legs = analyze_hit_props(lineups, stats)
         pairs = _pair_hit_legs(hit_legs)
         _print_hit_parlay_split(pairs)
@@ -101,9 +65,9 @@ def _collect_predictions() -> None:
 
     Run it EARLY in the day: the pipeline only scores games that haven't started,
     so a late run captures just the remaining slate (~60 batters) instead of the
-    full one (~180). Book odds are recorded for the surfaced legs only, since that
-    is where the pipeline attaches them; the calibration question needs just
-    model_prob and outcome, both of which are captured for every batter.
+    full one (~180). Every scored batter is priced, not just the surfaced legs:
+    the board comes down in one call either way, and pricing only the model's
+    favourites would make the recorded prices a sample of its own picks.
     """
     from output.research import log_predictions, report
     print("\n[main] Research collection — no bets logged, bets.db untouched.")
@@ -140,8 +104,7 @@ def _watch_lineups(interval_min: int = 10, max_hours: float = 14.0) -> None:
     """
     import time
     from output.research import log_predictions
-    from pipeline.stats_fetcher import game_has_started, slate_date
-    from pipeline.hit_pipeline import _match_probable
+    from pipeline.stats_fetcher import game_has_started, slate_date, _match_probable
 
     slate     = slate_date()
     collected = _already_collected(slate)
@@ -205,27 +168,6 @@ def _watch_lineups(interval_min: int = 10, max_hours: float = 14.0) -> None:
           f"Run 'python main.py --collect-grade' tomorrow morning.")
 
 
-def _print_usage() -> None:
-    usage = check_usage()
-    if not usage:
-        return
-
-    used      = usage["used"]
-    remaining = usage["remaining"]
-    total     = usage["total"]
-    bar_filled = round((used / total) * 20) if total else 0
-    bar = "█" * bar_filled + "░" * (20 - bar_filled)
-
-    print(f"\n{'=' * 40}")
-    print(f"  THE ODDS API — MONTHLY USAGE")
-    print(f"{'=' * 40}")
-    print(f"  [{bar}]")
-    print(f"  Used:      {used:>5} / {total}")
-    print(f"  Remaining: {remaining:>5} / {total}")
-    print(f"  Reset:     {usage['reset_date']}  ({usage['days_until_reset']} days)")
-    print(f"{'=' * 40}\n")
-
-
 def _fmt_leg_odds(leg: dict) -> str:
     """Formats a leg's book odds + EV edge for display, or a fallback if unposted."""
     odds = leg.get("book_odds")
@@ -264,11 +206,6 @@ def _print_hit_parlay(legs: list[dict]) -> None:
         if recent_ab >= 10 and recent_avg is not None:
             notes.append(f"L14: {recent_avg:.3f} ({recent_ab} AB)")
 
-        venue_ab  = leg.get("venue_ab", 0)
-        venue_avg = leg.get("venue_avg")
-        if venue_ab >= 20 and venue_avg is not None:
-            notes.append(f"at venue: {venue_avg:.3f} ({venue_ab} AB)")
-
         pitcher_h9  = leg.get("pitcher_recent_h9")
         days_rest   = leg.get("pitcher_days_rest")
         if pitcher_h9 is not None:
@@ -301,7 +238,9 @@ def _print_hit_parlay(legs: list[dict]) -> None:
     book_combined = combine_odds([leg.get("book_odds") for leg in legs])
     if book_combined is not None:
         odds_str = f"+{book_combined}" if book_combined > 0 else str(book_combined)
-        print(f"  Book parlay odds:     {odds_str}  (FanDuel)")
+        # Each leg is priced at the book that quoted it (DraftKings, else FanDuel).
+        books = " + ".join(sorted({(leg.get("book") or "?").title() for leg in legs}))
+        print(f"  Book parlay odds:     {odds_str}  ({books})")
     else:
         print(f"  Book parlay odds:     — (one or more legs had no posted line)")
     print(f"{'=' * width}")
@@ -322,27 +261,11 @@ def _print_stake_calc(combined_odds: int, target_win: float) -> None:
     print(f"{'=' * 40}\n")
 
 
-def _pair_game_legs(legs: list[dict]) -> list[list[dict]]:
-    """
-    Splits game legs (sorted by edge desc) into 2-leg parlays instead of one
-    4-leg parlay — legs at ~55% only win a 4-leg ~9% of the time, which buries
-    the edge under variance. Interleaved (1&3, 2&4) so pairs are balanced.
-    A lone qualifying leg is bet straight; an odd lowest-edge leg is dropped.
-    """
-    if len(legs) == 1:
-        return [legs]
-    if len(legs) % 2:
-        legs = legs[:-1]
-    half = len(legs) // 2
-    return [[legs[i], legs[i + half]] for i in range(half)]
-
-
 def _pair_hit_legs(legs: list[dict]) -> list[list[dict]]:
     """
-    Splits hit parlay legs into 4 interleaved pairs for the 2-leg split mode.
-    Interleaved pairing (1&5, 2&6, 3&7, 4&8) ensures each pair has one
-    higher-probability and one moderate leg rather than concentrating the
-    best legs in a single pair.
+    Splits ranked legs into interleaved 2-leg pairs: with four legs, 1&3 and 2&4.
+    Interleaving gives each pair one stronger and one weaker leg rather than
+    concentrating the best legs in a single pair. An odd last leg is dropped.
     """
     half = len(legs) // 2
     pairs = []
@@ -389,7 +312,7 @@ def _print_hit_parlay_split(pairs: list[list[dict]]) -> None:
                 f"{leg['hit_probability'] * 100:.1f}%   {_fmt_leg_odds(leg)}"
             )
 
-    print(f"\n  Odds auto-recorded from the prop-odds API (FanDuel, 60s delayed).")
+    print(f"\n  Odds auto-recorded from the prop-odds API (60s delayed), at each leg's book.")
     print(f"  If your slip differs, override: python main.py --record-hit-placed <date> <#> <odds>")
     print(f"{'=' * width}")
 
@@ -420,7 +343,7 @@ def _print_hr_parlays(pairs: list[list[dict]]) -> None:
             leg_str = (f"{'+' if o > 0 else ''}{o}") if o is not None else "no line posted"
             print(f"  {c['batter_name']} ({c['team']}) 1+ HR   {leg_str}")
 
-    print(f"\n  Odds auto-recorded from the prop-odds API (FanDuel, 60s delayed).")
+    print(f"\n  Odds auto-recorded from the prop-odds API (DraftKings, else FanDuel; 60s delayed).")
     print(f"{'=' * width}")
 
 
@@ -445,48 +368,47 @@ def _print_hr_candidates(candidates: list[dict]) -> None:
             f"    Zone Fit:           {s['zone_fit']}\n"
             f"    Pitcher HR/FB:      {hrfb_str}\n"
         )
-    print("  * Pitcher HR/FB estimated from FIP-xFIP gap")
+    print("  * Pitcher HR/FB estimated from the FIP - xERA gap")
     print("=" * 50)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MLB value betting pipeline")
-    parser.add_argument(
-        "--no-llm",
-        action="store_true",
-        help="Skip the LLM context check and run quant model only",
-    )
+    # The LLM review went with game lines (2026-10-27). Accepted and ignored so commands
+    # written before then, like `--no-llm --hits-2`, still run.
+    parser.add_argument("--no-llm", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--props",
         action="store_true",
-        help="Run HR prop analysis using the 65/65/65 gate (Sweet Spot / Hard Contact / Zone Fit)",
+        help="Run HR prop analysis: barrel rate alone, sweet spot or zone fit with hard "
+             "contact, or a homer-prone pitcher with barrel rate qualifies a batter",
     )
+    # Built from the constants so the help cannot drift from the code, as "8-leg at $10"
+    # and "4×2-leg at $50" did.
     parser.add_argument(
         "--hits", "--hits-8",
         dest="hits",
         action="store_true",
-        help="8-leg hit parlay list at $10 (default hit mode)",
+        help=f"One parlay of up to {HIT_PARLAY_LEGS} hit legs that clear the per-leg EV "
+             f"gate (legacy mode)",
     )
     parser.add_argument(
         "--hits-2",
         dest="hits_2",
         action="store_true",
-        help="4×2-leg hit parlays at $50 each (interleaved pairing)",
+        help=f"Up to {HIT_PARLAY_LEGS} hit legs that clear the per-leg EV gate, as "
+             f"interleaved 2-leg parlays: stake ${HIT_BASE_STAKE:.0f} on plus money, else "
+             f"enough to win ${HIT_PROFIT_FLOOR:.0f}, never more than ${HIT_MAX_STAKE:.0f}",
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Run everything: game lines + HR props + hit parlay in one command",
-    )
-    parser.add_argument(
-        "--usage",
-        action="store_true",
-        help="Show Odds API credit usage and monthly reset date, then exit",
+        help="Run --props and --hits in one command",
     )
     parser.add_argument(
         "--results",
         action="store_true",
-        help="Grade yesterday's pending parlay and hit legs against actual game results",
+        help="Grade pending hit legs, HR props and their parlays in bets.db against final box scores",
     )
     parser.add_argument(
         "--record-hit-win",
@@ -534,9 +456,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.usage:
-        _print_usage()
-    elif args.watch:
+    if args.watch:
         _watch_lineups(interval_min=args.watch_interval)
     elif args.collect:
         _collect_predictions()
@@ -556,6 +476,9 @@ if __name__ == "__main__":
         odds       = int(args.stake_calc[0].lstrip("+"))
         target_win = float(args.stake_calc[1]) if len(args.stake_calc) > 1 else 50.0
         _print_stake_calc(odds, target_win)
+    elif args.props or args.hits or args.hits_2 or args.all:
+        run(run_props=args.props, run_hits=args.hits, run_hits_2=args.hits_2,
+            run_all=args.all)
     else:
-        run(use_llm=not args.no_llm, run_props=args.props, run_hits=args.hits,
-            run_hits_2=args.hits_2, run_all=args.all)
+        # A bare run used to mean game lines, the only mode that needed no flag.
+        parser.print_help()

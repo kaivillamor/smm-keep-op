@@ -1,20 +1,21 @@
 import json
 import os
 import requests
-from datetime import datetime, timezone, timedelta
+
+from pipeline.stats_fetcher import slate_date
 
 MLB_API = "https://statsapi.mlb.com/api/v1"
 
-# MLB schedules are always in Eastern Time.
-# Offset from UTC: EDT = UTC-4 (summer), EST = UTC-5 (winter).
-# Using -5 as a safe floor — in the worst case we're off by an hour near midnight ET,
-# but it prevents us from accidentally pulling tomorrow's games when UTC ticks past midnight.
-_ET_OFFSET = timedelta(hours=5)
+# Every call has a timeout. The web service runs MLB collection on the same scheduler
+# thread as NBA, so one socket that never answers would stall both sports while the
+# server still answered its health check.
+_TIMEOUT = 10
 
 
 def fetch_lineups() -> dict:
-    et_now = datetime.now(timezone.utc) - _ET_OFFSET
-    date_str = et_now.strftime("%Y-%m-%d")
+    # The shared slate basis (Eastern, fixed UTC-5) — the same day probable pitchers and
+    # the per-day caches key on, so a lineup can always be matched to its pitchers.
+    date_str = slate_date()
     games = _fetch_today_games(date_str)
 
     lineups = {}
@@ -45,7 +46,8 @@ def fetch_lineups() -> dict:
 
 
 def _fetch_today_games(date_str: str) -> list[dict]:
-    resp = requests.get(f"{MLB_API}/schedule", params={"sportId": 1, "date": date_str, "hydrate": "team"})
+    resp = requests.get(f"{MLB_API}/schedule", params={"sportId": 1, "date": date_str, "hydrate": "team"},
+                        timeout=_TIMEOUT)
     resp.raise_for_status()
     dates = resp.json().get("dates", [])
     if not dates:
@@ -55,8 +57,11 @@ def _fetch_today_games(date_str: str) -> list[dict]:
 
 def _fetch_game_lineup(game_pk: int) -> dict:
     # Primary: /lineups endpoint (data is nested under a "lineups" key)
-    resp = requests.get(f"{MLB_API}/game/{game_pk}/lineups")
-    if resp.status_code == 200:
+    try:
+        resp = requests.get(f"{MLB_API}/game/{game_pk}/lineups", timeout=_TIMEOUT)
+    except requests.RequestException:
+        resp = None   # one slow game falls back below instead of failing the whole slate
+    if resp is not None and resp.status_code == 200:
         data = resp.json()
         nested = data.get("lineups", data)  # handle both nested and flat responses
         home_players = nested.get("homePlayers", [])
@@ -73,8 +78,11 @@ def _fetch_game_lineup(game_pk: int) -> dict:
 
 
 def _fetch_lineup_from_boxscore(game_pk: int) -> dict:
-    resp = requests.get(f"{MLB_API}/game/{game_pk}/boxscore")
-    if resp.status_code != 200:
+    try:
+        resp = requests.get(f"{MLB_API}/game/{game_pk}/boxscore", timeout=_TIMEOUT)
+    except requests.RequestException:
+        resp = None   # treated like any failed response: unconfirmed, retried next poll
+    if resp is None or resp.status_code != 200:
         return {"confirmed": False, "home": [], "away": []}
 
     data = resp.json()
@@ -123,6 +131,7 @@ def _save(data: dict, date_str: str) -> None:
 
 
 if __name__ == "__main__":
+    # From baseball/: python -m pipeline.lineup_fetcher (it imports pipeline.stats_fetcher)
     lineups = fetch_lineups()
     print()
     for game_pk, game in lineups.items():

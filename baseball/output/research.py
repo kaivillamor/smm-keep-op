@@ -46,6 +46,18 @@ RESEARCH_DB = os.getenv("RESEARCH_DB_PATH") or "data/history/research.db"
 # are TAGGED rather than date-filtered, because an implicit cutoff is something a future
 # reader has to remember (§29).
 
+# The rows that count as evidence about the model: everything but the postseason, whose
+# base rate (57.6% in 2026, against 64.5%) is a different regime (§29). NULL-phase rows
+# stay IN, so a season whose POSTSEASON_START is not yet recorded still reports, and
+# report() counts them so they cannot pass unnoticed. The single definition: the
+# dashboard (web/app.py) imports it. `IS NOT`, not `!=`, which would drop the NULLs.
+EVIDENCE_SQL = "season_phase IS NOT 'postseason'"
+
+# When the slate-date row key shipped (633a1a3). Rows written before it carry the
+# COLLECTION date; no row was written between 00:59 and 19:00 UTC that day, so the
+# exact minute cannot misfile one. Used by the date repairs in _connect().
+_SLATE_KEY_FIX = "2026-09-30T10:33"
+
 
 def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     # A mounted volume starts empty, so the parent dir may not exist yet.
@@ -71,8 +83,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             pitcher_name  TEXT,
             model_prob    REAL,            -- final prediction (base_prob + owner_adj)
             calibrated_prob REAL,          -- model_prob shrunk toward the base rate. THIS
-                                           --  is the number the betting gate compares
-                                           --  against MIN_HIT_PROB, not model_prob.
+                                           --  is the number the per-leg EV gate compares
+                                           --  with each leg's price, not model_prob.
                                            --  Computed since 2026-09-09 but discarded
                                            --  until 2026-09-30, which is how a gate that
                                            --  could not fire at any input stayed hidden
@@ -173,7 +185,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
         "WHERE book_odds IS NOT NULL AND (book IS NULL OR book = 'fanduel_feed_suspect') "
         "AND created_at >= '2026-09-17T19:00'")
 
-    # ── De-duplicate the collection-date key (one-time, idempotent) ────────────────
+    # ── De-duplicate on the natural key (idempotent) ─────────────────────────────
     # `date` was `date.today()` — the COLLECTION date — inside
     # UNIQUE(date, game_pk, batter_id). Collection runs ~19:00-02:00 UTC, so a late game
     # scored either side of UTC midnight was inserted TWICE under two dates: 678 excess
@@ -181,9 +193,14 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     # n and narrowed every confidence interval by ~12% (§29).
     #
     # A batter appears once per game, so (game_pk, batter_id) is the true natural key. The
-    # surviving row is the LAST logged (freshest lineup and stats), and its date is
-    # repaired to the earliest of the group — which is the real slate, since the spurious
-    # copy is always the one written after midnight.
+    # surviving row is the LAST logged (freshest lineup and stats). How it is dated depends
+    # on when the group was written:
+    #   before _SLATE_KEY_FIX — the earliest date of the group, which is the real slate,
+    #     since the spurious copy is always the one written after midnight;
+    #   after it — its own date. Dates now come from first pitch, so one game on two dates
+    #     is a RESCHEDULED game and the last row logged is the makeup's. Applying the old
+    #     rule to everything dated 849817's replay (postponed 10-16, played 10-18) back to
+    #     10-16, under the old reason, and the grader then voided all 12 real predictions.
     #
     # Losing rows are ARCHIVED, not dropped (§28's precedent: rows hold valid model data).
     # Archived as JSON so this table can never break when predictions gains a column.
@@ -200,7 +217,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
         );
     """)
     dupes = conn.execute("""
-        SELECT game_pk, batter_id, MIN(date) AS slate, MAX(id) AS keep_id, COUNT(*) AS n
+        SELECT game_pk, batter_id, MIN(date) AS slate, MAX(id) AS keep_id, COUNT(*) AS n,
+               MAX(created_at) AS last_written
         FROM predictions
         GROUP BY game_pk, batter_id
         HAVING n > 1
@@ -208,8 +226,11 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     if dupes:
         import json as _json
         _now = datetime.now(timezone.utc).isoformat()
-        _archived = 0
+        _archived: dict[str, int] = {}
         for _d in dupes:
+            pre_fix = _d["last_written"] < _SLATE_KEY_FIX
+            reason = ("collection-date duplicate (pre-2026-09-30)" if pre_fix
+                      else "rescheduled game — superseded by the makeup-date row")
             losers = conn.execute(
                 "SELECT * FROM predictions WHERE game_pk=? AND batter_id=? AND id<>?",
                 (_d["game_pk"], _d["batter_id"], _d["keep_id"])).fetchall()
@@ -219,17 +240,39 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                     "(id, game_pk, batter_id, date, created_at, archived_at, reason, row_json) "
                     "VALUES (?,?,?,?,?,?,?,?)",
                     (_row["id"], _row["game_pk"], _row["batter_id"], _row["date"],
-                     _row["created_at"], _now, "collection-date duplicate (pre-2026-09-30)",
+                     _row["created_at"], _now, reason,
                      _json.dumps({k: _row[k] for k in _row.keys()})))
-                _archived += 1
+                _archived[reason] = _archived.get(reason, 0) + 1
             # DELETE before the date repair: updating the survivor first would collide with
             # the row still occupying (date, game_pk, batter_id).
             conn.execute(
                 "DELETE FROM predictions WHERE game_pk=? AND batter_id=? AND id<>?",
                 (_d["game_pk"], _d["batter_id"], _d["keep_id"]))
-            conn.execute("UPDATE predictions SET date=? WHERE id=?", (_d["slate"], _d["keep_id"]))
-        print(f"[research] de-duplicated {_archived} collection-date rows "
-              f"({len(dupes)} matchups); archived to predictions_superseded", flush=True)
+            if pre_fix:
+                conn.execute("UPDATE predictions SET date=? WHERE id=?",
+                             (_d["slate"], _d["keep_id"]))
+        for reason, n in _archived.items():
+            print(f"[research] archived {n} row(s) to predictions_superseded: {reason}",
+                  flush=True)
+
+    # Pre-fix games SPLIT across two dates: one lineup scored before UTC midnight, the
+    # other after, so one team's batters sit under the slate and the other's under the
+    # next day. No batter has two rows, so the pass above never saw them — 55 rows in 10
+    # games kept the collection date. Each game's earliest date is its real slate, checked
+    # against MLB's schedule for every game of 09-01..10-31. Bounded on created_at, so it
+    # cannot touch a row keyed by first pitch, where two dates mean a reschedule.
+    split = conn.execute("""
+        SELECT game_pk, MIN(date) AS slate FROM predictions
+        WHERE created_at < ?
+        GROUP BY game_pk HAVING COUNT(DISTINCT date) > 1
+    """, (_SLATE_KEY_FIX,)).fetchall()
+    for _g in split:
+        conn.execute("UPDATE predictions SET date=? "
+                     "WHERE game_pk=? AND created_at < ? AND date <> ?",
+                     (_g["slate"], _g["game_pk"], _SLATE_KEY_FIX, _g["slate"]))
+    if split:
+        print(f"[research] re-dated {len(split)} pre-fix game(s) split across two slates",
+              flush=True)
 
     # Backfill season_phase for every row that predates the column.
     conn.execute("UPDATE predictions SET season_phase = CASE "
@@ -305,77 +348,105 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
 
 def grade_predictions(db_path: str = RESEARCH_DB) -> int:
     """Grades pending predictions. Fetches ONE box score per game (not per batter),
-    so a 180-prediction slate costs ~15 API calls rather than 180."""
+    so a 180-prediction slate costs ~15 API calls rather than 180.
+
+    One connection for the run. Each _connect() re-runs every migration and the duplicate
+    scan, and this used to open one per game. Commits per game, so a crash keeps what was
+    graded, and no write is ever held open across a network call.
+    """
     import requests
     from output.result_tracker import _game_result_state
 
     conn = _connect(db_path)
-    pending = conn.execute(
-        "SELECT id, game_pk, batter_id, batter_name FROM predictions WHERE outcome IS NULL"
-    ).fetchall()
-    conn.close()
-    if not pending:
-        print("[research] no pending predictions.")
-        return 0
+    try:
+        pending = conn.execute(
+            "SELECT id, date, game_pk, batter_id, batter_name FROM predictions "
+            "WHERE outcome IS NULL"
+        ).fetchall()
+        if not pending:
+            print("[research] no pending predictions.")
+            return 0
 
-    by_game: dict[int, list] = {}
-    for r in pending:
-        by_game.setdefault(r["game_pk"], []).append(r)
+        # Keyed by slate as well as game: a rescheduled game is two games for grading —
+        # the postponed date's rows void, the makeup's grade (_game_result_state).
+        by_game: dict[tuple[int, str], list] = {}
+        for r in pending:
+            by_game.setdefault((r["game_pk"], r["date"]), []).append(r)
 
-    graded = 0
-    for game_pk, rows in by_game.items():
-        state = _game_result_state(game_pk)
-        if state == "pending":
-            continue
-        conn = _connect(db_path)
-        if state == "no_contest":
-            conn.executemany("UPDATE predictions SET outcome='void' WHERE id=?",
-                             [(r["id"],) for r in rows])
-            conn.commit(); conn.close()
-            graded += len(rows)
-            continue
+        graded = voided_dnp = 0
+        for (game_pk, slate), rows in by_game.items():
+            state = _game_result_state(game_pk, slate)
+            if state == "pending":
+                continue
+            if state == "no_contest":
+                conn.executemany("UPDATE predictions SET outcome='void' WHERE id=?",
+                                 [(r["id"],) for r in rows])
+                conn.commit()
+                graded += len(rows)
+                continue
 
-        try:
-            resp = requests.get(
-                f"https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore", timeout=15)
-            resp.raise_for_status()
-            players = {}
-            for side in ("home", "away"):
-                players.update(resp.json().get("teams", {}).get(side, {}).get("players", {}))
-        except Exception as e:
-            print(f"[research] box score fetch failed ({game_pk}): {e}")
-            conn.close()
-            continue
+            try:
+                resp = requests.get(
+                    f"https://statsapi.mlb.com/api/v1/game/{game_pk}/boxscore", timeout=15)
+                resp.raise_for_status()
+                players = {}
+                for side in ("home", "away"):
+                    players.update(resp.json().get("teams", {}).get(side, {}).get("players", {}))
+            except Exception as e:
+                print(f"[research] box score fetch failed ({game_pk}): {e}")
+                continue
 
-        for r in rows:
-            p = players.get(f"ID{r['batter_id']}")
-            hits = (p or {}).get("stats", {}).get("batting", {}).get("hits") if p else None
-            if hits is None:
-                continue   # did not appear (scratched / never batted)
-            conn.execute("UPDATE predictions SET outcome=?, actual_hits=? WHERE id=?",
-                         ("win" if int(hits) >= 1 else "loss", int(hits), r["id"]))
-            graded += 1
-        conn.commit()
+            for r in rows:
+                p = players.get(f"ID{r['batter_id']}")
+                hits = (p or {}).get("stats", {}).get("batting", {}).get("hits") if p else None
+                if hits is not None:
+                    conn.execute("UPDATE predictions SET outcome=?, actual_hits=? WHERE id=?",
+                                 ("win" if int(hits) >= 1 else "loss", int(hits), r["id"]))
+                    graded += 1
+                elif players:
+                    # Final, the box score is populated, and he has no batting line: he
+                    # never batted (scratched, or out before his first PA). Void, as the
+                    # book voids a prop on a player who does not play. Left pending, these
+                    # rows were re-fetched on every run, forever. An EMPTY box score is a
+                    # bad response rather than an answer, so it stays pending and retries.
+                    conn.execute("UPDATE predictions SET outcome='void' WHERE id=?", (r["id"],))
+                    graded += 1
+                    voided_dnp += 1
+            conn.commit()
+    finally:
         conn.close()
 
-    print(f"[research] graded {graded} prediction(s).")
+    print(f"[research] graded {graded} prediction(s)"
+          + (f", {voided_dnp} void as did-not-bat" if voided_dnp else "") + ".")
     return graded
 
 
 def report(db_path: str = RESEARCH_DB) -> None:
     """Calibration + ranking-signal report. The ranking test is the important one:
-    a model worth betting has its higher-probability half hit MORE often."""
+    a model worth betting has its higher-probability half hit MORE often.
+
+    Reads the evidence rows only (EVIDENCE_SQL: everything but the postseason), the same
+    rows the dashboard reports."""
     conn = _connect(db_path)
     rows = [dict(r) for r in conn.execute(
         "SELECT model_prob p, outcome FROM predictions "
-        "WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL")]
-    total = conn.execute("SELECT COUNT(*) c FROM predictions").fetchone()["c"]
+        f"WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL AND {EVIDENCE_SQL}")]
+    total = conn.execute(
+        f"SELECT COUNT(*) c FROM predictions WHERE {EVIDENCE_SQL}").fetchone()["c"]
+    apart = conn.execute(
+        f"SELECT COUNT(*) c FROM predictions WHERE NOT ({EVIDENCE_SQL})").fetchone()["c"]
+    unknown = conn.execute(
+        "SELECT COUNT(*) c FROM predictions WHERE season_phase IS NULL").fetchone()["c"]
     conn.close()
 
     w = 56
     print(f"\n{'=' * w}\n  MODEL CALIBRATION (research only — not bets)\n{'=' * w}")
     print(f"  predictions logged : {total}")
     print(f"  graded             : {len(rows)}")
+    if apart:
+        print(f"  postseason, apart  : {apart}  (a different regime, not evidence — §29)")
+    if unknown:
+        print(f"  phase unknown      : {unknown}  (counted in: set POSTSEASON_START for its season)")
     if len(rows) < 20:
         print(f"\n  Need ~200+ graded predictions before this means anything.")
         print(f"{'=' * w}\n")
@@ -416,9 +487,13 @@ def report(db_path: str = RESEARCH_DB) -> None:
     _se = math.sqrt(lo_rate * (1 - lo_rate) / max(half, 1)
                     + hi_rate * (1 - hi_rate) / max(n - half, 1)) * 100
     ci_lo, ci_hi = gap - 1.96 * _se, gap + 1.96 * _se
+    # "Usable" reads the LOWER BOUND, as the dashboard's verdictFor() has since §29 (twin:
+    # USABLE_GAP = 0.08 in web/frontend/src/App.jsx). On the point estimate, more data
+    # that tightened the interval and raised its floor could still downgrade the verdict.
+    usable_gap = 8.0
     verdict = ("inverted — ranks WORSE than chance" if ci_hi < 0 else
                "inconclusive — interval still contains zero" if ci_lo <= 0 else
-               "usable signal" if gap >= 8 else "weak but real signal")
+               "weak but real signal" if ci_lo < usable_gap else "usable signal")
     print(f"    gap: {gap:+.1f} pts   95% CI [{ci_lo:+.1f}, {ci_hi:+.1f}]")
     print(f"    →  {verdict}")
     print(f"{'=' * w}\n")
@@ -441,7 +516,7 @@ def compare_owner_logic(db_path: str = RESEARCH_DB) -> None:
     rows = [dict(r) for r in conn.execute(
         "SELECT model_prob, base_prob, owner_adj, outcome FROM predictions "
         "WHERE outcome IN ('win','loss') AND base_prob IS NOT NULL "
-        "  AND model_prob IS NOT NULL")]
+        f"  AND model_prob IS NOT NULL AND {EVIDENCE_SQL}")]
     conn.close()
 
     w = 56

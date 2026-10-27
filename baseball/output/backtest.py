@@ -1,7 +1,6 @@
-import json
 import os
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 # NOTE: parlay_builder is imported lazily inside the logging functions below, not
 # here at module top. Running `python output/backtest.py summary` executes this
@@ -76,7 +75,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             llm_downgraded INTEGER DEFAULT 0,
             llm_reason    TEXT,
             outcome       TEXT    DEFAULT NULL,  -- 'win' | 'loss' | 'push'
-            closing_odds  INTEGER DEFAULT NULL,  -- for CLV calculation
+            closing_odds  INTEGER DEFAULT NULL,  -- never written: game lines retired first
             created_at    TEXT    NOT NULL
         );
 
@@ -171,78 +170,21 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # Same provenance backfill as research.py — see the note there. hr_prop_candidates is
     # doubly ambiguous: DraftKings prices were used as a FanDuel stand-in when FanDuel had
     # no line, and were relabelled 'fanduel', so the two sources are now indistinguishable.
+    #
+    # Bounded at the 2026-09-17 fix, as research.py's is. Unbounded, it stamped any later
+    # price that reached the table without a book as the broken feed's — and the odds
+    # backfills in log_hr_candidates and log_hit_parlay wrote exactly that (the twin of
+    # research.py's ON CONFLICT bug). They now carry `book`.
     for _t in ("hit_legs", "hr_prop_candidates"):
         conn.execute(f"UPDATE {_t} SET book = 'fanduel_feed_suspect' "
-                     f"WHERE book_odds IS NOT NULL AND book IS NULL")
+                     f"WHERE book_odds IS NOT NULL AND book IS NULL "
+                     f"AND created_at < '2026-09-17T19:00'")
     conn.commit()
 
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-
-def log_parlays(parlays: list[dict], db_path: str = DB_PATH) -> list[int]:
-    """
-    Saves the day's generated parlays (2-leg pairs) and their legs to the database.
-    Returns the parlay IDs. Skips if any parlay was already saved today.
-    """
-    if not parlays:
-        return []
-    conn  = _connect(db_path)
-    today = _slate_today()
-
-    existing = conn.execute(
-        "SELECT id FROM parlays WHERE date=? LIMIT 1", (today,)
-    ).fetchone()
-    if existing:
-        print(f"[backtest] Parlay(s) already logged for {today} — skipping.")
-        conn.close()
-        return []
-
-    now = datetime.now(timezone.utc).isoformat()
-    ids = [_insert_parlay(conn, p, now) for p in parlays]
-    conn.commit()
-    conn.close()
-    return ids
-
-
-def _insert_parlay(conn: sqlite3.Connection, parlay: dict, now: str) -> int:
-    today = _slate_today()
-    cur = conn.execute(
-        """INSERT INTO parlays (date, num_legs, combined_odds, total_edge, created_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (today, parlay["num_legs"], parlay["combined_odds"], parlay["total_edge"], now),
-    )
-    parlay_id = cur.lastrowid
-
-    for leg in parlay.get("legs", []):
-        conn.execute(
-            """INSERT INTO legs
-               (parlay_id, game_id, home_team, away_team, bet_type, side, team,
-                display, edge, odds, book, line, llm_downgraded, llm_reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                parlay_id,
-                leg.get("game_id"),
-                leg.get("home_team"),
-                leg.get("away_team"),
-                leg.get("bet_type"),
-                leg.get("side"),
-                leg.get("team"),
-                leg.get("display"),
-                leg.get("edge"),
-                leg.get("odds"),
-                leg.get("book"),
-                leg.get("line"),
-                int(leg.get("llm_downgraded", False)),
-                leg.get("llm_reason"),
-                now,
-            ),
-        )
-
-    print(f"[backtest] Logged parlay #{parlay_id} ({parlay['num_legs']} legs, {_fmt_odds(parlay['combined_odds'])})")
-    return parlay_id
-
 
 def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> list[int]:
     """Persists HR prop gate candidates so result_tracker can grade them next morning.
@@ -263,8 +205,10 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> list[in
         for r in existing_rows:
             c = by_bid.get(str(r["batter_id"]))
             if c and c.get("book_odds") is not None and r["book_odds"] is None:
-                conn.execute("UPDATE hr_prop_candidates SET book_odds=?, book_implied=? WHERE id=?",
-                             (c["book_odds"], c.get("book_implied"), r["id"]))
+                # `book` travels with the price it describes — see _ensure_schema.
+                conn.execute("UPDATE hr_prop_candidates SET book_odds=?, book_implied=?, book=? "
+                             "WHERE id=?",
+                             (c["book_odds"], c.get("book_implied"), c.get("book"), r["id"]))
                 backfilled += 1
         if backfilled:
             conn.commit()
@@ -405,9 +349,11 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
                 continue
             cur = conn.execute("SELECT book_odds FROM hit_legs WHERE id=?", (row_id,)).fetchone()
             if cur["book_odds"] is None:
+                # `book` travels with the price it describes — see _ensure_schema.
                 conn.execute(
-                    "UPDATE hit_legs SET book_odds=?, book_implied=?, ev=? WHERE id=?",
-                    (leg["book_odds"], leg.get("book_implied"), leg.get("ev"), row_id),
+                    "UPDATE hit_legs SET book_odds=?, book_implied=?, book=?, ev=? WHERE id=?",
+                    (leg["book_odds"], leg.get("book_implied"), leg.get("book"),
+                     leg.get("ev"), row_id),
                 )
                 backfilled += 1
         if backfilled:
@@ -568,6 +514,7 @@ def record_hit_odds(date_str: str, parlay_num: int, odds: int,
     print(f"[backtest] Recorded {odds_str} odds for hit parlay #{parlay_num} on {date_str}")
 
     if row["outcome"] == "win" and row["payout"] is None:
+        from parlay.parlay_builder import _american_to_decimal
         # payout column = PROFIT (winnings), so subtract the stake back out
         profit = round(row["stake"] * (_american_to_decimal(odds) - 1.0), 2)
         conn.execute("UPDATE hit_parlays SET payout=? WHERE id=?", (profit, row["id"]))
@@ -575,26 +522,6 @@ def record_hit_odds(date_str: str, parlay_num: int, odds: int,
 
     conn.commit()
     conn.close()
-
-
-def _american_to_decimal(odds: int) -> float:
-    if odds > 0:
-        return odds / 100.0 + 1.0
-    return 100.0 / abs(odds) + 1.0
-
-
-# ---------------------------------------------------------------------------
-# Outcome updates (run after games resolve)
-# ---------------------------------------------------------------------------
-
-def get_pending_parlays(db_path: str = DB_PATH) -> list[dict]:
-    """Returns all parlays without a recorded outcome yet."""
-    conn  = _connect(db_path)
-    rows  = conn.execute(
-        "SELECT * FROM parlays WHERE outcome IS NULL ORDER BY date DESC"
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -625,12 +552,6 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
     gp_returned  = sum((p["payout"] or 0) * 10.0 for p in gp_counted if p["outcome"] == "win")
     gp_net       = gp_returned - gp_staked
     roi          = gp_net / gp_staked if gp_staked else 0
-
-    clv_legs = [l for l in legs if l["closing_odds"] is not None]
-    avg_clv  = (
-        sum(closing_line_value(dict(l)) for l in clv_legs) / len(clv_legs)
-        if clv_legs else None
-    )
 
     ml_legs    = [l for l in legs if l["bet_type"] == "ml"]
     total_legs = [l for l in legs if l["bet_type"] == "total"]
@@ -687,7 +608,6 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
         "gp_staked":            round(gp_staked, 2),
         "gp_net":               round(gp_net, 2),
         "roi":                  round(roi, 4),
-        "avg_clv":              round(avg_clv, 4) if avg_clv is not None else None,
         "ml_win_rate":          _win_rate(ml_legs),
         "ml_legs_graded":       len([l for l in ml_legs if l["outcome"] in ("win", "loss")]),
         "total_win_rate":       _win_rate(total_legs),
@@ -725,18 +645,6 @@ def evaluate_results(db_path: str = DB_PATH) -> dict:
     return summary
 
 
-def closing_line_value(leg: dict) -> float:
-    """
-    CLV = implied probability at our odds - implied probability at closing odds.
-    Positive CLV means we got better value than the closing market offered.
-    """
-    our_odds     = leg.get("odds")
-    closing_odds = leg.get("closing_odds")
-    if not our_odds or not closing_odds:
-        return 0.0
-    return _implied_prob(our_odds) - _implied_prob(closing_odds)
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -746,16 +654,6 @@ def _win_rate(legs: list) -> float | None:
     if not resolved:
         return None
     return round(sum(1 for l in resolved if l["outcome"] == "win") / len(resolved), 4)
-
-
-def _implied_prob(american_odds: int) -> float:
-    if american_odds > 0:
-        return 100 / (american_odds + 100)
-    return abs(american_odds) / (abs(american_odds) + 100)
-
-
-def _fmt_odds(odds: int) -> str:
-    return f"+{odds}" if odds > 0 else str(odds)
 
 
 def _print_pending_payouts(db_path: str = DB_PATH) -> None:
@@ -796,8 +694,6 @@ def _print_summary(s: dict) -> None:
               f"({s['gp_wins'] / max(s['gp_wins'] + s['gp_losses'], 1) * 100:.0f}%)")
         print(f"  Staked:     ${s['gp_staked']:.2f}")
         print(f"  Net P&L:    ${s['gp_net']:+.2f}  ({s['roi']*100:+.1f}% ROI)")
-    if s["avg_clv"] is not None:
-        print(f"  Avg CLV:    {s['avg_clv'] * 100:+.2f}%")
     if s["ml_win_rate"] is not None:
         print(f"  ML legs:    {s['ml_win_rate'] * 100:.1f}%  ({s['ml_legs_graded']} graded)")
     if s["total_win_rate"] is not None:
@@ -849,13 +745,8 @@ def _print_summary(s: dict) -> None:
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "summary":
-        evaluate_results()
-    else:
-        pending = get_pending_parlays()
-        if not pending:
-            print("No pending parlays.")
-        else:
-            print(f"\n{len(pending)} pending parlay(s) awaiting outcomes:\n")
-            for p in pending:
-                print(f"  #{p['id']} — {p['date']} | {p['num_legs']} legs | {_fmt_odds(p['combined_odds'])}")
+    # `summary` is the only command. With no argument this used to list pending game
+    # parlays; game lines are retired and none are pending, so it summarises instead.
+    if len(sys.argv) > 1 and sys.argv[1] != "summary":
+        sys.exit("usage: python output/backtest.py [summary]")
+    evaluate_results()

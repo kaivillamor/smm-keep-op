@@ -107,9 +107,6 @@ def normalize_name(name: str) -> str:
     return n.lower().replace(".", "").replace("'", "").replace("-", " ").strip()
 
 
-# Restrict to a single book so a 2-leg parlay is actually placeable (you can't
-# parlay a DraftKings leg with a FanDuel leg). Default FanDuel — the only book the
-# user bets. Pass book="draftkings" or book=None (best-of-all) to widen coverage.
 # Preferred book for PRICING. DraftKings, not FanDuel — verified against the live books
 # on 2026-09-17: the provider reported FanDuel at -350/-290 for Vilade/Pasquantino when
 # FanDuel actually showed -210/-220, while its DraftKings prices (-188/-172) matched
@@ -121,7 +118,6 @@ def normalize_name(name: str) -> str:
 # Re-verify periodically: if the provider fixes its FanDuel feed, flip these back.
 PREFERRED_BOOK = "draftkings"
 FALLBACK_BOOK  = "fanduel"
-DEFAULT_BOOK   = PREFERRED_BOOK
 
 
 def _fetch_over05(market: str, label: str, book: str | None,
@@ -190,7 +186,7 @@ def _fetch_over05(market: str, label: str, book: str | None,
     return result
 
 
-def fetch_hit_prop_odds(book: str | None = DEFAULT_BOOK) -> dict:
+def fetch_hit_prop_odds(book: str | None = PREFERRED_BOOK) -> dict:
     """1+ hit odds (player_hits, Over 0.5).
 
     DraftKings preferred (verified accurate), FanDuel borrowed only where DraftKings has
@@ -201,7 +197,7 @@ def fetch_hit_prop_odds(book: str | None = DEFAULT_BOOK) -> dict:
     return _fetch_over05("player_hits", "hit", book, fallback=fallback)
 
 
-def fetch_hr_prop_odds(book: str | None = DEFAULT_BOOK) -> dict:
+def fetch_hr_prop_odds(book: str | None = PREFERRED_BOOK) -> dict:
     """1+ home run odds (player_home_runs, Over 0.5).
 
     Borrowed prices used to be relabelled as FanDuel's, on the reasoning that the parlay
@@ -216,7 +212,7 @@ def fetch_hr_prop_odds(book: str | None = DEFAULT_BOOK) -> dict:
 
 if __name__ == "__main__":
     import sys
-    _book = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BOOK
+    _book = sys.argv[1] if len(sys.argv) > 1 else PREFERRED_BOOK
     board = fetch_hit_prop_odds(book=None if _book == "all" else _book)
     for k, v in sorted(board.items(), key=lambda kv: kv[1]["implied"] or 0, reverse=True):
         o = v["odds"]
