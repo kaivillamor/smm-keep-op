@@ -19,6 +19,9 @@
   --good:    #4ade80;
   --warn:    #fbbf24;
   --bad:     #f87171;
+  /* Player names. Not --good: a name in the win colour reads as a win, a positive
+     edge or a cleared gate. Lighter and yellower, so the two never match. */
+  --player:  #a5ef8b;
   /* Radii survive only where a control needs a visible edge (inputs, buttons).
      Data never gets a corner. */
   --r: 4px;
@@ -286,7 +289,7 @@ table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
   font-size: .83rem;
 }
 .hits li:hover { background: var(--surface); }
-.hit-name  { font-weight: 600; }
+.hit-name  { font-weight: 600; color: var(--player); }
 .hit-count { color: var(--good); font-weight: 600; font-variant-numeric: tabular-nums; }
 .hit-meta  { color: var(--muted); }
 .hit-date  { color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
