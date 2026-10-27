@@ -26,6 +26,9 @@
 
 * { box-sizing: border-box; }
 
+/* iOS enlarges text in landscape unless told not to. No effect on a desktop. */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -324,9 +327,77 @@ select {
 .slate-meta strong { color: var(--text); font-weight: 600; }
 .parlay { margin: 0 0 1.4rem; }
 .nowrap { white-space: nowrap; }
-/* Wide tables scroll inside their own box on a phone rather than being cut off at the
-   edge. Narrow screens only: a scroll container also captures `position: sticky`, and
-   on a desktop the sticky column heads are worth more than the wrapper. */
+
+/* ── phones ──────────────────────────────────────────────────────────────────
+   Phone width only, so the desktop layout above is untouched by construction.
+   Tables keep their columns: each scrolls sideways inside its own box with the
+   first column pinned, which is Baseball-Reference's phone treatment, the same
+   reference the density came from. Nothing may widen the page itself: the slate
+   health table did, at ~590px, and the whole page panned sideways, header and
+   all. */
 @media (max-width: 40rem) {
+  main { padding: 1.25rem 1rem 3rem; }
+
+  /* Title and nav no longer fit on one line, and the nowrap nav squeezed the
+     title into three. Stack them; the links wrap if they must. */
+  .bar { flex-direction: column; align-items: flex-start; gap: .25rem; }
+  h1 { font-size: 1rem; }
+  .bar nav { flex-wrap: wrap; gap: 0 1.4rem; }
+  .bar nav a { padding: .45rem 0; }
+
+  /* Two figures a row. Flex-wrap left the first figure of each wrapped row with a
+     stray left rule and indent, and no rule between the rows. */
+  .kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi { min-width: 0; padding: .6rem 0 .6rem .9rem; }
+  .kpi:nth-child(odd) { border-left: 0; padding-left: 0; }
+  .kpi:nth-child(n+3) { border-top: 1px solid var(--line); }
+
+  /* Narrow screens only: a scroll container also captures `position: sticky`, and
+     on a desktop the sticky column heads are worth more than the wrapper. */
   .scroll-x { overflow-x: auto; }
+  /* Natural width, scrolled, not squeezed to fit. Squeezing broke every name at
+     every space ("Amen / Thompson / HOU vs / ATL") and still did not fit. */
+  .scroll-x table, .scroll-x table.narrow {
+    width: max-content; min-width: 100%;
+    /* Collapsed borders are painted by the table, not the cell, so a pinned cell
+       would slide off its own row rule. Separate borders travel with the cell. */
+    border-collapse: separate; border-spacing: 0;
+  }
+  table.narrow th, table.narrow td { padding-left: .55rem; }
+  /* Figures sit on the name's line, not centred against name and team. */
+  .scroll-x td { vertical-align: baseline; }
+
+  /* The pinned column: opaque so the rest slides under it, with a hairline for the
+     edge it slides under. */
+  .scroll-x th:first-child, .scroll-x td:first-child {
+    position: sticky; left: 0; z-index: 2;
+    background: var(--bg);
+    padding-right: .7rem;
+    box-shadow: inset -1px 0 0 var(--line-strong);
+  }
+  .scroll-x table.slate tr.clears td:first-child {
+    box-shadow: inset 2px 0 0 var(--good), inset -1px 0 0 var(--line-strong);
+  }
+  /* Name on its own line with team, opponent and injury under it, capped so one
+     long name wraps rather than widening the column every row has to pin. */
+  .scroll-x td:first-child .hit-name { display: block; max-width: 7.5rem; }
+
+  /* iOS zooms into any focused field under 16px and leaves the page zoomed. */
+  select, .login-card input { font-size: 1rem; }
+
+  /* A bigger touch target without moving the underline: the hit area grows, the
+     drawn button does not. */
+  .link-btn { position: relative; }
+  .link-btn::after { content: ''; position: absolute; inset: -.45rem -.3rem; }
+  .filters { gap: .75rem 1rem; }
+
+  /* On iOS 100vh is the height with the toolbar hidden, which sat the card low. */
+  .login-screen { min-height: 100dvh; }
+  .login-bg .feed { height: 100dvh; }
+}
+
+/* Touch screens have no hover, so a tapped row would keep its wash until the next
+   tap somewhere else. */
+@media (hover: none) {
+  tbody tr:hover td, .hits li:hover { background: none; }
 }

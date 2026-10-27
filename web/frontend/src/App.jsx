@@ -63,52 +63,56 @@ function Kpi({ label, value, sub }) {
 function Buckets({ buckets, label = 'Predicted range' }) {
   if (!buckets?.length) return null
   return (
-    <table className="narrow">
-      <thead>
-        <tr>
-          <th>{label}</th>
-          <th className="n">N</th>
-          <th className="n">Predicted</th>
-          <th className="n">Actual</th>
-          <th className="n">Delta</th>
-        </tr>
-      </thead>
-      <tbody>
-        {buckets.map((b) => {
-          const delta = b.actual - b.predicted
-          return (
-            <tr key={b.range}>
-              <td>{b.range}</td>
-              <td className="n">{num(b.n)}</td>
-              <td className="n">{pct(b.predicted)}</td>
-              <td className="n">{pct(b.actual)}</td>
-              {/* Signed, so direction never rests on hue alone. */}
-              <td className={`n ${delta >= 0 ? 'good' : 'bad'}`}>{pts(delta)}</td>
-            </tr>
-          )
-        })}
-      </tbody>
-    </table>
+    <div className="scroll-x">
+      <table className="narrow">
+        <thead>
+          <tr>
+            <th>{label}</th>
+            <th className="n">N</th>
+            <th className="n">Predicted</th>
+            <th className="n">Actual</th>
+            <th className="n">Delta</th>
+          </tr>
+        </thead>
+        <tbody>
+          {buckets.map((b) => {
+            const delta = b.actual - b.predicted
+            return (
+              <tr key={b.range}>
+                <td>{b.range}</td>
+                <td className="n">{num(b.n)}</td>
+                <td className="n">{pct(b.predicted)}</td>
+                <td className="n">{pct(b.actual)}</td>
+                {/* Signed, so direction never rests on hue alone. */}
+                <td className={`n ${delta >= 0 ? 'good' : 'bad'}`}>{pts(delta)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
 function Days({ days }) {
   if (!days?.length) return null
   return (
-    <table className="narrow">
-      <thead>
-        <tr><th>Date</th><th className="n">Logged</th><th className="n">Graded</th></tr>
-      </thead>
-      <tbody>
-        {days.map((d) => (
-          <tr key={d.date}>
-            <td>{d.date}</td>
-            <td className="n">{num(d.n)}</td>
-            <td className="n">{num(d.graded ?? 0)}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="scroll-x">
+      <table className="narrow">
+        <thead>
+          <tr><th>Date</th><th className="n">Logged</th><th className="n">Graded</th></tr>
+        </thead>
+        <tbody>
+          {days.map((d) => (
+            <tr key={d.date}>
+              <td>{d.date}</td>
+              <td className="n">{num(d.n)}</td>
+              <td className="n">{num(d.graded ?? 0)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -120,35 +124,37 @@ function Days({ days }) {
 function Health({ rows }) {
   if (!rows?.length) return <p className="muted">Nothing collected yet.</p>
   return (
-    <table className="narrow">
-      <thead>
-        <tr>
-          <th>Slate</th>
-          <th className="n">Logged</th>
-          <th className="n">Scored</th>
-          <th className="n">Priced</th>
-          <th className="n">Graded</th>
-          <th className="n">Void</th>
-          <th className="n">Pending</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((d) => (
-          <tr key={d.date}>
-            <td>{d.date}</td>
-            <td className="n">{num(d.logged)}</td>
-            <td className="n">{num(d.scored)}</td>
-            <td className="n">{num(d.priced)}</td>
-            <td className="n">{num(d.graded)}</td>
-            <td className="n dim">{num(d.void)}</td>
-            {/* Worded as well as coloured, so a stuck slate reads without the hue. */}
-            <td className={`n${d.stale ? ' warn' : ''}`}>
-              {num(d.pending)}{d.stale ? ' · stuck' : ''}
-            </td>
+    <div className="scroll-x">
+      <table className="narrow">
+        <thead>
+          <tr>
+            <th>Slate</th>
+            <th className="n">Logged</th>
+            <th className="n">Scored</th>
+            <th className="n">Priced</th>
+            <th className="n">Graded</th>
+            <th className="n">Void</th>
+            <th className="n">Pending</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((d) => (
+            <tr key={d.date}>
+              <td>{d.date}</td>
+              <td className="n">{num(d.logged)}</td>
+              <td className="n">{num(d.scored)}</td>
+              <td className="n">{num(d.priced)}</td>
+              <td className="n">{num(d.graded)}</td>
+              <td className="n dim">{num(d.void)}</td>
+              {/* Worded as well as coloured, so a stuck slate reads without the hue. */}
+              <td className={`n${d.stale ? ' warn' : ''}`}>
+                {num(d.pending)}{d.stale ? ' · stuck' : ''}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 

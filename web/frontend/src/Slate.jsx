@@ -50,44 +50,46 @@ export default function Slate({ slate }) {
         )}
       </p>
 
-      <table className="slate">
-        <thead>
-          <tr>
-            <th>Batter</th>
-            <th>Vs</th>
-            <th className="n">Spot</th>
-            <th className="n">Model</th>
-            <th className="n">Calibrated</th>
-            <th className="n">Odds</th>
-            <th className="n">Implied</th>
-            <th className="n">Edge</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {legs.map((l, i) => (
-            <tr key={`${l.name}-${i}`} className={l.clears_gate ? 'clears' : undefined}>
-              <td>
-                <span className="hit-name">{l.name}</span>{' '}
-                <span className="hit-meta">{l.team}</span>
-              </td>
-              <td className="hit-meta">{l.pitcher || '—'}</td>
-              <td className="n">{l.spot ?? '—'}</td>
-              <td className="n">{pct(l.model_prob)}</td>
-              <td className="n">{pct(l.calibrated)}</td>
-              <td className="n">{american(l.odds)}</td>
-              <td className="n dim">{pct(l.book_implied)}</td>
-              {/* Signed number, so direction is legible without the colour. */}
-              <td className={`n ${l.edge == null ? 'dim' : l.edge >= 0 ? 'good' : 'bad'}`}>
-                {pts(l.edge)}
-              </td>
-              <td className={l.clears_gate ? 'good' : 'blocked'}>
-                {l.clears_gate ? 'clears' : l.blocked_by || '—'}
-              </td>
+      <div className="scroll-x">
+        <table className="slate">
+          <thead>
+            <tr>
+              <th>Batter</th>
+              <th>Vs</th>
+              <th className="n">Spot</th>
+              <th className="n">Model</th>
+              <th className="n">Calibrated</th>
+              <th className="n">Odds</th>
+              <th className="n">Implied</th>
+              <th className="n">Edge</th>
+              <th>Status</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {legs.map((l, i) => (
+              <tr key={`${l.name}-${i}`} className={l.clears_gate ? 'clears' : undefined}>
+                <td>
+                  <span className="hit-name">{l.name}</span>{' '}
+                  <span className="hit-meta">{l.team}</span>
+                </td>
+                <td className="hit-meta">{l.pitcher || '—'}</td>
+                <td className="n">{l.spot ?? '—'}</td>
+                <td className="n">{pct(l.model_prob)}</td>
+                <td className="n">{pct(l.calibrated)}</td>
+                <td className="n">{american(l.odds)}</td>
+                <td className="n dim">{pct(l.book_implied)}</td>
+                {/* Signed number, so direction is legible without the colour. */}
+                <td className={`n ${l.edge == null ? 'dim' : l.edge >= 0 ? 'good' : 'bad'}`}>
+                  {pts(l.edge)}
+                </td>
+                <td className={l.clears_gate ? 'good' : 'blocked'}>
+                  {l.clears_gate ? 'clears' : l.blocked_by || '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       {slate.legs.length > 20 && (
         <button className="link-btn" onClick={() => setShowAll((v) => !v)}>
