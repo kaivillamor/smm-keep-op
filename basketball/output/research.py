@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 if __package__ is None and __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from model.prop_model import V2_FIT_ROWS, V2_INPUTS
 from parlay.method import (CONSISTENCY_L10, CONSISTENCY_L20, METHOD_MARKETS, SIXTH_MAN_MARKETS,
                            SIXTH_MAN_MINUTES, TRUST_MINUTES, untrusted)
 from pipeline.calendar import game_slate_date, season_phase, slate_date
@@ -76,6 +77,12 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                                                --  for two months (§28). Logged from row
                                                --  one here; an unattributed price is
                                                --  suspect by definition.
+            book_under_odds INTEGER,           -- the same line's UNDER price, logged from
+                                               --  2026-10-29 (the feed always had it; the
+                                               --  collector dropped it). With book_odds it
+                                               --  gives the book's fair, vig-free
+                                               --  probability: the baseline v2 is
+                                               --  pre-registered to beat (model/prop_model).
             calibrated_prob REAL,              -- model_prob shrunk toward the base rate.
                                                --  The number a betting gate compares,
                                                --  NOT model_prob. Baseball computed it
@@ -226,7 +233,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                       ("injury_status", "TEXT"), ("teammate_minutes_out", "REAL"),
                       ("teammate_usage_out", "REAL"), ("hit_l10", "REAL"),
                       ("hit_l20", "REAL"), ("sim_opp_avg", "REAL"),
-                      ("sim_opp_games", "INTEGER"), ("season_avg_raw", "REAL")):
+                      ("sim_opp_games", "INTEGER"), ("season_avg_raw", "REAL"),
+                      ("book_under_odds", "INTEGER")):
         if col not in cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {decl}")
     conn.commit()
@@ -254,7 +262,7 @@ _RUN_UPDATE = ", ".join(
 
 _FIELDS = ("game_id", "player_id", "player_name", "team", "opponent", "market", "line",
            "model_prob", "base_prob", "owner_adj", "calibrated_prob",
-           "book_odds", "book_implied", "book",
+           "book_odds", "book_implied", "book", "book_under_odds",
            "stats_season", "stat_sd",
            "season_avg", "recent_avg", "recent_games", "minutes_avg", "vs_opp_avg",
            "vs_opp_games", "usage_proxy", "days_rest", "is_home", "opp_allow_factor",
@@ -293,6 +301,10 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
            # that gained a price on a later run kept book=NULL and its provenance backfill
            # then stamped 219 good prices as coming from the discredited feed (§29).
            "  book=COALESCE(excluded.book, predictions.book), "
+           # The under refreshes only with the over, so a stored pair always comes from
+           # one run: a fair price built from two different runs' prices is neither's.
+           "  book_under_odds=CASE WHEN excluded.book_odds IS NOT NULL "
+           "    THEN excluded.book_under_odds ELSE predictions.book_under_odds END, "
            # The open columns keep the EXISTING value first — the reverse of the latest-
            # price columns above — so the first non-NULL observation sticks. A row first
            # logged before its price posted gets its open from the first run that sees one.
@@ -431,6 +443,120 @@ def _ranking_gap(rows: list[dict]) -> tuple[float, float, float, float, float]:
     return lo, hi, gap, gap - 1.96 * se, gap + 1.96 * se
 
 
+def _auc(scores: list[float], ys: list[int]) -> tuple[float, float, float]:
+    """(AUC, CI low, CI high). AUC is the chance a random over outscores a random under:
+    0.5 is a coin flip whatever the base rate, so it compares a model with a price fairly.
+    Tied scores share their average rank.
+
+    Hanley–McNeil's interval treats rows as independent, which they are not: players
+    recur. On 2026-10-28 a player-cluster bootstrap came out about 9% wider — close
+    enough for a report, not for a pre-registered test.
+    """
+    order = sorted(range(len(scores)), key=scores.__getitem__)
+    ranks = [0.0] * len(scores)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and scores[order[j + 1]] == scores[order[i]]:
+            j += 1
+        for k in order[i:j + 1]:
+            ranks[k] = (i + j) / 2 + 1
+        i = j + 1
+    n1 = sum(ys)
+    n0 = len(ys) - n1
+    if not n1 or not n0:
+        return math.nan, math.nan, math.nan
+    a = (sum(r for r, y in zip(ranks, ys) if y) - n1 * (n1 + 1) / 2) / (n1 * n0)
+    q1, q2 = a / (2 - a), 2 * a * a / (1 + a)
+    se = math.sqrt((a * (1 - a) + (n1 - 1) * (q1 - a * a) + (n0 - 1) * (q2 - a * a))
+                   / (n1 * n0))
+    return a, a - 1.96 * se, a + 1.96 * se
+
+
+def _inverse(m: list[list[float]]) -> list[list[float]]:
+    """Gauss–Jordan inverse of a small square matrix, with partial pivoting."""
+    n = len(m)
+    a = [row[:] + [float(i == j) for j in range(n)] for i, row in enumerate(m)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(a[r][c]))
+        a[c], a[p] = a[p], a[c]
+        a[c] = [v / a[c][c] for v in a[c]]
+        for r in range(n):
+            if r != c and a[r][c]:
+                f = a[r][c]
+                a[r] = [v - f * u for v, u in zip(a[r], a[c])]
+    return [row[n:] for row in a]
+
+
+def _logit_fit(xs: list[list[float]], ys: list[int]) -> tuple[list[float], list[float]]:
+    """Logistic regression by Newton–Raphson: (coefficients, standard errors), intercept
+    first. Dependency-free on purpose (numpy is not deployed), and meant for a handful
+    of columns, not as a general fitter."""
+    k = len(xs[0]) + 1
+    w = [0.0] * k
+    for _ in range(50):
+        g = [0.0] * k
+        h = [[0.0] * k for _ in range(k)]
+        for x, y in zip(xs, ys):
+            row = (1.0, *x)
+            p = 1 / (1 + math.exp(-sum(a * b for a, b in zip(w, row))))
+            for i in range(k):
+                g[i] += (y - p) * row[i]
+                for j in range(k):
+                    h[i][j] += p * (1 - p) * row[i] * row[j]
+        cov = _inverse(h)
+        step = [sum(c * gi for c, gi in zip(cov_row, g)) for cov_row in cov]
+        w = [a + s for a, s in zip(w, step)]
+        if max(abs(s) for s in step) < 1e-10:
+            break
+    return w, [math.sqrt(cov[i][i]) for i in range(k)]
+
+
+def _fair(over: int | None, under: int | None) -> float | None:
+    """The book's vig-free P(over), from both prices on one line; None without both."""
+    if over is None or under is None:
+        return None
+    imp = lambda o: abs(o) / (abs(o) + 100) if o < 0 else 100 / (o + 100)
+    return imp(over) / (imp(over) + imp(under))
+
+
+def _book_benchmark(rows: list[dict], w: int) -> None:
+    """The model against the book's own price, on the same graded rows.
+
+    The test a model has to pass before any other: does it rank props better than the
+    price does, and does it add anything once the price is known? On 2026-10-28 (2,707
+    graded rows) v1 did neither: AUC 0.514 against the price's 0.583, and a coefficient
+    beyond the price of -0.05, CI [-0.12, +0.03]. The over rate is not this test. Overs
+    hit under half the time whatever a model says, and the price already expects it.
+    """
+    logit = lambda q: math.log(min(max(q, 1e-3), 1 - 1e-3) / (1 - min(max(q, 1e-3), 1 - 1e-3)))
+    print(f"{'─' * w}\n  BOOK BENCHMARK (the bar any model must clear)")
+    print("    AUC = the chance an over outranks an under; 0.500 is a coin flip")
+    print(f"    {'':24}{'n':>5}   {'model AUC':<21}book AUC")
+    for label, key in (("over price, all priced", "book_implied"),
+                       ("fair price, two-sided", "fair")):
+        g = [r for r in rows if r[key] is not None]
+        if len(g) < 200:
+            print(f"    {label:24}{len(g):>5}   too few to read")
+            continue
+        ys = [r["y"] for r in g]
+        m, m_lo, m_hi = _auc([r["p"] for r in g], ys)
+        b, b_lo, b_hi = _auc([r[key] for r in g], ys)
+        print(f"    {label:24}{len(g):>5}   {m:.3f} [{m_lo:.3f}, {m_hi:.3f}]  "
+              f"{b:.3f} [{b_lo:.3f}, {b_hi:.3f}]")
+        coef, se = _logit_fit([[logit(r[key]), logit(r["p"])] for r in g], ys)
+        lo, hi = coef[2] - 1.96 * se[2], coef[2] + 1.96 * se[2]
+        verdict = ("adds to the price" if lo > 0 else
+                   "points the wrong way once the price is known" if hi < 0 else
+                   "adds nothing beyond the price")
+        print(f"      model beyond the price: {coef[2]:+.3f}, 95% CI [{lo:+.3f}, {hi:+.3f}]")
+        print(f"      →  {verdict}")
+    side = sum(r["y"] if r["p"] > 0.5 else 1 - r["y"] for r in rows) / len(rows)
+    under = 1 - sum(r["y"] for r in rows) / len(rows)
+    print(f"    the model's side wins {side * 100:.1f}%; "
+          f"the under every time wins {under * 100:.1f}%")
+
+
 def report(db_path: str = RESEARCH_DB) -> None:
     """Calibration + ranking-signal report. The ranking test is the important one:
     a model worth betting has its higher-probability half hit MORE often.
@@ -439,10 +565,18 @@ def report(db_path: str = RESEARCH_DB) -> None:
     is players it would never take. Whole-board figures follow as context."""
     conn = _connect(db_path)
     rows = [dict(r) for r in conn.execute(
-        "SELECT model_prob p, outcome, market, minutes_avg, hit_l10, hit_l20, book_implied "
+        "SELECT model_prob p, outcome, market, minutes_avg, hit_l10, hit_l20, book_implied, "
+        "       book_odds, book_under_odds "
         "FROM predictions WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL")]
     total = conn.execute("SELECT COUNT(*) c FROM predictions").fetchone()["c"]
+    # Rows v2's pre-registered fit may use: graded, priced on both sides, every input.
+    v2_rows = conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE outcome IN ('win','loss') "
+        "AND book_odds IS NOT NULL AND book_under_odds IS NOT NULL AND "
+        + " AND ".join(f"{c} IS NOT NULL" for c in V2_INPUTS)).fetchone()[0]
     conn.close()
+    for r in rows:
+        r["fair"] = _fair(r["book_odds"], r["book_under_odds"])
 
     w = 72
     print(f"\n{'=' * w}\n  MODEL CALIBRATION (research only — not bets)\n{'=' * w}")
@@ -505,6 +639,9 @@ def report(db_path: str = RESEARCH_DB) -> None:
                "usable signal" if gap >= 8 else "weak but real signal")
     print(f"    gap: {gap:+.1f} pts   95% CI [{ci_lo:+.1f}, {ci_hi:+.1f}]")
     print(f"    →  {verdict}")
+    _book_benchmark(rows, w)
+    print(f"{'─' * w}\n  v2 (pre-registered 2026-10-28, model/prop_model.py): "
+          f"{v2_rows:,} of {V2_FIT_ROWS:,}\n    qualifying graded rows before its fit")
     print(f"{'=' * w}\n")
 
 

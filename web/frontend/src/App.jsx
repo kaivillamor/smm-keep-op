@@ -8,6 +8,7 @@ import Slate from './Slate.jsx'
 const pct = (v) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`)
 const pts = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)} pts`)
 const num = (v) => (v == null ? '—' : v.toLocaleString())
+const ci = (lo, hi) => (lo == null ? '—' : `[${lo.toFixed(2)}, ${hi.toFixed(2)}]`)
 const signed = (v) => (v == null ? '—' : `${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}`)
 
 // The ranking gap is the number that decides whether the model is bettable at all, so
@@ -385,7 +386,25 @@ function NbaHome() {
       <Banner />
 
       {sum?.error && <p className="bad">{sum.error}</p>}
-      {sum && !sum.error && (sum.graded > 0 ? (
+      {/* The headline is the model against the book's price. The over rate used to be it,
+          and read as the model "underperforming": overs hit under half whatever a model
+          says, so it measures the props, not the model. */}
+      {sum && !sum.error && (sum.graded > 0 ? (sum.auc != null ? (
+        <Hero
+          label="Ranking skill, model vs the book's price"
+          value={`${sum.auc.toFixed(2)} vs ${sum.auc_book.toFixed(2)}`}
+          note={
+            <>
+              AUC, the chance an over outranks an under: 0.50 is a coin flip. Model{' '}
+              {ci(sum.auc_lo, sum.auc_hi)}, book {ci(sum.auc_book_lo, sum.auc_book_hi)} over{' '}
+              {num(sum.auc_n)} priced props
+              <br />
+              {pct(sum.actual)} went over; the model said {pct(sum.predicted)}
+              <span className="dim"> · {num(sum.logged)} logged</span>
+            </>
+          }
+        />
+      ) : (
         <Hero
           label="Over rate, graded props"
           value={pct(sum.actual)}
@@ -396,7 +415,7 @@ function NbaHome() {
             </>
           }
         />
-      ) : (
+      )) : (
         <p>
           {num(sum.logged)} props logged, none graded yet — grading runs at 11:00 UTC, once
           every game on the slate is final.

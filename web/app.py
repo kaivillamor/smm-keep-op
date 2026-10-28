@@ -9,6 +9,7 @@ service only is for ~2 minutes per run.
 Shows research/calibration data ONLY. bets.db (real money) never leaves the local
 machine and is not deployed, so there is nothing here that can mix real and simulated.
 """
+import math
 import os
 import hashlib
 import hmac
@@ -171,12 +172,38 @@ def _db():
     return conn
 
 
-def stats(db=_db, where: str = "") -> dict:
+def _auc(scores: list[float], ys: list[int]) -> tuple[float, float, float]:
+    """(AUC, CI low, CI high): the chance a random win outscores a random loss, 0.5 a coin
+    flip. A twin of basketball/output/research._auc, which this file cannot import (the
+    module names collide): fix one, check the other. Hanley–McNeil interval."""
+    order = sorted(range(len(scores)), key=scores.__getitem__)
+    ranks = [0.0] * len(scores)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and scores[order[j + 1]] == scores[order[i]]:
+            j += 1
+        for k in order[i:j + 1]:
+            ranks[k] = (i + j) / 2 + 1
+        i = j + 1
+    n1 = sum(ys)
+    n0 = len(ys) - n1
+    if not n1 or not n0:
+        return math.nan, math.nan, math.nan
+    a = (sum(r for r, y in zip(ranks, ys) if y) - n1 * (n1 + 1) / 2) / (n1 * n0)
+    q1, q2 = a / (2 - a), 2 * a * a / (1 + a)
+    se = math.sqrt((a * (1 - a) + (n1 - 1) * (q1 - a * a) + (n0 - 1) * (q2 - a * a))
+                   / (n1 * n0))
+    return a, a - 1.96 * se, a + 1.96 * se
+
+
+def stats(db=_db, where: str = "", bench: bool = False) -> dict:
     """Calibration + ranking signal. Mirrors output/research.py report() — and its NBA
     twin, which computes the same figures from the same model_prob/outcome columns, so
     one implementation serves both sports. `db` is the connection factory. `where` is an
     SQL condition written in code (this file, or research.EVIDENCE_SQL), never request
-    input, and narrows every figure."""
+    input, and narrows every figure. `bench` adds the model-vs-price AUCs: NBA only, since
+    MLB's stored prices include the feed verified wrong before 09-17 (§28)."""
     only = f" WHERE {where}" if where else ""
     try:
         c = db()
@@ -206,6 +233,17 @@ def stats(db=_db, where: str = "") -> dict:
     # What the book's prices implied on the same rows: the hit rate a bet needed.
     priced = [r["bi"] for r in rows if r["bi"] is not None]
     out["priced"] = sum(priced) / len(priced) if priced else None
+    # Ranking skill against the book's own price, on the same rows. The over rate is not
+    # this test: NBA overs hit under half whatever a model says, and the price expects it.
+    # On 2026-10-28 the over rate read as the model "underperforming", while the real
+    # verdict was this one: the model ranked like a coin flip (0.514), the price at 0.583.
+    pr = [r for r in rows if r["bi"] is not None]
+    if bench and len(pr) >= 200:
+        ys = [1 if r["outcome"] == "win" else 0 for r in pr]
+        out["auc_n"] = len(pr)
+        out["auc"], out["auc_lo"], out["auc_hi"] = _auc([r["p"] for r in pr], ys)
+        out["auc_book"], out["auc_book_lo"], out["auc_book_hi"] = _auc(
+            [r["bi"] for r in pr], ys)
 
     rows.sort(key=lambda r: r["p"])
     half = n // 2
@@ -216,7 +254,6 @@ def stats(db=_db, where: str = "") -> dict:
         # rows has a CI of [-0.2, +14.0] — indistinguishable from zero — and a label that
         # reads only the point estimate calls that "weak signal", asserting a finding the
         # data cannot support.
-        import math
         se = math.sqrt(lo * (1 - lo) / half + hi * (1 - hi) / (n - half))
         out["gap_ci_low"] = (hi - lo) - 1.96 * se
         out["gap_ci_high"] = (hi - lo) + 1.96 * se
@@ -450,9 +487,11 @@ def api_nba_summary(who: tuple = Depends(auth)):
     """Headline NBA numbers for any signed-in user, plus what the page needs in order to
     say when grading is behind. Buckets, ranking gap and collection health are admin-only
     via /api/nba/report."""
-    s = stats(_nba_db)
+    s = stats(_nba_db, bench=True)
     out = {"logged": s.get("logged", 0), "graded": s.get("graded", 0),
            "actual": s.get("actual"), "predicted": s.get("predicted"),
+           **{k: s.get(k) for k in ("auc", "auc_lo", "auc_hi", "auc_book", "auc_book_lo",
+                                    "auc_book_hi", "auc_n")},
            "role": who[1], "user": who[0], "error": s.get("error"),
            "slates": [], "stale_pending": 0, "stale_since": None}
     if out["error"]:

@@ -21,8 +21,41 @@ Known limits, written down so they are not rediscovered as surprises:
     and we only know the player's recent average, not whether he is on a minutes limit.
   * On opening night the averages come from LAST season (see stats_fetcher.pick_season),
     which is why the season label is logged on every row.
+
+v1's result, 2026-10-28 (2,707 graded rows, 10-20 to 10-27): no ranking signal. AUC
+0.514 [0.491, 0.538], calibration slope 0.04, a Brier score worse than a coin flip. The
+book's own price ranked the same props (AUC 0.583 [0.563, 0.603]), and v1 added nothing
+once the price was known. No refit: v1's inputs are the averages the line is already set
+from, so no weighting of them can add what they lack. v1 keeps logging unchanged, as the
+record.
+
+v2 — PRE-REGISTERED 2026-10-28, before any v2 fit, and not built yet. It starts FROM the
+price and asks whether anything the line may underprice moves it.
+
+  baseline  the book's fair P(over): both sides of the same FanDuel main line, de-vigged
+            (output/research._fair). The under price is logged from 2026-10-29.
+  model     logit(p) = logit(fair) + b[market] + b1 * z(teammate_usage_out)
+                       + b2 * back_to_back (days_rest <= 1) + b3 * z(opp_allow_factor - 1)
+            One intercept per market (over rates differ by market), an L2 penalty on
+            b1-b3, z standardized on the fit rows. These inputs are fixed here.
+  fit       once V2_FIT_ROWS graded rows carry a two-sided price and every V2_INPUTS
+            column (`--report` counts them). Raise if the fit ends worse than intercepts
+            alone on its own rows (PROJECT.md rule 8). Freeze the coefficients as dated
+            constants and log v2 in a NEW column, v2_prob, from the next slate.
+  test      on the first V2_TEST_ROWS graded rows after the freeze: per-row log-loss of
+            v2 minus the fair price's, 95% CI from a player-cluster bootstrap. v2 passes
+            only if the whole interval is below zero. No input or refit changes before
+            it reads, and a loss is recorded as a loss.
+  use       research only. Nothing bets on it, and the owner's parlay method
+            (parlay/method.py) never reads it.
 """
 import math
+
+# v2's pre-registration (above): the logged columns its inputs come from, and the graded
+# rows that trigger the fit and then the test.
+V2_INPUTS = ("teammate_usage_out", "days_rest", "opp_allow_factor")
+V2_FIT_ROWS = 3000
+V2_TEST_ROWS = 3000
 
 # Weight on recent form, with the rest on the season average. Not fitted — there is no
 # data to fit it on yet. The weight-fitting experiment is exactly what the logged inputs

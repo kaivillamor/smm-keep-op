@@ -161,6 +161,7 @@ def collect(day: str | None = None) -> int:
                 # when one IS fitted, it cannot be used without being logged.
                 "calibrated_prob": None,
                 "book_odds": entry.get("over"), "book": entry.get("book"),
+                "book_under_odds": entry.get("under"),
                 "book_implied": _implied(entry.get("over")),
                 "stats_season": season_label, "stat_sd": form.get("stat_sd"),
                 "season_avg": form.get("season_avg"),
