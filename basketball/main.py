@@ -227,9 +227,13 @@ def _run_method(day: str, legs: list[dict]) -> None:
     why = ", ".join(f"{k} {v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
     print(f"[method] {len(legs)} candidate legs, {len(passing)} pass the rules"
           f"{' — failed: ' + why if why else ''}")
-    parlays = {tier: method.build(passing, tier) for tier in method.TIERS}
+    now = datetime.now(timezone.utc).isoformat()
     conn = _connect()
-    for line in method.save(conn, day, parlays, datetime.now(timezone.utc).isoformat()):
+    parlays, held_out = method.build_slate(passing, method.frozen(conn, day, now))
+    for tier, n in held_out.items():
+        if n:
+            print(f"[method] {tier}: built without {n} player(s) already in another slip")
+    for line in method.save(conn, day, parlays, now):
         print(f"[method] {line}")
     print(method.describe(conn, day))
     conn.close()

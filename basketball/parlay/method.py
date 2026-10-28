@@ -12,7 +12,8 @@ What it does each slate:
      lines, plus points rungs 2-5 under the main line;
   2. keep the legs that pass the owner's rules (trust, consistency, average, matchup,
      price);
-  3. build the best $5 and $10 parlays inside the owner's payout targets;
+  3. build the best $10 parlay, then the best $5 from the players it left, each inside the
+     owner's payout targets;
   4. store them, so every one is graded against the box scores.
 
 Paper only. Nothing here places a bet.
@@ -69,6 +70,14 @@ TIERS = {
     "$5":  {"stake": 5.0,  "profit": (30.0, 70.0),   "min_l10": 0.7},
     "$10": {"stake": 10.0, "profit": (100.0, 300.0), "min_l10": 0.8},
 }
+
+# "The standard should be taking different legs or different players." (the owner,
+# 2026-10-28, after the $5 and $10 slips shared four of five players on 10-27 and 10-28.)
+# No player sits in both slips, at any line or market. The $10 picks first: its 8-of-10
+# bar leaves it the smaller pool, and the $5 builds from the players it left.
+BUILD_ORDER = ("$10", "$5")
+if sorted(BUILD_ORDER) != sorted(TIERS):
+    raise ValueError(f"BUILD_ORDER {BUILD_ORDER} must name every tier in TIERS once")
 
 # Search bounds. Legs are ranked first, so the cap only drops the weakest candidates; 30
 # keeps a 3-5 leg search to ~170k combinations, well under a second.
@@ -235,15 +244,17 @@ def qualify(legs: list[dict]) -> tuple[list[dict], dict]:
 
 # ── building ─────────────────────────────────────────────────────────────────────
 
-def build(legs: list[dict], tier: str) -> dict | None:
+def build(legs: list[dict], tier: str, taken: frozenset = frozenset()) -> dict | None:
     """The best parlay for a tier, or None if nothing fits the owner's targets.
 
     Best = highest product of the legs' smoothed hit rates — a RANKING score built from
     the legs' own records, not a calibrated probability. Ties go to the bigger payout.
+    `taken` is the players already in another of tonight's slips; none of them is used.
     """
     t = TIERS[tier]
     stake, (lo, hi) = t["stake"], t["profit"]
-    pool = sorted((l for l in legs if l["hit_l10"] >= t["min_l10"]),
+    pool = sorted((l for l in legs
+                   if l["hit_l10"] >= t["min_l10"] and l["player_id"] not in taken),
                   key=lambda l: (l["smoothed"], l["worth"]), reverse=True)[:POOL_CAP]
     best, best_key = None, None
     for n in LEG_COUNTS:
@@ -272,12 +283,45 @@ def build(legs: list[dict], tier: str) -> dict | None:
     }
 
 
+def build_slate(legs: list[dict], held: dict[str, set]) -> tuple[dict, dict]:
+    """Tonight's parlay per tier still open, with no player in two slips.
+
+    Tiers build in BUILD_ORDER, each clear of every player an earlier tier took. `held` is
+    frozen(): tiers already locked at tip, which save() keeps as they are, so their players
+    are out for every tier: a slip that could have been placed outranks first pick. Also
+    returns how many players each tier was built without, so a tier that comes back empty
+    can say whether the rules left it nothing or the other slip did.
+    """
+    taken = set().union(*held.values())
+    parlays, held_out = {}, {}
+    for tier in BUILD_ORDER:
+        if tier in held:
+            continue
+        held_out[tier] = len(taken)
+        parlays[tier] = build(legs, tier, frozenset(taken))
+        if parlays[tier]:
+            taken |= {l["player_id"] for l in parlays[tier]["legs"]}
+    return parlays, held_out
+
+
 # ── storage ──────────────────────────────────────────────────────────────────────
 
 _LEG_COLS = ("game_id", "player_id", "player_name", "team", "opponent", "tipoff", "market",
              "line", "main_line", "undercut", "odds", "hit_l10", "hit_l20", "minutes_avg",
              "season_avg", "recent_avg", "h2h_avg", "h2h_games", "sim_avg", "sim_games",
              "teammate_usage_out")
+
+
+def frozen(conn, day: str, now: str) -> dict[str, set[str]]:
+    """This slate's frozen tiers (first leg tipped, save()'s test), with each one's players,
+    so the tiers still being built can stay clear of them."""
+    held: dict[str, set[str]] = {}
+    for pid, tier in conn.execute(
+            "SELECT id, tier FROM method_parlays WHERE date=? AND first_tip <= ?",
+            (day, now)).fetchall():
+        held.setdefault(tier, set()).update(str(p) for (p,) in conn.execute(
+            "SELECT player_id FROM method_legs WHERE parlay_id=?", (pid,)))
+    return held
 
 
 def save(conn, day: str, parlays: dict, now: str) -> list[str]:
