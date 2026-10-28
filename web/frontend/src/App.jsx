@@ -368,7 +368,8 @@ function Admin() {
 function NbaHome() {
   const [day, setDay] = useState('')          // '' = follow the latest slate
   const { data: sum } = useJson('/api/nba/summary')
-  const { data: parlays } = useJson('/api/nba/parlays')
+  // The server's cap: ~100 slates for the pager, where the default 40 is ~20.
+  const { data: parlays } = useJson('/api/nba/parlays?limit=200')
   const { data: slate } = useJson(day ? `/api/nba/slate?date=${day}` : '/api/nba/slate')
 
   return (

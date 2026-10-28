@@ -316,6 +316,7 @@ table.slate td.blocked { color: var(--dim); font-size: .76rem; }
   border-bottom: 1px solid var(--line-strong);
 }
 .link-btn:hover { color: var(--text); }
+.link-btn:disabled { color: var(--dim); border-bottom-color: transparent; cursor: default; }
 
 /* ── NBA controls ────────────────────────────────────────────────────────────
    Slate picker then market filter, on one row. The filter reuses the link
@@ -333,6 +334,9 @@ select {
 }
 .slate-meta strong { color: var(--text); font-weight: 600; }
 .parlay { margin: 0 0 1.4rem; }
+/* Full column on desktop; the phone rule below (same specificity, later) keeps
+   its natural-width sideways scroll. */
+.parlay table.narrow { width: 100%; }
 .nowrap { white-space: nowrap; }
 
 /* ── phones ──────────────────────────────────────────────────────────────────

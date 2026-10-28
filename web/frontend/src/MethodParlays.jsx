@@ -20,24 +20,46 @@ function status(p) {
 }
 
 /**
- * The method's paper parlays, newest first — one per tier per slate, legs underneath.
+ * The method's paper parlays, one slate at a time — one per tier, legs underneath — paged
+ * newest to oldest.
  *
  * `latest` is the newest slate with any props. A slate with props but no parlay means
  * the method ran and nothing fit its targets, which is said rather than left blank: an
  * empty list is otherwise indistinguishable from a method that never ran.
  */
 export default function MethodParlays({ data, latest }) {
-  const [showAll, setShowAll] = useState(false)
+  const [day, setDay] = useState('')          // '' = the newest date
 
   if (!data) return <p className="muted">Loading…</p>
   if (data.error) return <p className="bad">{data.error}</p>
 
-  const parlays = showAll ? data.parlays : data.parlays.slice(0, 6)
+  // The API sends date DESC, so first-seen order is newest first.
+  const dates = [...new Set(data.parlays.map((p) => p.date))]
+  if (latest && !dates.includes(latest)) dates.unshift(latest)
+  if (!dates.length) return null
+  const shown = dates.includes(day) ? day : dates[0]
+  const i = dates.indexOf(shown)
+  const parlays = data.parlays.filter((p) => p.date === shown)
 
   return (
     <>
-      {latest && !data.parlays.some((p) => p.date === latest) && (
-        <p className="muted">No method parlay fits the targets for {latest} yet.</p>
+      <div className="filters">
+        <button className="link-btn" disabled={i >= dates.length - 1}
+                onClick={() => setDay(dates[i + 1])}>
+          ← older
+        </button>
+        <select value={shown} onChange={(e) => setDay(e.target.value)} aria-label="Parlay date">
+          {dates.map((d) => (
+            <option key={d} value={d}>{d}</option>
+          ))}
+        </select>
+        <button className="link-btn" disabled={i === 0} onClick={() => setDay(dates[i - 1])}>
+          newer →
+        </button>
+      </div>
+
+      {!parlays.length && (
+        <p className="muted">No method parlay fits the targets for {shown} yet.</p>
       )}
 
       {parlays.map((p) => {
@@ -93,12 +115,6 @@ export default function MethodParlays({ data, latest }) {
           </div>
         )
       })}
-
-      {data.parlays.length > 6 && (
-        <button className="link-btn" onClick={() => setShowAll((v) => !v)}>
-          {showAll ? 'Show latest 6' : `Show all ${data.parlays.length}`}
-        </button>
-      )}
     </>
   )
 }
