@@ -5,6 +5,8 @@ const money = (v) => (v == null ? '—' : `$${v.toFixed(2)}`)
 const signed = (v) => (v == null ? '—' : `${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}`)
 // The method only takes legs with a full 10- and 20-game history, so these are exact.
 const frac = (rate, n) => (rate == null ? '—' : `${Math.round(rate * n)}/${n}`)
+// Games over the line out of games counted. Legs stored before 10-29 have no counts.
+const count = (hits, n) => (hits == null || !n ? '—' : `${hits}/${n}`)
 
 function status(p) {
   if (p.outcome === 'win') return { text: `won ${signed(p.profit)}`, tone: 'good' }
@@ -88,6 +90,9 @@ export default function MethodParlays({ data, latest }) {
                     <th className="n">Odds</th>
                     <th className="n">L10</th>
                     <th className="n">L20</th>
+                    <th className="n">H2H</th>
+                    <th className="n">Sim D</th>
+                    <th className="n">Pos D</th>
                     <th>Result</th>
                   </tr>
                 </thead>
@@ -106,6 +111,11 @@ export default function MethodParlays({ data, latest }) {
                       <td className="n">{american(l.odds)}</td>
                       <td className="n">{frac(l.l10, 10)}</td>
                       <td className="n">{frac(l.l20, 20)}</td>
+                      <td className="n">{count(l.h2h_hits, l.h2h_games)}</td>
+                      <td className="n">{count(l.sim_hits, l.sim_games)}</td>
+                      <td className="n nowrap">
+                        {l.pos_rank ? `#${l.pos_rank} vs ${l.position}` : '—'}
+                      </td>
                       <td className="nowrap"><Result outcome={l.outcome} actual={l.actual} /></td>
                     </tr>
                   ))}

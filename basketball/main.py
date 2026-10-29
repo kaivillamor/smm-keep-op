@@ -21,9 +21,10 @@ from pipeline.calendar import game_slate_date, slate_date
 from pipeline.prop_odds import DEFAULT_BOOK, NBA_MARKETS, fetch_prop_board, normalize_name
 from pipeline.stats_fetcher import (FETCH_FAILURES, MARKET_STAT, build_player_index, days_rest,
                                     fetch_gamelog, fetch_injuries, fetch_scoreboard,
-                                    pick_season, player_form, recent_current_minutes,
-                                    recent_current_usage)
-from pipeline.team_defense import MARKET_TEAM_STAT, allowance_factors, sync_team_games
+                                    fetch_season_log, pick_season, player_form, prune_cache,
+                                    recent_current_minutes, recent_current_usage)
+from pipeline.team_defense import (MARKET_TEAM_STAT, allowance_factors, position_factors,
+                                   position_sync_status, sync_player_games, sync_team_games)
 
 
 def collect(day: str | None = None) -> int:
@@ -68,13 +69,48 @@ def collect(day: str | None = None) -> int:
     season_year = next((g["season_year"] for g in games if g.get("season_year")), None)
     prior_year = season_year - 1 if season_year else None
     factors: dict = {}
+    pos_factors: dict = {}
+    known_teams: set[str] = set()
     if season_year:
         conn = _connect()
         added = sync_team_games(conn, season_year, day)
         factors = allowance_factors(conn, season_year)
+        # Defense vs position, for the method: every player's line from each stored game.
+        # The first runs backfill last season a capped batch at a time, and the rule waits
+        # until the backfill is done rather than rank teams on whichever games loaded first.
+        boxes = sync_player_games(conn)
+        pos_factors = position_factors(conn, season_year)
+        stored, total = position_sync_status(conn, season_year)
+        known_teams = {r[0] for r in conn.execute("SELECT DISTINCT team_id FROM team_games")}
         conn.close()
         print(f"[main] team defense: {added} new game(s) stored, "
               f"{len({t for t, _ in factors})} teams rated")
+        print(f"[main] position defense: {boxes} new box score(s), {stored} of {total} games "
+              f"stored{'' if pos_factors else ' — the rule waits for the backfill'}")
+
+    on_slate = {r["player_id"] for r in index.values()
+                if method.banned(r["player_id"], r["team_id"])}
+    print(f"[method] bans: {len(method.BANNED_PLAYERS)} player(s), "
+          f"{len(method.BANNED_TEAMS)} team(s); {len(on_slate)} banned player(s) on this slate")
+    # A mistyped team id would ban nobody without a word. Player ids cannot be checked the
+    # same way (a player is only seen on the nights he plays), so the count above is it.
+    unknown = sorted(t for t in method.BANNED_TEAMS if known_teams and t not in known_teams)
+    if unknown:
+        print(f"[method] WARNING: banned team id(s) {', '.join(unknown)} match no NBA team — "
+              f"check BANNED_TEAMS in parlay/method.py")
+
+    # The method's head-to-head looks back H2H_SEASONS seasons, further than the model's two.
+    # Seasons before last are fetched apart from `logs`, so player_form() never sees them.
+    older_years = (range(prior_year - 1, season_year - method.H2H_SEASONS, -1)
+                   if season_year else range(0))
+    older: dict[str, list] = {}
+
+    # Once per run, as in the baseball twin: drop cached files no run will read again (old
+    # slate folders, and finished seasons older than any this run reads), so a cache on the
+    # volume stays a couple of slates plus the seasons still in use.
+    pruned = prune_cache(day, min((prior_year, *older_years)) if season_year else None)
+    if pruned:
+        print(f"[main] cache: removed {pruned} old slate folder(s) / season log(s)")
 
     # Injury report. None means it could not be fetched — kept distinct from "nobody is
     # out", so a failed fetch never logs the whole slate as healthy.
@@ -123,6 +159,8 @@ def collect(day: str | None = None) -> int:
             if pid not in logs:
                 logs[pid] = pick_season(fetch_gamelog(pid, day, prior_year))
             season_label, rows = logs[pid]
+            if rows and pid not in older:
+                older[pid] = [g for y in older_years for g in fetch_season_log(pid, y)]
 
             form = player_form(rows, market, opponent_id=who["opponent_id"]) if rows else {}
             stat, team_stat = MARKET_STAT.get(market), MARKET_TEAM_STAT.get(market)
@@ -130,8 +168,12 @@ def collect(day: str | None = None) -> int:
             own = method.player_inputs(rows, stat, who["opponent_id"]) if rows else {}
             l10 = method.hit_rate(rows, stat, entry["line"], 10)[0] if rows else None
             l20 = method.hit_rate(rows, stat, entry["line"], 20)[0] if rows else None
-            sim = (method.similar_opponent_avg(rows, stat, who["opponent_id"], factors,
-                                               team_stat) if rows else (None, 0))
+            sim = (method.similar_opponent_games(rows, stat, who["opponent_id"], factors,
+                                                 team_stat) if rows else [])
+            meet = (method.meetings(rows + older.get(pid, []), stat, who["opponent_id"])
+                    if rows else [])
+            pos_factor, pos_rank = pos_factors.get(
+                (who["opponent_id"], who.get("position"), team_stat), (None, None))
             prob = prop_probability(form, market, entry.get("line"))
             # Your rules, as a DELTA on top of the quant number — never a replacement.
             # Only applied when the quant model produced a probability: a rule nudging a
@@ -145,7 +187,7 @@ def collect(day: str | None = None) -> int:
             candidates.append({
                 "game_id": who["game_id"], "player_id": pid,
                 "player_name": entry.get("player_name") or name,
-                "team": who["team"], "opponent": who["opponent"],
+                "team": who["team"], "team_id": who["team_id"], "opponent": who["opponent"],
                 "market": market, "line": entry.get("line"),
                 "tipoff": who["tipoff"],
                 "season_phase": phase_by_game.get(who["game_id"]),
@@ -183,8 +225,18 @@ def collect(day: str | None = None) -> int:
                 "teammate_usage_out": (None if injuries is None else round(sum(
                     u for p, u in out_usage.get(who["team_id"], {}).items() if p != pid), 1)),
                 "hit_l10": l10, "hit_l20": l20,
-                "sim_opp_avg": sim[0], "sim_opp_games": sim[1],
+                "sim_opp_avg": method.mean(sim), "sim_opp_games": len(sim),
                 "season_avg_raw": own.get("season_avg"),
+                # Head-to-head and similar defenses as the method now reads them: games
+                # over this line, three seasons back for head-to-head (10-29).
+                "h2h_hits": method.over(meet, entry.get("line")) if rows else None,
+                "h2h_meetings": len(meet) if rows else None,
+                "sim_opp_hits": method.over(sim, entry.get("line")) if rows else None,
+                "position": who.get("position"),
+                "opp_pos_factor": pos_factor, "opp_pos_rank": pos_rank,
+                # Logged on every row, banned or not, so the ban can be measured; the ban
+                # filters the method only.
+                "banned": method.banned(pid, who["team_id"]) or "no",
             })
 
             # The owner's method: the main line, plus (points only) every rung 2-5 under it.
@@ -198,11 +250,15 @@ def collect(day: str | None = None) -> int:
                         cut = round(entry["line"] - line, 1)
                         if lo <= cut <= hi:
                             rungs.append((line, odds, cut))
-                method_legs.extend(method.legs_for(candidates[-1], rows, stat, rungs, own, sim))
+                method_legs.extend(method.legs_for(candidates[-1], rows, stat, rungs, own,
+                                                   sim, meet))
 
     if FETCH_FAILURES["prior_gamelog"]:
         print(f"[main] {FETCH_FAILURES['prior_gamelog']} last-season log(s) unavailable — "
               f"those players fell back to this season alone; retried next run")
+    if FETCH_FAILURES["older_gamelog"]:
+        print(f"[main] {FETCH_FAILURES['older_gamelog']} older-season log(s) unavailable — "
+              f"those players' head-to-head counts two seasons; retried next run")
     if in_progress:
         print(f"[main] {len(in_progress)} priced player(s) skipped: game already underway")
     if unmatched:
@@ -228,6 +284,10 @@ def _run_method(day: str, legs: list[dict]) -> None:
     why = ", ".join(f"{k} {v}" for k, v in sorted(reasons.items(), key=lambda kv: -kv[1]))
     print(f"[method] {len(legs)} candidate legs, {len(passing)} pass the rules"
           f"{' — failed: ' + why if why else ''}")
+    unranked = sum(1 for l in legs if l.get("opp_pos_rank") is None)
+    if unranked:
+        print(f"[method] {unranked} of {len(legs)} legs have no defense-vs-position rank, "
+              f"so that rule could not judge them")
     now = datetime.now(timezone.utc).isoformat()
     conn = _connect()
     parlays, held_out = method.build_slate(passing, method.frozen(conn, day, now))

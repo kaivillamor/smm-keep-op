@@ -452,6 +452,12 @@ NBA_TRUSTED_SQL = ("(minutes_avg >= 28 AND market IN ('player_points', 'player_r
 NBA_TRUSTED_RULE = "28+ minutes in points, rebounds or assists, or 20+ in points or assists"
 NBA_CONSISTENT_SQL = "hit_l10 >= 0.7 AND hit_l20 >= 0.6"
 
+# The method parlays' money count. The owner, 2026-10-29: "Reset the count but still show if
+# parlays miss or hit ... just dont record any more wins or losses", until the method is
+# somewhere they are confident in. None counts nothing; a slate date counts the parlays
+# from that date on. Grading is untouched, so every parlay still carries its own result.
+NBA_RECORD_FROM: str | None = None
+
 def _nba_db_path() -> str:
     """Absolute path to the NBA research DB. Twin of RESEARCH_DB in
     basketball/output/research.py, anchored to BASKETBALL_DIR the way _research_db_path()
@@ -551,7 +557,8 @@ def api_nba_parlays(_: tuple = Depends(auth), limit: int = 40):
 
     Paper only: these live in the research DB and nothing was staked, so they sit beside
     the simulated predictions and never beside bets.db (§14). `staked` counts settled
-    win/loss parlays only — a void returns its stake and is neither.
+    win/loss parlays only — a void returns its stake and is neither. `record` is empty while
+    the count is reset (NBA_RECORD_FROM None), and counts from that date once it is set.
     """
     try:
         c = _nba_db()
@@ -563,25 +570,30 @@ def api_nba_parlays(_: tuple = Depends(auth), limit: int = 40):
         ids = [p["id"] for p in parlays]
         for r in (c.execute(
                 "SELECT parlay_id, player_name, team, opponent, market, line, main_line, "
-                "       undercut, odds, hit_l10, hit_l20, outcome, actual_value "
+                "       undercut, odds, hit_l10, hit_l20, h2h_hits, h2h_meetings, sim_hits, "
+                "       sim_games, position, opp_pos_rank, outcome, actual_value "
                 f"FROM method_legs WHERE parlay_id IN ({','.join('?' * len(ids))}) "
                 "ORDER BY id", ids) if ids else []):
             legs.setdefault(r["parlay_id"], []).append({
                 "name": r["player_name"], "team": r["team"], "opp": r["opponent"],
                 "market": r["market"], "line": r["line"], "main_line": r["main_line"],
                 "undercut": r["undercut"], "odds": r["odds"], "l10": r["hit_l10"],
-                "l20": r["hit_l20"], "outcome": r["outcome"], "actual": r["actual_value"]})
-        record = [dict(r) for r in c.execute(
+                "l20": r["hit_l20"], "h2h_hits": r["h2h_hits"],
+                "h2h_games": r["h2h_meetings"], "sim_hits": r["sim_hits"],
+                "sim_games": r["sim_games"], "position": r["position"],
+                "pos_rank": r["opp_pos_rank"], "outcome": r["outcome"],
+                "actual": r["actual_value"]})
+        record = [] if NBA_RECORD_FROM is None else [dict(r) for r in c.execute(
             "SELECT tier, SUM(outcome='win') won, SUM(outcome='loss') lost, "
             "       SUM(outcome='void') void, "
             "       SUM(CASE WHEN outcome IN ('win','loss') THEN stake ELSE 0 END) staked, "
             "       SUM(COALESCE(profit, 0)) profit "
-            "FROM method_parlays WHERE outcome IS NOT NULL "
-            "GROUP BY tier ORDER BY MIN(stake)")]
+            "FROM method_parlays WHERE outcome IS NOT NULL AND date >= ? "
+            "GROUP BY tier ORDER BY MIN(stake)", (NBA_RECORD_FROM,))]
         c.close()
     except Exception as e:
-        return {"error": str(e), "record": [], "parlays": []}
-    return {"error": None, "record": record, "parlays": [
+        return {"error": str(e), "record": [], "record_from": NBA_RECORD_FROM, "parlays": []}
+    return {"error": None, "record": record, "record_from": NBA_RECORD_FROM, "parlays": [
         {**{k: p[k] for k in ("date", "tier", "stake", "n_legs", "american_odds",
                                "profit_if_win", "first_tip", "outcome", "profit")},
          "legs": legs.get(p["id"], [])}

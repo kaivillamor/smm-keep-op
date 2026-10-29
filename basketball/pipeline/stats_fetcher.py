@@ -25,9 +25,10 @@ Every stat arrives as a STRING, and the combined ones as "made-attempted" ("2-3"
 import json
 import os
 import re
+import shutil
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
@@ -84,6 +85,48 @@ def _write_cache(path: str, payload) -> None:
             json.dump(payload, f)
     except OSError:
         pass          # a cache miss is slower, never wrong
+
+
+# Slate folders kept: tonight's and last night's. Rosters and this season's logs are cached
+# under each slate's own folder, and grading reads no cache at all, so a folder is never
+# read again once its slate is over; last night's stays only so a re-run of that slate
+# still finds its files. The baseball twin keeps 3 days by file age, but these folders are
+# named for their slate, so they can be counted exactly.
+CACHE_KEEP_DAYS = 2
+_DAY_DIR = re.compile(r"\d{4}-\d{2}-\d{2}")
+_SEASON_FILE = re.compile(r"gamelog_\d+_(\d{4})\.json")
+
+
+def prune_cache(day: str, oldest_season: int | None = None) -> int:
+    """Delete cached files no run will read again; returns how many went.
+
+    Slate folders older than CACHE_KEEP_DAYS slates, and finished-season logs from before
+    `oldest_season`, the oldest season a run still reads. Only folders named as dates and
+    files named as season logs are touched; anything else in the cache is left alone.
+    Without this, a cache on the volume (NBA_CACHE_DIR) would keep every slate's folder all
+    season. Failures are ignored: pruning is housekeeping and must never break a run.
+    """
+    cutoff = (date.fromisoformat(day) - timedelta(days=CACHE_KEEP_DAYS - 1)).isoformat()
+    removed = 0
+    try:
+        for name in os.listdir(_CACHE_DIR):
+            path = os.path.join(_CACHE_DIR, name)
+            if _DAY_DIR.fullmatch(name) and name < cutoff and os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                removed += not os.path.exists(path)
+        seasons = os.path.join(_CACHE_DIR, "seasons")
+        if oldest_season and os.path.isdir(seasons):
+            for name in os.listdir(seasons):
+                m = _SEASON_FILE.fullmatch(name)
+                if m and int(m.group(1)) < oldest_season:
+                    try:
+                        os.remove(os.path.join(seasons, name))
+                        removed += 1
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return removed
 
 
 # Pacing between ESPN requests. A collect run is a burst of ~250 game-log requests (this
@@ -244,8 +287,20 @@ def fetch_roster(team: str, day: str) -> list[dict]:
     out = []
     for a in data.get("athletes", []):
         if a.get("id") and a.get("displayName"):
-            out.append({"player_id": str(a["id"]), "name": a["displayName"], "team": team})
+            pos = (a.get("position") or {}).get("abbreviation")
+            out.append({"player_id": str(a["id"]), "name": a["displayName"], "team": team,
+                        "position": position_group(pos)})
     return out
+
+
+# ESPN lists a player as G, F or C (verified 2026-10-29 on rosters and box scores), and
+# sometimes as PG/SG/SF/PF. The method's defense-vs-position rule works in the three groups,
+# so a finer label folds into its group. Anything else is None and that rule does not apply.
+_POSITION_GROUP = {"PG": "G", "SG": "G", "G": "G", "SF": "F", "PF": "F", "F": "F", "C": "C"}
+
+
+def position_group(abbrev) -> str | None:
+    return _POSITION_GROUP.get(str(abbrev or "").upper())
 
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
@@ -277,7 +332,7 @@ def build_player_index(games: list[dict], day: str, normalize) -> dict:
                     "team_id": g["home_id"] if home else g["away_id"],
                     "opponent_id": g["away_id"] if home else g["home_id"],
                     "game_id": g["game_id"], "tipoff": g["tipoff"],
-                    "is_home": 1 if home else 0,
+                    "is_home": 1 if home else 0, "position": p.get("position"),
                 }
                 key = normalize(p["name"])
                 index[key] = row
@@ -320,6 +375,26 @@ def fetch_gamelog(player_id: str, day: str, prior_year: int | None = None) -> di
             for label, rows in _parse_gamelog(prior).items():
                 out.setdefault(label, rows)
     return out
+
+
+def fetch_season_log(player_id: str, season_year: int) -> list[dict]:
+    """One finished season's regular-season games, newest first; [] if unavailable.
+
+    For the method's head-to-head only, which looks back three seasons: teams meet two to
+    four times a season, so this season and last leave one to four meetings. Kept OUT of
+    fetch_gamelog on purpose: pick_season would see a third season and, on an opening night
+    with no current games, blend the wrong two, and the model must not move. Same permanent
+    cache as fetch_gamelog's prior half, since a finished season never changes.
+    """
+    data = _gamelog_data(player_id, season_year,
+                         _cache_path("gamelog", f"{player_id}_{season_year}", "seasons"))
+    if data is None:
+        # Not cached on failure, so the next run retries. Until then this player's
+        # head-to-head counts two seasons — counted so the run reports it.
+        FETCH_FAILURES["older_gamelog"] += 1
+        return []
+    return [g for label, rows in _parse_gamelog(data).items()
+            if "Regular Season" in label and "Play In" not in label for g in rows]
 
 
 def _gamelog_data(player_id: str, season: int | None, cache: str) -> dict | None:
@@ -547,17 +622,20 @@ def recent_current_usage(games: list[dict], season_year: int, n: int = 5) -> flo
 # ── grading ──────────────────────────────────────────────────────────────────
 
 def fetch_boxscore(game_id: str) -> dict:
-    """{player_id: {points, rebounds, assists, threes_made, minutes}} for a FINAL game.
+    """{player_id: {points, rebounds, assists, threes_made, minutes, team_id, position}} for
+    a FINAL game.
 
     ONE call per game, not per player — baseball proved the per-player version turns a
     180-row slate into 180 requests. Not cached: a box score is fetched once, after the
-    game, and caching it would only risk serving a partial one.
+    game, and caching it would only risk serving a partial one. team_id and position feed
+    the defense-vs-position store (team_defense.sync_player_games); grading ignores them.
     """
     data = _get(f"{SITE_API}/summary", {"event": game_id})
     if data is None:
         return {}
     out: dict[str, dict] = {}
     for team in (data.get("boxscore") or {}).get("players", []):
+        team_id = str((team.get("team") or {}).get("id") or "")
         for group in team.get("statistics", []):
             keys = [str(k).lower() for k in (group.get("keys") or [])]
             labels = [str(l).lower() for l in (group.get("labels") or [])]
@@ -587,5 +665,8 @@ def fetch_boxscore(game_id: str) -> dict:
                     "rebounds": _num(pick("rebounds", "totalrebounds", "reb")),
                     "assists": _num(pick("assists", "ast")),
                     "threes_made": tpm,
+                    "team_id": team_id,
+                    "position": position_group(
+                        (((a.get("athlete") or {}).get("position")) or {}).get("abbreviation")),
                 }
     return out

@@ -17,10 +17,16 @@ team allows more of everything.
 
 LOGGED, NOT USED. The model does not read this yet. It earns its way in only if the
 graded corpus shows it improves ranking — the same rule as every other input (§24).
+
+PER POSITION (2026-10-29), for the owner's method. Team totals cannot say whether a
+defense is tough on guards and soft on centers, and ESPN has no data on who guards whom,
+so every player's line from every stored game goes into `player_games` (one box score per
+game) and what a defense allows to guards, forwards and centers comes from that. The method
+reads it; the model does not.
 """
 from datetime import date, datetime, timedelta, timezone
 
-from pipeline.stats_fetcher import parse_scoreboard, scoreboard_data
+from pipeline.stats_fetcher import fetch_boxscore, parse_scoreboard, scoreboard_data
 
 TEAM_STATS = ("points", "rebounds", "assists", "threes")
 
@@ -147,3 +153,115 @@ def allowance_factors(conn, season_year: int, k: int = PRIOR_GAMES) -> dict:
             if s == stat and league:
                 factors[(o, s)] = round(v / league, 4)
     return factors
+
+
+# ── per position ─────────────────────────────────────────────────────────────
+
+POSITIONS = ("G", "F", "C")
+
+# Box scores stored per collect run. The first backfill is ~1,300 games at ~470 KB each,
+# once; 250 a run keeps any one run to a few minutes and finishes inside two evenings of
+# hourly runs. After that it is the handful of games each night adds.
+PLAYER_SYNC_CAP = 250
+
+# A backfill this close to complete ranks the same as a finished one. Without a tolerance,
+# a few box scores ESPN never serves would keep the rule off all season.
+SYNC_TOLERANCE = 5
+
+
+def sync_player_games(conn, cap: int = PLAYER_SYNC_CAP) -> int:
+    """Store every player's line from each game in `team_games`, newest first.
+
+    `team_games` already holds only the games that count (final, regular season, standard
+    games), so this inherits its filters and adds none. A game is marked synced only once
+    both of its teams' players parsed: a failed fetch or a one-sided box stays open and is
+    retried next run. Newest first, so this season fills before last. Returns games stored.
+    """
+    todo = conn.execute(
+        "SELECT game_id, MIN(date), MIN(season_year) FROM team_games "
+        "WHERE game_id NOT IN (SELECT game_id FROM player_sync) "
+        "GROUP BY game_id ORDER BY MIN(date) DESC LIMIT ?", (cap,)).fetchall()
+    stored = 0
+    for game_id, day, season_year in todo:
+        sides = dict(conn.execute(
+            "SELECT team_id, opponent_id FROM team_games WHERE game_id=?", (game_id,)))
+        box = fetch_boxscore(game_id)
+        if not box or set(sides) - {p["team_id"] for p in box.values()}:
+            continue
+        for pid, p in box.items():
+            if p["team_id"] not in sides:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO player_games (game_id, date, season_year, team_id, "
+                "opponent_id, player_id, position, minutes, points, rebounds, assists, "
+                "threes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (game_id, day, season_year, p["team_id"], sides[p["team_id"]], pid,
+                 p["position"], p["minutes"], p["points"], p["rebounds"], p["assists"],
+                 p["threes_made"]))
+        conn.execute("INSERT OR IGNORE INTO player_sync (game_id, synced_at) VALUES (?, ?)",
+                     (game_id, datetime.now(timezone.utc).isoformat()))
+        conn.commit()                         # per game: a crash mid-backfill keeps progress
+        stored += 1
+    return stored
+
+
+def position_sync_status(conn, season_year: int) -> tuple[int, int]:
+    """(games stored, games that count) for this season and last."""
+    return conn.execute(
+        "SELECT COUNT(DISTINCT s.game_id), COUNT(DISTINCT t.game_id) FROM team_games t "
+        "LEFT JOIN player_sync s ON s.game_id = t.game_id WHERE t.season_year IN (?, ?)",
+        (season_year - 1, season_year)).fetchone()
+
+
+def position_factors(conn, season_year: int, k: int = PRIOR_GAMES) -> dict:
+    """{(team_id, position, stat): (factor, rank)}: what a defense allows to guards,
+    forwards or centers per 36 minutes, relative to the league. Rank 1 is the stingiest.
+
+    Per minute rather than per game, so it measures the defense and not how many minutes
+    opponents happened to give that position against it. This season is shrunk toward last
+    by `k` games, as in allowance_factors(), then divided by the league mean, so factors
+    average 1.0. Empty until the backfill is done: a half-filled season would rank teams on
+    whichever games happened to load first.
+    """
+    stored, total = position_sync_status(conn, season_year)
+    if not total or total - stored > SYNC_TOLERANCE:
+        return {}
+
+    totals: dict[tuple, list] = {}            # (year, defense, pos, stat) -> [stat, minutes]
+    games: dict[tuple, set] = {}              # (year, defense) -> game ids
+    for yr, opp, pos, gid, mins, *vals in conn.execute(
+            "SELECT season_year, opponent_id, position, game_id, minutes, points, rebounds, "
+            "assists, threes FROM player_games WHERE season_year IN (?, ?) "
+            "AND position IS NOT NULL AND minutes > 0", (season_year - 1, season_year)):
+        games.setdefault((yr, opp), set()).add(gid)
+        for stat, v in zip(TEAM_STATS, vals):
+            if v is None:
+                continue
+            t = totals.setdefault((yr, opp, pos, stat), [0.0, 0.0])
+            t[0] += v
+            t[1] += mins
+
+    rates: dict[tuple, float] = {}
+    for opp in {d for _, d in games}:
+        p_n = len(games.get((season_year - 1, opp), ()))
+        for pos in POSITIONS:
+            for stat in TEAM_STATS:
+                c_v, c_m = totals.get((season_year, opp, pos, stat), (0.0, 0.0))
+                p_v, p_m = totals.get((season_year - 1, opp, pos, stat), (0.0, 0.0))
+                if p_n:
+                    v, m = c_v + k * p_v / p_n, c_m + k * p_m / p_n
+                else:
+                    v, m = c_v, c_m
+                if m:
+                    rates[(opp, pos, stat)] = 36 * v / m
+
+    out = {}
+    for pos in POSITIONS:
+        for stat in TEAM_STATS:
+            ranked = sorted((r, o) for (o, p, s), r in rates.items() if p == pos and s == stat)
+            if not ranked:
+                continue
+            league = sum(r for r, _ in ranked) / len(ranked)
+            for i, (r, o) in enumerate(ranked, 1):
+                out[(o, pos, stat)] = (round(r / league, 4), i)
+    return out

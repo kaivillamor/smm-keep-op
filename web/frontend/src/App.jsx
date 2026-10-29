@@ -432,22 +432,33 @@ function NbaHome() {
       <h2>Method parlays</h2>
       <p className="muted">
         The written-down parlay method, tracked on paper: rebuilt each run until its first leg
-        tips, then frozen and graded from box scores. No money staked.
+        tips, then frozen and graded from box scores. No money staked. H2H and Sim D are games
+        over the line against tonight's opponent (three seasons) and the five most similar
+        defenses; Pos D is the opponent's rank against his position, 1 = stingiest, and the
+        method skips 1–3.
       </p>
-      {parlays?.record?.length > 0 ? (
+      {/* The count is reset (the owner, 10-29) until NBA_RECORD_FROM in web/app.py is set;
+          each parlay below keeps its own result either way. */}
+      {parlays && !parlays.error && (parlays.record_from == null ? (
+        <p className="muted">
+          The count is reset: wins and losses aren't being counted until it's switched back
+          on. Each parlay below still shows whether it hit.
+        </p>
+      ) : parlays.record.length > 0 ? (
         <div className="kpis">
           {parlays.record.map((r) => (
             <Kpi
               key={r.tier}
               label={`${r.tier} parlays`}
               value={`${r.won}–${r.lost}`}
-              sub={`${signed(r.profit)} on $${r.staked}${r.void ? ` · ${r.void} void` : ''}`}
+              sub={`${signed(r.profit)} on $${r.staked} since ${parlays.record_from}${
+                r.void ? ` · ${r.void} void` : ''}`}
             />
           ))}
         </div>
       ) : (
-        parlays && !parlays.error && <p className="muted">No method parlay has settled yet.</p>
-      )}
+        <p className="muted">No method parlay has settled since {parlays.record_from}.</p>
+      ))}
       <MethodParlays data={parlays} latest={sum?.slates?.[0]} />
 
       <h2>Props</h2>

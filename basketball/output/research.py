@@ -20,6 +20,7 @@ prediction without its line is meaningless, which is not true in baseball.
 
     python output/research.py report     # calibration + ranking signal
     python output/research.py owner      # your logic vs the quant model
+    python output/research.py bans       # banned players/teams vs everyone else
     python output/research.py grade      # grade pending predictions
 """
 import math
@@ -135,6 +136,18 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                                                   --  its first game): the average the
                                                   --  method's rule reads. season_avg above
                                                   --  is the model's blend with last season
+            h2h_hits      INTEGER,                -- games over this line vs tonight's
+            h2h_meetings  INTEGER,                --  opponent, of every meeting in three
+                                                  --  seasons (10-29). vs_opp_* is the
+                                                  --  model's two-season average
+            sim_opp_hits  INTEGER,                -- games over this line, of sim_opp_games
+            position      TEXT,                   -- 'G' | 'F' | 'C', ESPN's roster listing
+            opp_pos_factor REAL,                  -- what tonight's opponent allows to that
+            opp_pos_rank  INTEGER,                --  position per 36 in this market, vs the
+                                                  --  league; rank 1 = stingiest of 30.
+                                                  --  NULL until the box-score backfill ends
+            banned        TEXT,                   -- 'player' | 'team' (method.banned), or
+                                                  --  'no'. NULL = logged before 10-29
             outcome       TEXT DEFAULT NULL,      -- 'win' | 'loss' | 'void'
             actual_value  REAL DEFAULT NULL,      -- what the player actually recorded
             created_at    TEXT NOT NULL,          -- first time this row was seen
@@ -169,6 +182,29 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
         -- Dates whose games are all final and stored, so the backfill never refetches.
         CREATE TABLE IF NOT EXISTS team_sync (
             date       TEXT PRIMARY KEY,
+            synced_at  TEXT
+        );
+
+        -- Every player's line from each team_games game, with ESPN's position: the raw
+        -- material for defense vs position (team_defense.position_factors).
+        CREATE TABLE IF NOT EXISTS player_games (
+            game_id      TEXT NOT NULL,
+            date         TEXT NOT NULL,
+            season_year  INTEGER,
+            team_id      TEXT NOT NULL,
+            opponent_id  TEXT NOT NULL,
+            player_id    TEXT NOT NULL,
+            position     TEXT,                  -- 'G' | 'F' | 'C'
+            minutes      REAL,
+            points       REAL,
+            rebounds     REAL,
+            assists      REAL,
+            threes       REAL,
+            PRIMARY KEY (game_id, player_id)
+        );
+        -- Games whose box score is stored, both teams' players parsed.
+        CREATE TABLE IF NOT EXISTS player_sync (
+            game_id    TEXT PRIMARY KEY,
             synced_at  TEXT
         );
 
@@ -215,6 +251,11 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             sim_avg            REAL,
             sim_games          INTEGER,
             teammate_usage_out REAL,
+            h2h_hits           INTEGER,          -- over the picked line, of h2h_meetings
+            h2h_meetings       INTEGER,          --  (three seasons; 10-29)
+            sim_hits           INTEGER,          -- over the picked line, of sim_games
+            position           TEXT,
+            opp_pos_rank       INTEGER,          -- 1 = stingiest vs his position
             outcome            TEXT,             -- 'win' | 'loss' | 'void'
             actual_value       REAL
         );
@@ -234,9 +275,19 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                       ("teammate_usage_out", "REAL"), ("hit_l10", "REAL"),
                       ("hit_l20", "REAL"), ("sim_opp_avg", "REAL"),
                       ("sim_opp_games", "INTEGER"), ("season_avg_raw", "REAL"),
-                      ("book_under_odds", "INTEGER")):
+                      ("book_under_odds", "INTEGER"), ("h2h_hits", "INTEGER"),
+                      ("h2h_meetings", "INTEGER"), ("sim_opp_hits", "INTEGER"),
+                      ("position", "TEXT"), ("opp_pos_factor", "REAL"),
+                      ("opp_pos_rank", "INTEGER"), ("banned", "TEXT")):
         if col not in cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {decl}")
+    # method_legs had no migration before 2026-10-29; legs stored earlier keep these NULL.
+    leg_cols = {r[1] for r in conn.execute("PRAGMA table_info(method_legs)")}
+    for col, decl in (("h2h_hits", "INTEGER"), ("h2h_meetings", "INTEGER"),
+                      ("sim_hits", "INTEGER"), ("position", "TEXT"),
+                      ("opp_pos_rank", "INTEGER")):
+        if col not in leg_cols:
+            conn.execute(f"ALTER TABLE method_legs ADD COLUMN {col} {decl}")
     conn.commit()
     return conn
 
@@ -255,7 +306,8 @@ _RUN_FIELDS = ("model_prob", "base_prob", "owner_adj", "calibrated_prob",
                "stats_season", "stat_sd", "season_avg", "recent_avg", "recent_games",
                "minutes_avg", "usage_proxy", "days_rest", "vs_opp_avg", "vs_opp_games",
                "opp_allow_factor", "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games",
-               "season_avg_raw")
+               "season_avg_raw", "h2h_hits", "h2h_meetings", "sim_opp_hits", "position",
+               "opp_pos_factor", "opp_pos_rank")
 _RUN_UPDATE = ", ".join(
     f"{f}=CASE WHEN excluded.model_prob IS NOT NULL THEN excluded.{f} ELSE predictions.{f} END"
     for f in _RUN_FIELDS)
@@ -267,7 +319,9 @@ _FIELDS = ("game_id", "player_id", "player_name", "team", "opponent", "market", 
            "season_avg", "recent_avg", "recent_games", "minutes_avg", "vs_opp_avg",
            "vs_opp_games", "usage_proxy", "days_rest", "is_home", "opp_allow_factor",
            "injury_status", "teammate_minutes_out", "teammate_usage_out",
-           "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games", "season_avg_raw")
+           "hit_l10", "hit_l20", "sim_opp_avg", "sim_opp_games", "season_avg_raw",
+           "h2h_hits", "h2h_meetings", "sim_opp_hits", "position", "opp_pos_factor",
+           "opp_pos_rank", "banned")
 
 
 def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
@@ -319,6 +373,9 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
            "                                predictions.teammate_minutes_out), "
            "  teammate_usage_out=COALESCE(excluded.teammate_usage_out, "
            "                              predictions.teammate_usage_out), "
+           # Read from the ban lists on every run, prediction or not, so a player taken off
+           # a list mid-day stops counting as banned.
+           "  banned=excluded.banned, "
            "  updated_at=excluded.updated_at")
     n = 0
     slates: set[str] = set()
@@ -728,6 +785,39 @@ def compare_owner_logic(db_path: str = RESEARCH_DB) -> None:
     print(f"{'=' * w}\n")
 
 
+def compare_bans(db_path: str = RESEARCH_DB) -> None:
+    """Do the banned players' and teams' props actually hit less often?
+
+    Banned rows against the rest of the trusted pool. The ban filters the method, never
+    this corpus, so both sides are logged alike from the day the lists began (`banned` is
+    NULL before 10-29, 'no' when checked and on neither list). Honest-use note, as for
+    compare_owner_logic(): a ban is the owner's call, made forward; this measures it.
+    """
+    conn = _connect(db_path)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT banned, outcome, minutes_avg, market FROM predictions "
+        "WHERE outcome IN ('win','loss') AND banned IS NOT NULL")]
+    conn.close()
+    pool = [r for r in rows if untrusted(r["minutes_avg"], r["market"]) is None]
+    ban = [r for r in pool if r["banned"] != "no"]
+    rest = [r for r in pool if r["banned"] == "no"]
+
+    w = 56
+    print(f"\n{'=' * w}\n  BANNED vs EVERYONE ELSE (trusted pool)\n{'=' * w}")
+    if len(ban) < 20 or not rest:
+        print(f"  {len(ban)} graded banned row(s) — too few to read (need 20).")
+        print(f"{'=' * w}\n")
+        return
+    hit = lambda g: sum(1 for r in g if r["outcome"] == "win") / len(g)
+    a, b = hit(ban), hit(rest)
+    se = math.sqrt(a * (1 - a) / len(ban) + b * (1 - b) / len(rest))
+    print(f"  banned        : {a:.1%} over  (n={len(ban)})")
+    print(f"  everyone else : {b:.1%} over  (n={len(rest)})")
+    print(f"  difference    : {(a - b) * 100:+.1f} pts   "
+          f"95% CI [{(a - b - 1.96 * se) * 100:+.1f}, {(a - b + 1.96 * se) * 100:+.1f}]")
+    print(f"{'=' * w}\n")
+
+
 if __name__ == "__main__":
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
@@ -735,6 +825,9 @@ if __name__ == "__main__":
         grade_predictions()
     elif cmd in ("owner", "compare"):
         compare_owner_logic()
+    elif cmd == "bans":
+        compare_bans()
     else:
         report()
         compare_owner_logic()
+        compare_bans()

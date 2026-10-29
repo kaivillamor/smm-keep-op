@@ -10,8 +10,8 @@ changed, never because last week's parlays lost.
 What it does each slate:
   1. score every FanDuel points, rebounds and assists leg the owner would consider — main
      lines, plus points rungs 2-5 under the main line;
-  2. keep the legs that pass the owner's rules (trust, consistency, average, matchup,
-     price);
+  2. keep the legs that pass the owner's rules (bans, trust, consistency, average,
+     head-to-head, similar defenses, defense vs position, price);
   3. build the best $10 parlay, then the best $5 from the players it left, each inside the
      owner's payout targets;
   4. store them, so every one is graded against the box scores.
@@ -51,9 +51,35 @@ CONSISTENCY_L20 = 0.6
 
 # "how they perform against teams similar to their opponent or against their opponent in
 # general which is just head2head." Applied only with enough games to mean anything.
+# Since 2026-10-29 both count the way consistency does: how often he cleared THIS line in
+# those games, which has to be more than half (the owner's bar). Until then each compared an
+# average to the line, so one big night hid the misses: Saddiq Bey's 10.0 against DEN beat
+# a 9.5 line on 2 overs in 4. Head-to-head also looks back three seasons, not two, which
+# left one to four meetings: Alexander-Walker was 3 of 3 against HOU inside the window and
+# 0 of 4 the season before it. Similar defenses stays on two seasons, because the defenses
+# are matched on what they allow now.
+H2H_SEASONS = 3                # this season and the two before it
 H2H_MIN_GAMES = 2
 SIMILAR_TEAMS = 5              # nearest defenses by what they allow in this market
 SIMILAR_MIN_GAMES = 3
+if H2H_SEASONS < 2:
+    raise ValueError("H2H_SEASONS counts this season and last at least: the game log has both")
+
+# "Teams that play solid defense or have an opponent team player set to match up against
+# our intended player" (the owner, 2026-10-29). ESPN has no data on who guards whom, so the
+# measure is what tonight's opponent allows to his position (guard, forward or center) per
+# 36 minutes in this market, from stored box scores (pipeline/team_defense). The owner
+# skips the 3 stingiest of 30.
+STINGY_VS_POSITION = 3
+
+# "We also need to begin banning teams/players" (the owner, 2026-10-29). A banned player is
+# never used; a banned team means none of its players are. Both filter this method only:
+# banned players keep their research rows, and every row logs whether it was banned, so the
+# bans can be measured (output/research.compare_bans). Keyed by ESPN id, never by name:
+#     BANNED_PLAYERS = {"<player id>": ("Name", "date added", "why"), ...}
+#     BANNED_TEAMS   = {"<team id>": ("ABBR", "date added", "why"), ...}
+BANNED_PLAYERS: dict[str, tuple] = {}
+BANNED_TEAMS: dict[str, tuple] = {}
 
 # "I tend to avoid anything that's -400 over but if it adds a significant amount (+$20)
 # to the parlay payout i keep it."
@@ -110,18 +136,40 @@ def hit_rate(rows: list, stat: str, line: float, n: int) -> tuple[float | None, 
     return hits / len(vals), hits, len(vals)
 
 
-def similar_opponent_avg(rows: list, stat: str, opponent_id: str, factors: dict,
-                         team_stat: str, k: int = SIMILAR_TEAMS) -> tuple[float | None, int]:
-    """Average vs the k defenses closest to tonight's opponent in what they allow in this
-    market — tonight's opponent itself excluded, since head-to-head is measured apart."""
+def over(vals: list, line: float | None) -> int | None:
+    """How many of these games cleared `line`."""
+    return None if line is None else sum(1 for v in vals if v > line)
+
+
+def more_than_half(hits: int, games: int) -> bool:
+    """The owner's head-to-head and similar-defenses bar: 3 of 5 passes, 2 of 4 does not."""
+    return 2 * hits > games
+
+
+def mean(vals: list) -> float | None:
+    """To 2 places, as sim_avg and sim_opp_avg have always been stored."""
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+def meetings(rows: list, stat: str, opponent_id: str | None) -> list:
+    """His `stat` in every game against tonight's opponent, newest first. `rows` carries
+    H2H_SEASONS seasons here: the game log plus the older seasons main.py fetches apart."""
+    return [g[stat] for g in rows
+            if opponent_id and g.get("opponent_id") == opponent_id and g.get(stat) is not None]
+
+
+def similar_opponent_games(rows: list, stat: str, opponent_id: str, factors: dict,
+                           team_stat: str, k: int = SIMILAR_TEAMS) -> list:
+    """His `stat` in every game against the k defenses closest to tonight's opponent in what
+    they allow in this market — tonight's opponent itself excluded, since head-to-head is
+    measured apart."""
     f0 = factors.get((opponent_id, team_stat))
     if f0 is None:
-        return None, 0
+        return []
     nearest = sorted((abs(f - f0), t) for (t, s), f in factors.items()
                      if s == team_stat and t != opponent_id)
     similar = {t for _, t in nearest[:k]}
-    vals = [g[stat] for g in rows if g.get("opponent_id") in similar and g.get(stat) is not None]
-    return (round(sum(vals) / len(vals), 2) if vals else None), len(vals)
+    return [g[stat] for g in rows if g.get("opponent_id") in similar and g.get(stat) is not None]
 
 
 def player_inputs(rows: list, stat: str, opponent_id: str | None) -> dict:
@@ -146,11 +194,12 @@ def player_inputs(rows: list, stat: str, opponent_id: str | None) -> dict:
 
 
 def legs_for(candidate: dict, rows: list, stat: str, rungs: list, own: dict,
-             similar: tuple) -> list[dict]:
+             similar: list, meet: list) -> list[dict]:
     """One leg per rung for a player-market, with every input the rules read.
 
     `rungs` is [(line, odds, undercut), ...] — the main line first (undercut 0). `own` is
-    player_inputs() for this player and market.
+    player_inputs() for this player and market; `similar` and `meet` are his games against
+    the similar defenses and against tonight's opponent, counted at each rung's own line.
     """
     legs = []
     for line, odds, undercut in rungs:
@@ -162,7 +211,8 @@ def legs_for(candidate: dict, rows: list, stat: str, rungs: list, own: dict,
         smooth = (h10 + 1) / (n10 + 2) if n10 else None
         legs.append({
             **{k: candidate.get(k) for k in ("game_id", "player_id", "player_name", "team",
-                                             "opponent", "tipoff", "injury_status")},
+                                             "team_id", "opponent", "tipoff", "injury_status",
+                                             "position", "opp_pos_rank")},
             "market": candidate["market"], "line": line,
             "main_line": candidate.get("line"), "undercut": undercut,
             "odds": odds, "decimal": decimal(odds), "implied": implied(odds),
@@ -173,7 +223,9 @@ def legs_for(candidate: dict, rows: list, stat: str, rungs: list, own: dict,
             "minutes_avg": own["minutes_avg"],
             "season_avg": own["season_avg"], "recent_avg": own["recent_avg"],
             "h2h_avg": own["h2h_avg"], "h2h_games": own["h2h_games"],
-            "sim_avg": similar[0], "sim_games": similar[1],
+            "h2h_hits": over(meet, line), "h2h_meetings": len(meet),
+            "sim_avg": mean(similar), "sim_games": len(similar),
+            "sim_hits": over(similar, line),
             "teammate_usage_out": candidate.get("teammate_usage_out"),
             "sweetener": odds <= MAX_FAVORITE,
         })
@@ -198,6 +250,16 @@ def untrusted(minutes: float | None, market: str) -> str | None:
     return "not_trusted_minutes"
 
 
+def banned(player_id, team_id) -> str | None:
+    """'player' or 'team' if a ban list covers this player, else None. The rule and the
+    research log both read this, so the flag can never disagree with the filter."""
+    if str(player_id) in BANNED_PLAYERS:
+        return "player"
+    if str(team_id) in BANNED_TEAMS:
+        return "team"
+    return None
+
+
 def fails(leg: dict) -> str | None:
     """None if the leg passes the owner's rules, else the first rule it fails.
 
@@ -205,6 +267,9 @@ def fails(leg: dict) -> str | None:
     it is indistinguishable from a broken filter (§29).
     """
     line = leg["line"]
+    ban = banned(leg["player_id"], leg.get("team_id"))
+    if ban:
+        return f"banned_{ban}"
     if leg.get("injury_status") != "active":
         return "not_confirmed_active"     # out, day-to-day, or no report to check against
     why = untrusted(leg.get("minutes_avg"), leg["market"])
@@ -216,10 +281,16 @@ def fails(leg: dict) -> str | None:
         return "inconsistent"
     if (leg.get("season_avg") or 0) <= line or (leg.get("recent_avg") or 0) <= line:
         return "average_below_line"
-    if leg["h2h_games"] >= H2H_MIN_GAMES and (leg["h2h_avg"] or 0) <= line:
-        return "head_to_head_below_line"
-    if leg["sim_games"] >= SIMILAR_MIN_GAMES and (leg["sim_avg"] or 0) <= line:
-        return "similar_defenses_below_line"
+    if (leg["h2h_meetings"] >= H2H_MIN_GAMES
+            and not more_than_half(leg["h2h_hits"], leg["h2h_meetings"])):
+        return "head_to_head_under_line"
+    if (leg["sim_games"] >= SIMILAR_MIN_GAMES
+            and not more_than_half(leg["sim_hits"], leg["sim_games"])):
+        return "similar_defenses_under_line"
+    # No rank (the box-score backfill is unfinished, or ESPN lists no position): the rule
+    # cannot judge, so it does not apply. The collector prints how many legs that was.
+    if leg.get("opp_pos_rank") is not None and leg["opp_pos_rank"] <= STINGY_VS_POSITION:
+        return "stingy_vs_position"
     if not leg["worth"] or leg["worth"] < 1.0:
         return "price_too_short"          # "if the odds are good": record must beat price
     return None
@@ -309,7 +380,8 @@ def build_slate(legs: list[dict], held: dict[str, set]) -> tuple[dict, dict]:
 _LEG_COLS = ("game_id", "player_id", "player_name", "team", "opponent", "tipoff", "market",
              "line", "main_line", "undercut", "odds", "hit_l10", "hit_l20", "minutes_avg",
              "season_avg", "recent_avg", "h2h_avg", "h2h_games", "sim_avg", "sim_games",
-             "teammate_usage_out")
+             "teammate_usage_out", "h2h_hits", "h2h_meetings", "sim_hits", "position",
+             "opp_pos_rank")
 
 
 def frozen(conn, day: str, now: str) -> dict[str, set[str]]:
@@ -431,16 +503,24 @@ def describe(conn, day: str) -> str:
         out.append(f"{tier} parlay — {n} legs, {am:+d}, ${profit:.2f} profit on "
                    f"${stake:.0f}   [{state}; built {gen[11:16]} UTC]")
         for i, (name, team, opp, market, line, main, cut, odds, l10, l20, h2h, h2hn,
-                sim, simn, outc) in enumerate(conn.execute(
+                sim, simn, outc, h2h_hits, h2h_meets, sim_hits, pos, pos_rank) in enumerate(
+                conn.execute(
                 "SELECT player_name, team, opponent, market, line, main_line, undercut, odds, "
-                "hit_l10, hit_l20, h2h_avg, h2h_games, sim_avg, sim_games, outcome "
+                "hit_l10, hit_l20, h2h_avg, h2h_games, sim_avg, sim_games, outcome, "
+                "h2h_hits, h2h_meetings, sim_hits, position, opp_pos_rank "
                 "FROM method_legs WHERE parlay_id=? ORDER BY id", (pid,)), 1):
             rung = "main line" if not cut else f"{cut:g} under {main:g}"
+            # Legs stored before 10-29 have only the averages the old rules read.
             matchup = []
-            if h2hn:
+            if h2h_meets:
+                matchup.append(f"h2h {h2h_hits}/{h2h_meets}")
+            elif h2hn and h2h_meets is None:
                 matchup.append(f"h2h {h2h:.1f} ({h2hn})")
             if simn:
-                matchup.append(f"similar D {sim:.1f} ({simn})")
+                matchup.append(f"similar D {sim_hits}/{simn}" if sim_hits is not None
+                               else f"similar D {sim:.1f} ({simn})")
+            if pos_rank:
+                matchup.append(f"vs {pos} #{pos_rank}")
             out.append(f"  {i}. {name} ({team} vs {opp})  {_MARKET_WORD.get(market, market)} "
                        f"over {line:g}  {odds:+d}  [{rung}]  {round(l10 * 10)}/10, "
                        f"{round(l20 * 20)}/20   {'  '.join(matchup)}"
