@@ -1,12 +1,5 @@
-"""User store — SQLite on the Railway volume, scrypt-hashed passwords.
-
-Deliberately a SEPARATE database file from research.db. The research DB gets pulled off
-the volume with `railway volume files download`; if users lived in it, every download
-would also export the password hashes.
-
-Passwords are never stored. scrypt (stdlib hashlib, no dependency) with a per-user random
-salt; the stored string carries its own parameters so cost can be raised later without
-invalidating existing rows.
+"""User store: scrypt-hashed passwords with per-user salts, in users.db. Never put users in
+research.db: downloads of that file would carry the hashes.
 
 CLI:
     python -m web.users list
@@ -23,8 +16,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
-# Tuned so a single verification costs ~100ms on modest hardware — slow enough that
-# offline brute force is expensive, fast enough for interactive login.
+# ~100ms per verification.
 _N, _R, _P, _DKLEN = 2 ** 14, 8, 1, 32
 
 
@@ -67,8 +59,7 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored: str) -> bool:
-    """Constant-time verification. Parameters come from the stored string, so rows
-    hashed under older settings keep working after _N is raised."""
+    """Constant-time verification, with the cost parameters read from the stored string."""
     try:
         scheme, n, r, p, salt_b64, hash_b64 = stored.split("$")
         if scheme != "scrypt":
@@ -128,16 +119,10 @@ def delete_user(username: str, path: str | None = None) -> bool:
 
 
 def authenticate(username: str, password: str, path: str | None = None) -> dict | None:
-    """Returns the user row on success, else None.
-
-    A missing username still runs a full scrypt verification against a dummy hash, so
-    the response time does not reveal whether an account exists.
-    """
+    """Returns the user row on success, else None."""
     user = get_user(username, path)
     if user is None:
-        # Exactly ONE scrypt call, same as the found-user path. Hashing a dummy here
-        # instead would cost two and make a missing account measurably slower — which
-        # is a username oracle. _DUMMY_HASH is precomputed once at import.
+        # Exactly one scrypt call, as for a real user, so timing can't reveal accounts.
         verify_password(password, _DUMMY_HASH)
         return None
     return user if verify_password(password, user["password_hash"]) else None
@@ -148,12 +133,7 @@ _DUMMY_HASH = hash_password(secrets.token_hex(16))
 
 
 def bootstrap_from_env(path: str | None = None) -> int:
-    """Seed the store on first run so a fresh deploy is never locked out.
-
-    Reads the same DASH_USERS / DASH_PASS variables the env-based auth used, and only
-    inserts usernames that do not already exist — so it is safe to leave the variables
-    set, and it never overwrites a password changed through the CLI.
-    """
+    """Seed missing users from DASH_USERS / DASH_PASS; never overwrites an existing one."""
     created = 0
     entries = []
     for entry in (os.getenv("DASH_USERS") or "").split(","):

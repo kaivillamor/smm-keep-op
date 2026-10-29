@@ -86,10 +86,7 @@ def _passes_filters(leg: dict) -> bool:
 
 
 def _remove_correlated(legs: list[dict]) -> list[dict]:
-    """
-    Drops correlated same-game legs: ML on a team + OVER on that same game.
-    When your ML team wins big, the OVER hits too — the legs aren't independent.
-    """
+    """Drops correlated same-game legs: ML on a team + OVER on that same game."""
     keep = []
     for leg in legs:
         if _is_correlated_with_existing(leg, keep):

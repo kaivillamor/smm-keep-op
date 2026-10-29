@@ -244,20 +244,15 @@ def _roll_up_pairs(db_path: str, noun: str) -> list[dict]:
 # ("Suspended" games resume later, so they stay pending rather than voiding.)
 _NO_CONTEST_STATES = ("postponed", "cancelled", "canceled")
 
-# Terminal results only ('final' | 'no_contest'), keyed (game_pk, slate). This module
-# lives as long as the web process, so caching a pending state froze a suspended or
-# not-yet-final game as pending until the next redeploy.
+# Terminal results only ('final' | 'no_contest'), keyed (game_pk, slate): never cache
+# 'pending', since this lives as long as the web process.
 _GAME_STATE_CACHE: dict[tuple[int, str | None], str] = {}
 
 
 def _fetch_game_entries(game_pk: int) -> list[dict] | None:
     """Every schedule entry for one game, earliest slate first; None if the fetch failed.
-
-    A game is listed once per date it was scheduled on. A postponed game appears on its
-    original date as 'Postponed' (abstractGameState 'Final', no result) and again on the
-    makeup date. Both entries carry the MAKEUP date as officialDate, so the slate is read
-    from the enclosing date block, not from the game.
-    """
+    A postponed game is listed on its original and makeup dates, both with the makeup's
+    officialDate, so the slate comes from the enclosing date block."""
     try:
         resp = requests.get(f"{MLB_API}/schedule",
                             params={"sportId": 1, "gamePks": game_pk}, timeout=10)
@@ -278,18 +273,11 @@ def _fetch_game_entries(game_pk: int) -> list[dict] | None:
 
 
 def _game_result_state(game_pk: int, slate: str | None = None) -> str:
-    """Classifies a game for grading a row logged for `slate`: 'final' | 'no_contest' | 'pending'.
+    """'final' | 'no_contest' | 'pending' for a row logged for `slate`. Box scores populate
+    live, so grade only on 'final'.
 
-    Box scores populate live (and pre-game), so player stats MUST NOT be graded
-    until this returns 'final' — otherwise a batter sitting on 0 hits in the 3rd
-    inning gets permanently recorded as a loss.
-
-    The entry for the row's OWN slate decides. A row logged for a date the game was then
-    postponed from is void, as the book voids that bet, even once the makeup is played;
-    a row logged on the makeup date grades on the makeup. Reading whichever entry came
-    first voided all 12 replay predictions for 849817 (postponed 10-16, played 10-18). A
-    suspended entry defers to the game's latest one, which is where it resumes. With no
-    slate, or none that matches, the latest entry decides.
+    The entry for the row's own slate decides: a postponed date voids, the makeup grades.
+    A suspended entry defers to the latest one, as does a missing or unmatched slate.
     """
     key = (game_pk, slate)
     if key in _GAME_STATE_CACHE:

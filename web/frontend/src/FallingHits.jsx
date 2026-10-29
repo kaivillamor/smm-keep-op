@@ -1,11 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 
 /**
- * Ambient feed: winning legs drift down the centre of the screen and fade out.
- *
- * Items are spawned on a timer and removed when their animation ends, so the DOM never
- * accumulates — a naive "append forever" version degrades badly after a few minutes.
- * Each gets a random lane, duration and drift so the column doesn't look like a queue.
+ * Ambient feed: winning legs drift down the screen and fade out. Each item is removed
+ * when its animation ends, so the DOM never accumulates.
  */
 export default function FallingHits({ hits }) {
   const [items, setItems] = useState([])

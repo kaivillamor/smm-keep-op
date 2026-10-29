@@ -21,15 +21,8 @@ export function Result({ outcome, actual }) {
 }
 
 /**
- * Every prop logged for one slate, ranked by model probability.
- *
- * No edge column, unlike the MLB slate: NBA has no fitted calibration, and model minus
- * implied would present an edge the model has not demonstrated. Both numbers are shown
- * side by side instead, and the meta line says the probabilities are raw.
- *
- * Quant and Rules appear only on a slate where a personal rule actually fired. The rule
- * is that both stay visible wherever a projection is shown (PROJECT.md §23); when every
- * adjustment is zero, saying so in one line does that without a column of dashes.
+ * Every prop logged for one slate, ranked by model probability. Quant and Rules columns
+ * appear when an owner rule fired; otherwise one line says none did.
  */
 export default function NbaSlate({ slate, slates, onPick }) {
   const [market, setMarket] = useState('')
@@ -48,8 +41,7 @@ export default function NbaSlate({ slate, slates, onPick }) {
   const shown = showAll ? rows : rows.slice(0, 20)
   const rulesFired = slate.props.some((p) => p.rules)
   const graded = slate.props.filter((p) => p.outcome === 'win' || p.outcome === 'loss').length
-  // The server ranks these last: the model ignores injury status, so their stale lines
-  // score near-certain, and a DNP voids.
+  // The server ranks players listed out last.
   const out = slate.props.filter((p) => p.injury === 'out').length
 
   return (

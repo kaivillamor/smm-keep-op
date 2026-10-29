@@ -1,14 +1,7 @@
 """
-Player-prop odds for NBA — copied from the baseball module 2026-09-12.
-
-SHARED ORIGIN: `baseball/pipeline/prop_odds.py`. The throttle / retry / pagination /
-name-normalisation half is a verbatim copy; if a genuine logic bug is fixed in one, check
-the other. See PROJECT.md §25.
-
-STRUCTURAL DIFFERENCE from baseball: MLB hit and HR props are binary ("Over 0.5"), so the
-baseball module hardcodes that line. NBA props are real lines — Over 24.5 points, Over 8.5
-rebounds — so the value itself must be read from the book and carried through. The
-market-specific half was NOT copied; see the TODO at the bottom.
+Player-prop odds for NBA. Twin of baseball/pipeline/prop_odds.py (throttle, retry,
+pagination, name matching): a logic fix in one needs checking in the other. NBA lines are
+real values (Over 24.5), read from the book rather than fixed at 0.5.
 """
 import os
 import time
@@ -24,16 +17,11 @@ _BASE = os.getenv("PROP_ODDS_BASE_URL", "").rstrip("/")
 
 # Free tier is ~12 req/min → one request every 5s. Add margin so bursts never trip it.
 _MIN_INTERVAL = 5.2
-# The API caps a page at 200 rows (larger limits are silently clamped). Requesting the
-# max matters a lot here: every extra page costs a full throttle interval, so 50/page
-# turned one board into ~11 requests (~57s) where 200/page needs ~3 (~16s).
-_PAGE_SIZE    = 200
-_MAX_PAGES    = 20          # safety cap; a full NBA slate of props is well under this
+_PAGE_SIZE    = 200         # the API's page cap
+_MAX_PAGES    = 20          # safety cap: 20 × _PAGE_SIZE rows
 _TIMEOUT      = 20
 _last_call    = 0.0
 
-# Transient failures worth retrying — gateway/upstream blips (a single 502 on page 0
-# would otherwise kill the whole fetch) and rate-limit/timeout hiccups.
 _RETRY_STATUS   = {500, 502, 503, 504, 429}
 _MAX_RETRIES    = 3
 _RETRY_BACKOFF  = 2.0       # seconds, escalates per attempt (on top of the throttle)
@@ -73,12 +61,9 @@ def _get(path: str, params: dict) -> dict:
 
 
 def _paginate(path: str, params: dict) -> list[dict]:
-    """Walk the paginated odds feed via offset until has_more is false.
-
-    A mid-walk failure keeps the rows already collected instead of discarding
-    them — the API 400s past a deep offset (~free-tier cap) even when
-    `has_more` said otherwise, and 550 good rows beat zero. Only a first-page
-    failure propagates (nothing fetched ⇒ caller reports the fetch as failed)."""
+    """Walk the feed by offset until has_more is false. A later-page failure keeps the
+    rows already fetched (the API 400s past a deep offset); only a first-page failure
+    raises."""
     rows, offset = [], 0
     for _ in range(_MAX_PAGES):
         try:
@@ -93,10 +78,7 @@ def _paginate(path: str, params: dict) -> list[dict]:
         pg = page.get("pagination", {})
         if not pg.get("has_more"):
             break
-        # `next_offset` can come back explicitly null even with has_more=true, and
-        # dict.get()'s default only covers a *missing* key — taking it verbatim put
-        # None into offset and blew up the next iteration on None + _PAGE_SIZE,
-        # discarding every row already fetched. Fall back to a computed offset.
+        # `next_offset` can be null even with has_more=true.
         next_offset = pg.get("next_offset")
         offset = next_offset if isinstance(next_offset, int) else offset + _PAGE_SIZE
     return rows
@@ -109,49 +91,19 @@ def normalize_name(name: str) -> str:
     return n.lower().replace(".", "").replace("'", "").replace("-", " ").strip()
 
 
-# Restrict to a single book so a 2-leg parlay is actually placeable (you can't
-# parlay a DraftKings leg with a FanDuel leg). FanDuel — the only book the user bets.
-#
-# FEED VERIFIED 2026-10-20, before a single row was collected (§27 #2). This is the check
-# baseball skipped, and skipping it cost two months of analysis built on prices that were
-# wrong by 5-10 implied points (§28). Opening-night board, market=player_points:
-#
-#     main lines only      players   over  under
-#       draftkings             161    163    157   balanced
-#       fanduel                152    147    144   balanced
-#     same player + same line, both books: 93 comparisons
-#       mean implied gap (DK - FD)  +0.12 pts
-#       DK cheaper on 37/93 (40%)   direction varies
-#
-# Compare with baseball's failure signature: FanDuel returned ZERO unders, and DraftKings
-# looked cheaper on 37 of 37 players by a mean 8 points. A ~100% directional result is a
-# data bug, never an arbitrage. Nothing like that here — the two books disagree in both
-# directions by fractions of a point, which is what two real books look like.
-#
-# So FanDuel STAYS the default here. Do not copy baseball's switch to DraftKings: that was
-# forced by a broken feed, not a preference, and switching would make every logged price
-# unplaceable on the book actually being bet. The portable lesson is "record which book
-# priced it and verify the feed", not "use DraftKings".
-#
-# What this check CANNOT prove: that the absolute level is right. It shows the books are
-# not one feed mislabelled and neither is systematically shifted. Only comparing a couple
-# of players against the live app does the rest — do that on an early slate.
-# Re-verify periodically; a feed that is right today can break silently.
+# A single book, so a parlay is placeable.
 DEFAULT_BOOK = "fanduel"
 
 
 # ── NBA markets ──────────────────────────────────────────────────────────────
-# Verified against the live feed 2026-09-12. Row shape (differs from baseball):
-#     player_name    "Shai Gilgeous-Alexander"   <- NOT `player` / `player_id`, both absent
+# Row shape:
+#     player_name    "Shai Gilgeous-Alexander"   <- no player id
 #     market_type    "player_assists"
 #     stat_category  "assists"
-#     line           3.5                          <- baseball's Over-0.5 is implicit; here it is data
+#     line           3.5
 #     selection_type "over" | "under"
 #     odds_american  -700
 #     is_main_line   true | false                 <- false means an ALTERNATE line
-#
-# Markets confirmed present: player_points, player_made_threes, player_assists,
-# player_rebounds, the +combos, player_double_double, player_triple_double, player_blocks.
 
 MARKET_POINTS   = "player_points"
 MARKET_REBOUNDS = "player_rebounds"
@@ -165,15 +117,8 @@ def fetch_prop_odds(market: str, book: str | None = DEFAULT_BOOK,
     """Player props for one market, keyed by normalized player name.
 
     Returns {name: {"line": 24.5, "over": -115, "under": -105, "book": "fanduel",
-                    "event_id": ..., "start": ...}}
-
-    `main_line_only` defaults True: the feed carries alternate lines
-    (`is_main_line: false`) alongside the primary one, and mixing them would put several
-    different lines on the same player with no way to tell which the book is actually
-    featuring.
-
-    Over and Under arrive as SEPARATE rows for the same player+line, so they are paired
-    here — a caller wanting to price both sides needs them together.
+                    "event_id": ..., "start": ...}}. Over and under arrive as separate
+    rows and are paired here; `main_line_only` skips alternate lines.
     """
     rows = _board_rows(market)
     if rows is None:
@@ -195,16 +140,7 @@ def _board_rows(market: str) -> list | None:
 
 
 def _pregame(r: dict) -> bool:
-    """A row the method may use: a current PREGAME price.
-
-    The feed carries in-game lines on the same board — 276 of 2,273 points rows at
-    00:05 UTC on 2026-10-27 were `is_live` — and they look exactly like pregame rows apart
-    from that flag. One slipped into a replay as James Harden "points over 10.5 at -118":
-    a live line for a game already underway, which a pregame model reads as a near-certain
-    leg at even money. The collector's started-game check catches most of these
-    indirectly; this catches them directly, along with prices the feed itself marks stale
-    or inactive.
-    """
+    """A current pregame price: the board also carries live, inactive and stale rows."""
     return (not r.get("is_live") and r.get("is_active") is not False
             and not r.get("is_stale_pregame_price"))
 
@@ -230,8 +166,7 @@ def _parse_main(rows: list, market: str, book: str | None, main_line_only: bool)
             "book": r.get("sportsbook"), "event_id": r.get("event_id"),
             "start": r.get("event_start_time"), "market": market,
         })
-        # A different main line for the same player means the book moved it; keep the
-        # most recent and reset the paired prices rather than mixing two lines.
+        # The book moved the line: keep the latest and reset its prices.
         if entry["line"] != line:
             entry.update({"line": line, "over": None, "under": None})
         side = r.get("selection_type")
@@ -252,16 +187,8 @@ def _parse_ladders(rows: list, market: str, book: str | None) -> tuple[dict, int
 
     Returns ({name: [ladder, ...]}, rungs_dropped). A ladder is
     {player_name, event_id, start, main_line, main_over, rungs: [(line, odds), ...]} with
-    rungs nearest-first. A list per name rather than one ladder, because the board is not
-    date-filtered and a player can be priced for two games at once.
-
-    SANITIZED. Going down from the main line, each rung must be priced at least as short
-    as the one above it — a lower line over can never be less likely. On 2026-10-26, 37 of
-    1,367 FanDuel rungs broke that, e.g. Pascal Siakam "over 4.5 at +600" beside "over
-    13.5 at -2500" — almost certainly an UNDER price mislabelled as an over. Scored on its
-    own record, a near-certain leg at +600 looks like the best value on the board, so it is
-    exactly what a leg picker would grab. Violators are dropped, never repaired, and
-    counted so a feed that degrades shows up in the log (§28: verify the feed).
+    rungs nearest-first; a name has one per game. A rung priced longer than the one above
+    it is dropped (a lower line can't be less likely) and counted.
     """
     groups: dict[tuple, list] = {}
     for r in rows:
@@ -300,12 +227,7 @@ def _parse_ladders(rows: list, market: str, book: str | None) -> tuple[dict, int
 
 
 def fetch_prop_board(market: str, book: str | None = DEFAULT_BOOK) -> tuple[dict, dict]:
-    """Main lines AND the alternate ladder for one market, from ONE paginated fetch.
-
-    The alternate lines were always in the response; until 2026-10-26 they were filtered
-    out and thrown away. Parsing both from the same rows costs no extra API calls against
-    a ~12 request/minute limit.
-    """
+    """Main lines and the alternate ladder for one market, from one paginated fetch."""
     rows = _board_rows(market)
     if rows is None:
         return {}, {}

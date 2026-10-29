@@ -1,12 +1,7 @@
 """
-Player-prop odds API client — real sportsbook odds for player props.
-
-Endpoint base URL and key are read from `.env` (PROP_ODDS_BASE_URL / PROP_ODDS_API_KEY)
-so the provider isn't hard-coded in source. Free tier is rate-limited and slightly
-delayed; we space requests under the limit and paginate the odds feed.
-
-Primary use: fetch 1+ hit odds (player_hits market, Over 0.5) so the hit pipeline
-can price legs on real book-implied probability instead of manual entry.
+Player-prop odds API client; base URL and key come from .env (PROP_ODDS_BASE_URL,
+PROP_ODDS_API_KEY). Twin of basketball/pipeline/prop_odds.py: a logic fix in one needs
+checking in the other.
 """
 import os
 import time
@@ -22,16 +17,11 @@ _BASE = os.getenv("PROP_ODDS_BASE_URL", "").rstrip("/")
 
 # Free tier is ~12 req/min → one request every 5s. Add margin so bursts never trip it.
 _MIN_INTERVAL = 5.2
-# The API caps a page at 200 rows (larger limits are silently clamped). Requesting the
-# max matters a lot here: every extra page costs a full throttle interval, so 50/page
-# turned one board into ~11 requests (~57s) where 200/page needs ~3 (~16s).
-_PAGE_SIZE    = 200
-_MAX_PAGES    = 20          # safety cap; a full MLB slate of props is well under this
+_PAGE_SIZE    = 200         # the API's page cap
+_MAX_PAGES    = 20          # safety cap: 20 × _PAGE_SIZE rows
 _TIMEOUT      = 20
 _last_call    = 0.0
 
-# Transient failures worth retrying — gateway/upstream blips (a single 502 on page 0
-# would otherwise kill the whole fetch) and rate-limit/timeout hiccups.
 _RETRY_STATUS   = {500, 502, 503, 504, 429}
 _MAX_RETRIES    = 3
 _RETRY_BACKOFF  = 2.0       # seconds, escalates per attempt (on top of the throttle)
@@ -71,12 +61,9 @@ def _get(path: str, params: dict) -> dict:
 
 
 def _paginate(path: str, params: dict) -> list[dict]:
-    """Walk the paginated odds feed via offset until has_more is false.
-
-    A mid-walk failure keeps the rows already collected instead of discarding
-    them — the API 400s past a deep offset (~free-tier cap) even when
-    `has_more` said otherwise, and 550 good rows beat zero. Only a first-page
-    failure propagates (nothing fetched ⇒ caller reports the fetch as failed)."""
+    """Walk the feed by offset until has_more is false. A later-page failure keeps the
+    rows already fetched (the API 400s past a deep offset); only a first-page failure
+    raises."""
     rows, offset = [], 0
     for _ in range(_MAX_PAGES):
         try:
@@ -91,10 +78,7 @@ def _paginate(path: str, params: dict) -> list[dict]:
         pg = page.get("pagination", {})
         if not pg.get("has_more"):
             break
-        # `next_offset` can come back explicitly null even with has_more=true, and
-        # dict.get()'s default only covers a *missing* key — taking it verbatim put
-        # None into offset and blew up the next iteration on None + _PAGE_SIZE,
-        # discarding every row already fetched. Fall back to a computed offset.
+        # `next_offset` can be null even with has_more=true.
         next_offset = pg.get("next_offset")
         offset = next_offset if isinstance(next_offset, int) else offset + _PAGE_SIZE
     return rows
@@ -107,15 +91,8 @@ def normalize_name(name: str) -> str:
     return n.lower().replace(".", "").replace("'", "").replace("-", " ").strip()
 
 
-# Preferred book for PRICING. DraftKings, not FanDuel — verified against the live books
-# on 2026-09-17: the provider reported FanDuel at -350/-290 for Vilade/Pasquantino when
-# FanDuel actually showed -210/-220, while its DraftKings prices (-188/-172) matched
-# reality (-193/-176). The FanDuel feed overstates by 5-10 implied points.
-#
-# FanDuel stays as a FALLBACK for coverage (157 rows vs DraftKings' 54), and the real
-# book name is always recorded so analysis can filter:
-#     trustworthy prices -> WHERE book = 'draftkings'
-# Re-verify periodically: if the provider fixes its FanDuel feed, flip these back.
+# DraftKings for pricing: this provider's MLB FanDuel prices don't match the book. FanDuel
+# is only a fallback, always recorded under its own name.
 PREFERRED_BOOK = "draftkings"
 FALLBACK_BOOK  = "fanduel"
 
@@ -124,12 +101,9 @@ def _fetch_over05(market: str, label: str, book: str | None,
                   fallback: str | None = None) -> dict:
     """
     Shared fetch for '1+ of stat' player props: the Over-0.5 line of `market`.
-    Returns {normalized_player_name: {player, odds, implied, book, line}}.
-
-    `book` (default DraftKings) is the preferred sportsbook. `fallback` lets a player
-    missing a `book` line borrow another book's price (primary always beats fallback).
-    The borrowed price is ALWAYS reported under the book that actually quoted it.
-    `book=None` keeps the best price across all books.
+    Returns {normalized_player_name: {player, odds, implied, book, line}}. `fallback`
+    fills players `book` lacks, always under the quoting book's name; `book=None` keeps
+    the best price across all books.
     """
     if not PROP_ODDS_API_KEY or not _BASE:
         print(f"[prop_odds] PROP_ODDS_API_KEY / PROP_ODDS_BASE_URL not set — skipping {label} odds")
@@ -187,25 +161,13 @@ def _fetch_over05(market: str, label: str, book: str | None,
 
 
 def fetch_hit_prop_odds(book: str | None = PREFERRED_BOOK) -> dict:
-    """1+ hit odds (player_hits, Over 0.5).
-
-    DraftKings preferred (verified accurate), FanDuel borrowed only where DraftKings has
-    no line, and always reported as FanDuel's — pretending otherwise is what made the HR
-    data unusable (§28).
-    """
+    """1+ hit odds (player_hits, Over 0.5): DraftKings, else FanDuel."""
     fallback = FALLBACK_BOOK if book == PREFERRED_BOOK else None
     return _fetch_over05("player_hits", "hit", book, fallback=fallback)
 
 
 def fetch_hr_prop_odds(book: str | None = PREFERRED_BOOK) -> dict:
-    """1+ home run odds (player_home_runs, Over 0.5).
-
-    Borrowed prices used to be relabelled as FanDuel's, on the reasoning that the parlay
-    is placeable on FanDuel anyway. That made the two sources indistinguishable after the
-    fact — so when the FanDuel feed turned out to be wrong, there was no way to tell which
-    HR prices came from where. The book is now always recorded truthfully; placeability is
-    a betting decision, not something to encode by mislabelling the data (§28).
-    """
+    """1+ home run odds (player_home_runs, Over 0.5): DraftKings, else FanDuel."""
     fallback = FALLBACK_BOOK if book == PREFERRED_BOOK else None
     return _fetch_over05("player_home_runs", "HR", book, fallback=fallback)
 

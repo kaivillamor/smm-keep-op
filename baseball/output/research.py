@@ -1,16 +1,7 @@
 """
-Model-calibration research store — DELIBERATELY SEPARATE from the betting record.
-
-Lives in its own database file (`data/history/research.db`) and is never read by
-`backtest.py`. Nothing here is a bet: these are model predictions for every batter
-scored on a slate, graded against box scores so we can measure whether the model's
-probabilities mean anything. No stakes, no payouts, no P&L — simulated results can
-never contaminate `bets.db` or show up in the P&L summary.
-
-Why it exists: the bet log only records the 4 legs that actually surface each day,
-which is a biased sample (the ones the model already liked) and accumulates ~2 graded
-rows/day. Logging all ~180 scored batters answers the real question — does a higher
-model probability actually produce a higher hit rate — in days instead of months.
+Model-calibration research store: predictions for every scored batter, graded against box
+scores, in its own database (research.db). Nothing here is a bet, and backtest.py never
+reads it.
 
     python output/research.py report     # calibration + ranking-signal report
     python output/research.py grade      # grade pending predictions
@@ -20,42 +11,20 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
-# Run as a script (`python output/research.py report`, per the docstring above) only
-# output/ lands on sys.path, so `pipeline` would not import. Put the package root on the
-# path BEFORE the imports below rather than threading lazy imports through every function
-# that needs the slate calendar. Guarded on __package__ so it is a no-op when imported
-# normally, and done once here instead of in the __main__ block at the bottom, which runs
-# after module-level imports have already been attempted.
+# As a script only output/ is on sys.path, so add the package root before the imports.
 if __package__ is None and __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.stats_fetcher import POSTSEASON_START, season_phase, slate_date
 
-# Path is env-overridable so the same code runs locally (relative path, repo-local file)
-# and on a container with a mounted volume (absolute path). Default preserves the
-# existing local behaviour exactly — nothing changes unless RESEARCH_DB_PATH is set.
-# `or` (not getenv's default arg) on purpose: a var present-but-empty — which is what
-# copying .env.example verbatim produces — yields "", and getenv would hand that back
-# as a real value. An empty path is never legitimate, so falling through is correct.
+# `or`, not a getenv default: an empty RESEARCH_DB_PATH must fall back too.
 RESEARCH_DB = os.getenv("RESEARCH_DB_PATH") or "data/history/research.db"
 
-
-# The slate calendar (POSTSEASON_START, season_phase, slate_date) lives in
-# pipeline.stats_fetcher so `pipeline` can use it without importing `output`. Postseason
-# rows are structurally different — best teams only, ace rotations, quick hooks — so they
-# are TAGGED rather than date-filtered, because an implicit cutoff is something a future
-# reader has to remember (§29).
-
-# The rows that count as evidence about the model: everything but the postseason, whose
-# base rate (57.6% in 2026, against 64.5%) is a different regime (§29). NULL-phase rows
-# stay IN, so a season whose POSTSEASON_START is not yet recorded still reports, and
-# report() counts them so they cannot pass unnoticed. The single definition: the
-# dashboard (web/app.py) imports it. `IS NOT`, not `!=`, which would drop the NULLs.
+# Rows that count as evidence: everything but the postseason. `IS NOT`, not `!=`, keeps
+# NULL-phase rows. web/app.py imports this.
 EVIDENCE_SQL = "season_phase IS NOT 'postseason'"
 
-# When the slate-date row key shipped (633a1a3). Rows written before it carry the
-# COLLECTION date; no row was written between 00:59 and 19:00 UTC that day, so the
-# exact minute cannot misfile one. Used by the date repairs in _connect().
+# When rows started keying on the game's slate; rows written before carry the collection date.
 _SLATE_KEY_FIX = "2026-09-30T10:33"
 
 
@@ -69,12 +38,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS predictions (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            date          TEXT    NOT NULL,   -- the GAME's Eastern slate date, from first
-                                              --  pitch — NOT the date collection ran. It
-                                              --  was the collection date until
-                                              --  2026-09-30, which duplicated 20% of the
-                                              --  corpus across UTC midnight (§29).
-                                              --  created_at still records collection time.
+            date          TEXT    NOT NULL,   -- the game's Eastern slate date, from first
+                                              --  pitch (created_at is collection time)
             game_pk       INTEGER NOT NULL,
             batter_id     INTEGER NOT NULL,
             batter_name   TEXT,
@@ -82,24 +47,14 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             lineup_pos    INTEGER,
             pitcher_name  TEXT,
             model_prob    REAL,            -- final prediction (base_prob + owner_adj)
-            calibrated_prob REAL,          -- model_prob shrunk toward the base rate. THIS
-                                           --  is the number the per-leg EV gate compares
-                                           --  with each leg's price, not model_prob.
-                                           --  Computed since 2026-09-09 but discarded
-                                           --  until 2026-09-30, which is how a gate that
-                                           --  could not fire at any input stayed hidden
-                                           --  for three weeks: every study of "what the
-                                           --  gate selects" was really reading model_prob.
-                                           --  §24 — if the model uses a value, log it.
-            base_prob     REAL,            -- quant model ONLY, before personal rules
-            owner_adj     REAL,            -- the personal-logic delta, so it can be measured
+            calibrated_prob REAL,          -- model_prob shrunk toward the base rate; what
+                                           --  the per-leg EV gate compares with the price
+            base_prob     REAL,            -- quant model only, before owner rules
+            owner_adj     REAL,            -- the owner-rules delta
             book_odds     INTEGER,         -- book's line, when one was posted
             book_implied  REAL,
-            book          TEXT,            -- WHICH sportsbook priced it
-                                           -- (the provider's FanDuel prices were
-                                           --  found wrong 2026-09-17; without this
-                                           --  column a bad source is invisible)
-            -- raw model inputs, so a future recalibration can be backtested properly
+            book          TEXT,            -- which sportsbook priced it
+            -- raw model inputs
             split_avg     REAL,             -- season BA vs this pitcher's handedness
             split_ab      INTEGER,          -- AB behind that split (model gates at 30)
             h2h_ab        INTEGER,
@@ -110,14 +65,9 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             venue_avg     REAL,
             team_recent_avg    REAL,
             pitcher_recent_h9  REAL,
-            pitcher_season_h9  REAL,   -- model blends season/recent 60/40. From
-                                       --  2026-09-30 this is REGRESSED toward league
-                                       --  average by pitcher_season_ip; before that it
-                                       --  was the raw rate with a 0.5 floor (§29). The
-                                       --  two methods are not comparable — rows with
-                                       --  calibrated_prob NOT NULL use the new one.
-            pitcher_season_ip  REAL,   -- innings behind that rate. Logged so the shrink
-                                       --  can be undone: with w = ip/(ip+H9_IP_PRIOR),
+            pitcher_season_h9  REAL,   -- shrunk by pitcher_season_ip on rows with
+                                       --  calibrated_prob; raw, floored at 0.5, before
+            pitcher_season_ip  REAL,   -- innings behind it: with w = ip/(ip+H9_IP_PRIOR),
                                        --  raw = (h9 - (1-w)*LEAGUE_H_PER_9) / w
             park_factor        REAL,   -- park_adj = 1 + (this - 1) * 0.3
             pitcher_days_rest  INTEGER,   -- days since the pitcher's last start
@@ -129,12 +79,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             UNIQUE(date, game_pk, batter_id)
         );
     """)
-    # Migration: pitcher_days_rest was computed by hit_pipeline from the start but never
-    # persisted here, so rows logged before 2026-09-08 have it NULL and always will. The
-    # days-rest effect is believed to be pitcher-specific rather than league-wide (which
-    # is why hit_model applies no blanket adjustment); this column is what will eventually
-    # let the data settle that. Column name/type are module literals — see the note in
-    # backtest.py::_ensure_schema on why identifier interpolation is unavoidable here.
+    # Migrations. Column names and types are literals here: SQLite can't bind identifiers.
     pred_cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
     for _col, _decl in (("pitcher_days_rest", "INTEGER"),
                         ("split_avg", "REAL"), ("split_ab", "INTEGER"),
@@ -144,66 +89,21 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                         ("season_phase", "TEXT"), ("pitcher_season_ip", "REAL")):
         if _col not in pred_cols:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_decl} DEFAULT NULL")
-    # One-time provenance backfill. Every price stored before 2026-09-17 came from the
-    # prop provider's FanDuel feed, which was verified WRONG that day: it reported
-    # Vilade -350 / Pasquantino -290 when FanDuel actually showed -210 / -220, while its
-    # DraftKings prices matched reality. Those prices overstate the market by 5-10
-    # implied points, which invalidated the median-price, break-even and
-    # "no band is mispriced" analyses (the MODEL results are untouched — they never
-    # read a price).
-    #
-    # The rows are NOT deleted: they hold valid model_prob/outcome/input data. They are
-    # tagged so any price analysis can exclude them with
-    #     WHERE book IS NOT NULL AND book NOT LIKE '%suspect%'
-    # No date bound: once provenance tracking exists every priced row carries a book,
-    # so a priced row with a NULL book is unattributed by definition — and an
-    # unattributed price IS suspect. Self-maintaining, and it also catches any
-    # future code path that forgets to record the source.
+    # Price provenance, bounded on created_at (the de-dup below rewrites `date`): a price
+    # with no book is 'fanduel_feed_suspect' before the feed fix, 'unattributed' after it.
     conn.execute(
         "UPDATE predictions SET book = 'fanduel_feed_suspect' "
         "WHERE book_odds IS NOT NULL AND book IS NULL "
         "AND created_at < '2026-09-17T19:00'")
-    # The "self-maintaining" claim above was WRONG, and this is the correction. `book` was
-    # missing from the INSERT's ON CONFLICT clause, so a row first written unpriced had its
-    # odds filled in by COALESCE on a later run while `book` stayed NULL — and this
-    # backfill then stamped a correctly-sourced DraftKings price as coming from the
-    # discredited feed. 219 prices collected AFTER the 2026-09-17 fix were mislabelled.
-    #
-    # The ON CONFLICT clause now carries `book`, so the rule genuinely self-maintains from
-    # here. The bound above stops it re-libelling post-fix rows; the statement below
-    # relabels the 219 already hit. They are 'unattributed' rather than suspect: their
-    # source was never recorded, so it is unknown — which is not the same as known-bad, and
-    # conflating the two would throw away usable prices.
-    #
-    # Bounded on created_at, NOT date: `date` is the slate, which the de-duplication below
-    # rewrites, and the fix deployed at 2026-09-17T19:06Z — mid-slate. Splitting there puts
-    # 343 rows pre-fix and 219 post-fix, and the 343 matches §28's independently recorded
-    # count exactly. A `date >= '2026-09-17'` bound instead swept in 43 rows written at
-    # 00:09Z that day, which really were from the bad feed.
     conn.execute(
         "UPDATE predictions SET book = 'unattributed' "
         "WHERE book_odds IS NOT NULL AND (book IS NULL OR book = 'fanduel_feed_suspect') "
         "AND created_at >= '2026-09-17T19:00'")
 
     # ── De-duplicate on the natural key (idempotent) ─────────────────────────────
-    # `date` was `date.today()` — the COLLECTION date — inside
-    # UNIQUE(date, game_pk, batter_id). Collection runs ~19:00-02:00 UTC, so a late game
-    # scored either side of UTC midnight was inserted TWICE under two dates: 678 excess
-    # rows, 20% of the corpus. Duplicates are perfectly correlated, so they inflated every
-    # n and narrowed every confidence interval by ~12% (§29).
-    #
-    # A batter appears once per game, so (game_pk, batter_id) is the true natural key. The
-    # surviving row is the LAST logged (freshest lineup and stats). How it is dated depends
-    # on when the group was written:
-    #   before _SLATE_KEY_FIX — the earliest date of the group, which is the real slate,
-    #     since the spurious copy is always the one written after midnight;
-    #   after it — its own date. Dates now come from first pitch, so one game on two dates
-    #     is a RESCHEDULED game and the last row logged is the makeup's. Applying the old
-    #     rule to everything dated 849817's replay (postponed 10-16, played 10-18) back to
-    #     10-16, under the old reason, and the grader then voided all 12 real predictions.
-    #
-    # Losing rows are ARCHIVED, not dropped (§28's precedent: rows hold valid model data).
-    # Archived as JSON so this table can never break when predictions gains a column.
+    # One row per (game_pk, batter_id): the last logged survives. Before _SLATE_KEY_FIX it
+    # takes the group's earliest date (the real slate); after, two dates mean a reschedule
+    # and it keeps its own. Losers are archived as JSON, never dropped.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS predictions_superseded (
             id          INTEGER PRIMARY KEY,   -- original predictions.id
@@ -243,8 +143,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
                      _row["created_at"], _now, reason,
                      _json.dumps({k: _row[k] for k in _row.keys()})))
                 _archived[reason] = _archived.get(reason, 0) + 1
-            # DELETE before the date repair: updating the survivor first would collide with
-            # the row still occupying (date, game_pk, batter_id).
+            # DELETE first: re-dating the survivor would collide with a loser's unique key.
             conn.execute(
                 "DELETE FROM predictions WHERE game_pk=? AND batter_id=? AND id<>?",
                 (_d["game_pk"], _d["batter_id"], _d["keep_id"]))
@@ -255,12 +154,7 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
             print(f"[research] archived {n} row(s) to predictions_superseded: {reason}",
                   flush=True)
 
-    # Pre-fix games SPLIT across two dates: one lineup scored before UTC midnight, the
-    # other after, so one team's batters sit under the slate and the other's under the
-    # next day. No batter has two rows, so the pass above never saw them — 55 rows in 10
-    # games kept the collection date. Each game's earliest date is its real slate, checked
-    # against MLB's schedule for every game of 09-01..10-31. Bounded on created_at, so it
-    # cannot touch a row keyed by first pitch, where two dates mean a reschedule.
+    # Pre-fix games split across two dates move to the earliest; bounded on created_at.
     split = conn.execute("""
         SELECT game_pk, MIN(date) AS slate FROM predictions
         WHERE created_at < ?
@@ -284,15 +178,8 @@ def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:
 
 
 def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
-    """Records every scored batter. Idempotent — re-running a slate updates in place
-    rather than duplicating, so a re-run at any hour is safe.
-
-    "Any hour" is the fix, not decoration. This keyed rows on `date.today()`, so the same
-    game scored either side of UTC midnight landed as two rows under two dates and the
-    upsert never fired — 20% of the corpus duplicated (§29). The key is now the GAME's
-    Eastern slate date, carried on each candidate by hit_pipeline, which cannot move with
-    the clock.
-    """
+    """Record every scored batter, keyed by the game's slate date. Idempotent: a re-run
+    updates rows in place."""
     if not candidates:
         return 0
     conn  = _connect(db_path)
@@ -319,10 +206,7 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
                calibrated_prob=excluded.calibrated_prob,
                book_odds=COALESCE(excluded.book_odds, predictions.book_odds),
                book_implied=COALESCE(excluded.book_implied, predictions.book_implied),
-               -- `book` MUST be refreshed with the odds it describes. Omitting it left a
-               -- row that gained a price on a later run with book=NULL, which the
-               -- provenance backfill then stamped 'fanduel_feed_suspect' — 219 good
-               -- DraftKings prices libelled as coming from the broken feed (§29).
+               -- `book` must refresh with the odds it describes.
                book=COALESCE(excluded.book, predictions.book)
         """, (
             game_date, c.get("game_pk"), c.get("batter_id"), c.get("batter_name"),
@@ -347,13 +231,8 @@ def log_predictions(candidates: list[dict], db_path: str = RESEARCH_DB) -> int:
 
 
 def grade_predictions(db_path: str = RESEARCH_DB) -> int:
-    """Grades pending predictions. Fetches ONE box score per game (not per batter),
-    so a 180-prediction slate costs ~15 API calls rather than 180.
-
-    One connection for the run. Each _connect() re-runs every migration and the duplicate
-    scan, and this used to open one per game. Commits per game, so a crash keeps what was
-    graded, and no write is ever held open across a network call.
-    """
+    """Grade pending predictions: one box score per game, one connection per run, and a
+    commit per game so a crash keeps what was graded."""
     import requests
     from output.result_tracker import _game_result_state
 
@@ -367,8 +246,7 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
             print("[research] no pending predictions.")
             return 0
 
-        # Keyed by slate as well as game: a rescheduled game is two games for grading —
-        # the postponed date's rows void, the makeup's grade (_game_result_state).
+        # Keyed by slate too: a postponed date's rows void and the makeup's grade.
         by_game: dict[tuple[int, str], list] = {}
         for r in pending:
             by_game.setdefault((r["game_pk"], r["date"]), []).append(r)
@@ -404,11 +282,8 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
                                  ("win" if int(hits) >= 1 else "loss", int(hits), r["id"]))
                     graded += 1
                 elif players:
-                    # Final, the box score is populated, and he has no batting line: he
-                    # never batted (scratched, or out before his first PA). Void, as the
-                    # book voids a prop on a player who does not play. Left pending, these
-                    # rows were re-fetched on every run, forever. An EMPTY box score is a
-                    # bad response rather than an answer, so it stays pending and retries.
+                    # Populated box, no batting line: he never batted, so void. An empty
+                    # box score stays pending.
                     conn.execute("UPDATE predictions SET outcome='void' WHERE id=?", (r["id"],))
                     graded += 1
                     voided_dnp += 1
@@ -422,11 +297,7 @@ def grade_predictions(db_path: str = RESEARCH_DB) -> int:
 
 
 def report(db_path: str = RESEARCH_DB) -> None:
-    """Calibration + ranking-signal report. The ranking test is the important one:
-    a model worth betting has its higher-probability half hit MORE often.
-
-    Reads the evidence rows only (EVIDENCE_SQL: everything but the postseason), the same
-    rows the dashboard reports."""
+    """Calibration and ranking-signal report on the evidence rows (EVIDENCE_SQL)."""
     conn = _connect(db_path)
     rows = [dict(r) for r in conn.execute(
         "SELECT model_prob p, outcome FROM predictions "
@@ -478,18 +349,12 @@ def report(db_path: str = RESEARCH_DB) -> None:
     print(f"    lower half by model prob → hit {lo_rate * 100:.1f}%")
     print(f"    upper half by model prob → hit {hi_rate * 100:.1f}%")
     gap = (hi_rate - lo_rate) * 100
-    # The INTERVAL decides, not the point estimate. A threshold on the gap alone reads
-    # noise as a finding: +6.9 pts on 696 rows carries a 95% CI of [-0.2, +14.0], which
-    # is indistinguishable from zero, yet a bare `gap > 3` test calls it real.
     import math
-    # lo_rate/hi_rate, NOT lo/hi — those are bucket BOUNDS left over from the loop
-    # above, so using them here would silently compute the SE of (0.80, 1.01).
+    # lo_rate/hi_rate, not lo/hi: those are the bucket bounds left over from the loop above.
     _se = math.sqrt(lo_rate * (1 - lo_rate) / max(half, 1)
                     + hi_rate * (1 - hi_rate) / max(n - half, 1)) * 100
     ci_lo, ci_hi = gap - 1.96 * _se, gap + 1.96 * _se
-    # "Usable" reads the LOWER BOUND, as the dashboard's verdictFor() has since §29 (twin:
-    # USABLE_GAP = 0.08 in web/frontend/src/App.jsx). On the point estimate, more data
-    # that tightened the interval and raised its floor could still downgrade the verdict.
+    # "Usable" reads the CI's lower bound. Twin: USABLE_GAP in web/frontend/src/App.jsx.
     usable_gap = 8.0
     verdict = ("inverted — ranks WORSE than chance" if ci_hi < 0 else
                "inconclusive — interval still contains zero" if ci_lo <= 0 else
@@ -500,16 +365,8 @@ def report(db_path: str = RESEARCH_DB) -> None:
 
 
 def compare_owner_logic(db_path: str = RESEARCH_DB) -> None:
-    """A/B the quant model against model + personal rules.
-
-    Because `owner_adj` is additive and logged separately, BOTH predictions exist for the
-    same row and the same outcome — so this is a paired comparison on identical data, not
-    a split sample. No power is lost to splitting, and the only difference between the two
-    arms is the personal adjustment itself.
-
-    Honest-use note: define rules, THEN measure forward. Tuning rules after reading this
-    output fits noise, and the result stops meaning anything.
-    """
+    """A/B the quant model (base_prob) against model + owner rules (model_prob), paired on
+    the same graded rows."""
     import math
 
     conn = _connect(db_path)

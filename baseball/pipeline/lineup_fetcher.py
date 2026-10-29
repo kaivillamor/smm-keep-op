@@ -6,15 +6,12 @@ from pipeline.stats_fetcher import slate_date
 
 MLB_API = "https://statsapi.mlb.com/api/v1"
 
-# Every call has a timeout. The web service runs MLB collection on the same scheduler
-# thread as NBA, so one socket that never answers would stall both sports while the
-# server still answered its health check.
+# Every call has a timeout: a hung socket would stall the scheduler both sports share.
 _TIMEOUT = 10
 
 
 def fetch_lineups() -> dict:
-    # The shared slate basis (Eastern, fixed UTC-5) — the same day probable pitchers and
-    # the per-day caches key on, so a lineup can always be matched to its pitchers.
+    # slate_date(), the basis probable pitchers key on too, so lineups match them.
     date_str = slate_date()
     games = _fetch_today_games(date_str)
 

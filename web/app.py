@@ -1,14 +1,5 @@
-"""Always-on dashboard + collection scheduler.
-
-Replaces the Railway cron service. A Railway volume attaches to exactly ONE service,
-so the dashboard cannot be a separate service reading the collection volume — the two
-have to be the same process. That is also what makes the volume reachable at all:
-`railway volume files` tunnels over SFTP and needs a live container, which a cron
-service only is for ~2 minutes per run.
-
-Shows research/calibration data ONLY. bets.db (real money) never leaves the local
-machine and is not deployed, so there is nothing here that can mix real and simulated.
-"""
+"""Always-on dashboard + collection scheduler, one process because a Railway volume
+attaches to one service only. Research data only: bets.db is never deployed."""
 import math
 import os
 import hashlib
@@ -31,18 +22,13 @@ from fastapi.staticfiles import StaticFiles
 import subprocess
 import sys
 
-# The pipeline is written to run from inside baseball/ — its default DB and cache paths
-# are relative. Put it on sys.path AND keep the directory, so relative paths can be
-# resolved against it rather than against whatever CWD uvicorn happened to start in.
+# baseball/'s default paths are relative to it, so keep the directory as well.
 BASEBALL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "baseball"))
 sys.path.insert(0, BASEBALL_DIR)
-# basketball/ is deliberately NOT on sys.path: it is only ever run as a subprocess (see
-# _run_basketball), and its data is read with plain sqlite3 (see _nba_db).
+# Never on sys.path: basketball/ runs as a subprocess and its DB is read with sqlite3.
 BASKETBALL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "basketball"))
 
-# uvicorn imports this as `web.app` with the REPO ROOT on sys.path, not web/ — so a bare
-# `from users import ...` below would not resolve. Add our own directory explicitly so
-# the import works however the app is launched (uvicorn, pytest, python -m).
+# uvicorn puts the repo root on sys.path, not web/, so add web/ for `from users import`.
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, WEB_DIR)
 
@@ -54,23 +40,15 @@ async def lifespan(_: "FastAPI"):
             print(f"[users] seeded {seeded} account(s) from environment", flush=True)
     except Exception as e:
         print(f"[users] bootstrap failed: {type(e).__name__}: {e}", flush=True)
-    # research.py owns the predictions schema, and its migrations run inside _connect().
-    # This process READS that table through _db() (a bare sqlite3.connect), so without
-    # this it would serve a pre-migration schema until the first collection run of the
-    # day wrote a row — a window in which any endpoint selecting a newly added column
-    # fails with "no such column". Opening once through the owning module closes it.
+    # Run research.py's migrations before serving: _db() reads the table directly.
     try:
         from output.research import _connect as _research_connect
-        # Must pass the RESOLVED path: research.py's default is relative and would
-        # resolve against this process's CWD, migrating a different file than _db()
-        # reads — see the note in _research_db_path().
+        # The resolved path: research.py's default is relative to the CWD.
         _research_connect(_research_db_path()).close()
         print("[research] schema ensured", flush=True)
     except Exception as e:
         print(f"[research] schema ensure failed: {type(e).__name__}: {e}", flush=True)
-    # The same window exists for the NBA file, and this process can close it even less:
-    # it opens that file read-only, and basketball/ cannot be imported here. So the
-    # collector's own code applies its migrations, in a subprocess.
+    # The NBA DB is read-only here, so its collector migrates it.
     try:
         if _run_basketball("--migrate") == 0:
             print("[nba] schema ensured", flush=True)
@@ -83,14 +61,9 @@ async def lifespan(_: "FastAPI"):
 
 app = FastAPI(title="MLB Model Research", lifespan=lifespan)
 
-# Users live in a SQLite store on the volume (web/users.py), NOT in env vars.
-# DASH_USERS / DASH_PASS remain a first-run SEED only — see users.bootstrap_from_env.
+# Users live in users.db (web/users.py); DASH_USERS / DASH_PASS only seed it.
 from users import authenticate, bootstrap_from_env   # noqa: E402  (needs sys.path above)
 
-# Auth is form + signed cookie, not HTTP Basic. Basic forces the browser's own popup
-# (no custom login screen) and has no real sign-out — the browser caches credentials for
-# the window. A signed session cookie fixes both: it can be cleared on demand, and the
-# login screen is ours to design.
 SESSION_COOKIE = "mlbsession"
 SESSION_MAX_AGE = 60 * 60 * 24 * 14        # 14 days
 
@@ -106,8 +79,7 @@ def _sign(payload: str) -> str:
 
 
 def make_session(username: str) -> str:
-    """Stateless signed token: <username>|<expiry>|<signature>. No server-side store to
-    keep in sync, and tampering with either field invalidates the signature."""
+    """Stateless signed token: <username>|<expiry>|<signature>."""
     payload = f"{username}|{int(time.time()) + SESSION_MAX_AGE}"
     return f"{payload}|{_sign(payload)}"
 
@@ -128,8 +100,7 @@ def read_session(token: str | None) -> str | None:
 
 
 def current_user(request: Request) -> tuple[str, str] | None:
-    """(username, role) for a valid session, else None. Never raises — callers decide
-    whether anonymous is acceptable, so the same helper serves public and private routes."""
+    """(username, role) for a valid session, else None; never raises."""
     from users import get_user
     name = read_session(request.cookies.get(SESSION_COOKIE))
     if not name:
@@ -146,22 +117,15 @@ def auth(request: Request) -> tuple[str, str]:
 
 
 def require_admin(who: tuple[str, str] = Depends(auth)) -> tuple[str, str]:
-    """Admin-only gate. Applied to the DATA endpoint, not just the page — hiding a route
-    in the UI while the API still answers is not access control.
-    """
+    """Admin-only gate, applied to the data endpoints, not just the pages."""
     if who[1] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
     return who
 
 
 def _research_db_path() -> str:
-    """Absolute path to research.db.
-
-    RESEARCH_DB is absolute on Railway (/data/research.db) but relative by default
-    (data/history/research.db). A relative path resolves against the process CWD, which
-    for uvicorn is the repo root rather than baseball/ — so anchor relative paths to
-    BASEBALL_DIR and leave absolute ones alone.
-    """
+    """Absolute path to research.db: a relative RESEARCH_DB is anchored to BASEBALL_DIR,
+    not the CWD."""
     from output.research import RESEARCH_DB
     return RESEARCH_DB if os.path.isabs(RESEARCH_DB) else os.path.join(BASEBALL_DIR, RESEARCH_DB)
 
@@ -173,9 +137,8 @@ def _db():
 
 
 def _auc(scores: list[float], ys: list[int]) -> tuple[float, float, float]:
-    """(AUC, CI low, CI high): the chance a random win outscores a random loss, 0.5 a coin
-    flip. A twin of basketball/output/research._auc, which this file cannot import (the
-    module names collide): fix one, check the other. Hanley–McNeil interval."""
+    """(AUC, CI low, CI high), Hanley–McNeil. Twin of basketball/output/research._auc,
+    which can't be imported here: change both."""
     order = sorted(range(len(scores)), key=scores.__getitem__)
     ranks = [0.0] * len(scores)
     i = 0
@@ -198,19 +161,15 @@ def _auc(scores: list[float], ys: list[int]) -> tuple[float, float, float]:
 
 
 def stats(db=_db, where: str = "", bench: bool = False) -> dict:
-    """Calibration + ranking signal. Mirrors output/research.py report() — and its NBA
-    twin, which computes the same figures from the same model_prob/outcome columns, so
-    one implementation serves both sports. `db` is the connection factory. `where` is an
-    SQL condition written in code (this file, or research.EVIDENCE_SQL), never request
-    input, and narrows every figure. `bench` adds the model-vs-price AUCs: NBA only, since
-    MLB's stored prices include the feed verified wrong before 09-17 (§28)."""
+    """Calibration + ranking signal for either sport. `db` is the connection factory;
+    `where` is an SQL condition written in code, never request input; `bench` adds the
+    model-vs-price AUCs (NBA only)."""
     only = f" WHERE {where}" if where else ""
     try:
         c = db()
         rows = [dict(r) for r in c.execute(
             "SELECT model_prob p, outcome, date, book_implied bi FROM predictions "
-            # NBA logs rows with no probability (no usable form), and a NULL would crash
-            # the sums below. MLB has no such graded rows, so this changes nothing there.
+            # NBA logs rows with no probability, which would crash the sums below.
             "WHERE outcome IN ('win','loss') AND model_prob IS NOT NULL"
             + (f" AND ({where})" if where else ""))]
         total = c.execute(f"SELECT COUNT(*) FROM predictions{only}").fetchone()[0]
@@ -233,10 +192,7 @@ def stats(db=_db, where: str = "", bench: bool = False) -> dict:
     # What the book's prices implied on the same rows: the hit rate a bet needed.
     priced = [r["bi"] for r in rows if r["bi"] is not None]
     out["priced"] = sum(priced) / len(priced) if priced else None
-    # Ranking skill against the book's own price, on the same rows. The over rate is not
-    # this test: NBA overs hit under half whatever a model says, and the price expects it.
-    # On 2026-10-28 the over rate read as the model "underperforming", while the real
-    # verdict was this one: the model ranked like a coin flip (0.514), the price at 0.583.
+    # Ranking skill against the book's own price, on the same rows.
     pr = [r for r in rows if r["bi"] is not None]
     if bench and len(pr) >= 200:
         ys = [1 if r["outcome"] == "win" else 0 for r in pr]
@@ -250,10 +206,6 @@ def stats(db=_db, where: str = "", bench: bool = False) -> dict:
     if half:
         lo, hi = hit(rows[:half]), hit(rows[half:])
         out["lower"], out["upper"], out["gap"] = lo, hi, hi - lo
-        # Ship the confidence interval, not just the point estimate. A +6.9pt gap on 696
-        # rows has a CI of [-0.2, +14.0] — indistinguishable from zero — and a label that
-        # reads only the point estimate calls that "weak signal", asserting a finding the
-        # data cannot support.
         se = math.sqrt(lo * (1 - lo) / half + hi * (1 - hi) / (n - half))
         out["gap_ci_low"] = (hi - lo) - 1.96 * se
         out["gap_ci_high"] = (hi - lo) + 1.96 * se
@@ -270,11 +222,8 @@ def stats(db=_db, where: str = "", bench: bool = False) -> dict:
 
 
 def _mlb_stats() -> dict:
-    """MLB calibration on the evidence rows: everything but the postseason, whose base
-    rate is a different regime (§29). The predicate is research.EVIDENCE_SQL itself, so
-    this page and `research.py report` cannot drift apart. It narrows every figure,
-    `logged` and the recent-days table included, so the counts describe the same rows
-    as the rates."""
+    """MLB calibration on the evidence rows (research.EVIDENCE_SQL, as `research.py
+    report` uses)."""
     from output.research import EVIDENCE_SQL
     return stats(where=EVIDENCE_SQL)
 
@@ -307,23 +256,22 @@ def api_login(body: LoginBody, request: Request, response: Response):
 
 @app.post("/api/logout")
 def api_logout(response: Response):
-    """A real sign-out — the cookie is the entire session, so clearing it ends it."""
+    """Sign out: clearing the cookie ends the session."""
     response.delete_cookie(SESSION_COOKIE, path="/")
     return {"ok": True}
 
 
 @app.get("/api/me")
 def api_me(request: Request):
-    """Who am I? Returns null when anonymous rather than 401 — the front-end uses this to
-    decide between the login screen and the dashboard, and a 401 here would be noise."""
+    """The signed-in user and role, or nulls when anonymous (not a 401)."""
     who = current_user(request)
     return {"user": who[0], "role": who[1]} if who else {"user": None, "role": None}
 
 
 @app.get("/api/summary")
 def api_summary(who: tuple = Depends(auth)):
-    """Headline numbers any signed-in user may see. Deliberately excludes buckets,
-    ranking gap and slope — those are admin-only via /api/report."""
+    """Headline numbers for any signed-in user; buckets, gap and slope are admin-only
+    (/api/report)."""
     s = _mlb_stats()
     return {"logged": s.get("logged", 0), "graded": s.get("graded", 0),
             "actual": s.get("actual"), "predicted": s.get("predicted"),
@@ -332,26 +280,9 @@ def api_summary(who: tuple = Depends(auth)):
 
 @app.get("/api/slate")
 def api_slate(_: tuple = Depends(auth), limit: int = 200):
-    """Today's ungraded predictions, ranked — the pool a parlay gets built from.
-
-    Returns the model's RANKING, not a recommendation. Two numbers per leg:
-      model_prob      raw output, what research.db logs
-      calibrated      what the betting gate actually uses
-
-    They differ a lot on purpose: the measured calibration slope is well under 1, so the
-    raw number overstates badly at the top end.
-
-    `calibrated` is the STORED calibrated_prob and nothing else. Rows predating the
-    column (before 2026-09-30) report null rather than a recomputation: recomputing
-    applies today's CALIBRATION_SLOPE to a prediction that was gated under the old one,
-    which silently rewrites what the model is claimed to have said. This endpoint serves
-    the pending slate, so in practice every row has it.
-
-    `clears_gate` is the PER-LEG EV gate (2026-10-12): edge against that leg's own price,
-    not a probability threshold. When a leg is blocked, `blocked_by` gives a stable code
-    and `blocked_detail` the numbers. Note `gate.live` — the gate is deliberately not
-    validated yet, so every leg reports blocked until an out-of-sample test passes.
-    """
+    """Today's ungraded predictions ranked by edge: raw model_prob, the stored
+    calibrated_prob (never recomputed), and the per-leg EV gate's verdict (`blocked_by`
+    code, `blocked_detail` numbers)."""
     from model.factors.hit_model import (leg_edge, leg_gate_reason,
                                          MIN_EDGE_PTS, EV_GATE_LIVE)
     try:
@@ -370,9 +301,7 @@ def api_slate(_: tuple = Depends(auth), limit: int = 200):
     legs = []
     for r in rows:
         cal = r["calibrated_prob"]
-        # Same gate the pipeline uses, so the dashboard can never disagree with what
-        # actually surfaces. `blocked_by` carries the reason — an unexplained empty slate
-        # is indistinguishable from a broken gate, which is how the old one stayed dead.
+        # The pipeline's own gate, so the dashboard can't disagree with what surfaces.
         why = leg_gate_reason(cal, r["book_implied"], r["season_phase"])
         legs.append({
             "name": r["batter_name"], "team": r["team"], "pitcher": r["pitcher_name"],
@@ -393,12 +322,7 @@ def api_slate(_: tuple = Depends(auth), limit: int = 200):
 
 @app.get("/api/hits")
 def api_hits(request: Request, limit: int = 60):
-    """Recent winning legs for the ambient feed.
-
-    research.db only — these are model predictions that hit, NOT real parlays. Winning
-    parlays live in bets.db, which is deliberately never deployed, so the feed cannot
-    accidentally present simulated results as real money.
-    """
+    """Recent winning research legs (never bets) for the ambient feed."""
     try:
         c = _db()
         rows = [dict(r) for r in c.execute(
@@ -408,9 +332,7 @@ def api_hits(request: Request, limit: int = 60):
         c.close()
     except Exception as e:
         return {"error": str(e), "hits": []}
-    # PUBLIC — this feeds the login screen background, so it must work signed-out.
-    # Player names and hit counts are public MLB box-score facts. The model's predicted
-    # probability is NOT, so it is only included for signed-in users.
+    # Public (the login screen's background): the model's probability only when signed in.
     signed_in = current_user(request) is not None
     return {"error": None, "hits": [
         {"name": r["batter_name"], "team": r["team"], "hits": r["actual_hits"],
@@ -420,8 +342,7 @@ def api_hits(request: Request, limit: int = 60):
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin():
-    """Same SPA — the front-end branches on pathname. Kept as its own route so the
-    server serves index.html here instead of 404ing on a client-side route."""
+    """The SPA, served here so a client-side route doesn't 404."""
     return index()
 
 
@@ -438,61 +359,44 @@ def api_report(_: tuple = Depends(require_admin)):
 
 
 # ── NBA research views ───────────────────────────────────────────────────────
-# Read with plain sqlite3, never by importing basketball/. This process has BASEBALL_DIR
-# on sys.path, so `output.research` would resolve to BASEBALL's module and `parlay.method`
-# would not exist — the name collision _run_basketball documents. The cost is restating
-# the few small things needed from basketball/; each names its twin.
+# Read with plain sqlite3, never by importing basketball/; restated values name their twin.
 
-# Twins of untrusted() and the consistency settings in basketball/parlay/method.py: the
-# players the owner's method would consider, which the admin page leads with. Starters and
-# closers in every method market, sixth men in points and assists.
+# Twins of untrusted() and the consistency settings in basketball/parlay/method.py.
 NBA_TRUSTED_SQL = ("(minutes_avg >= 28 AND market IN ('player_points', 'player_rebounds', "
                    "'player_assists')) OR (minutes_avg >= 20 AND market IN ('player_points', "
                    "'player_assists'))")
 NBA_TRUSTED_RULE = "28+ minutes in points, rebounds or assists, or 20+ in points or assists"
 NBA_CONSISTENT_SQL = "hit_l10 >= 0.7 AND hit_l20 >= 0.6"
 
-# The method parlays' money count. The owner, 2026-10-29: "Reset the count but still show if
-# parlays miss or hit ... just dont record any more wins or losses", until the method is
-# somewhere they are confident in. None counts nothing; a slate date counts the parlays
-# from that date on. Grading is untouched, so every parlay still carries its own result.
+# The method parlays' money count: None counts nothing; a slate date counts from that date.
 NBA_RECORD_FROM: str | None = None
 
 def _nba_db_path() -> str:
-    """Absolute path to the NBA research DB. Twin of RESEARCH_DB in
-    basketball/output/research.py, anchored to BASKETBALL_DIR the way _research_db_path()
-    anchors baseball's: the collector subprocess runs with that as its cwd."""
+    """Absolute NBA research DB path, anchored to BASKETBALL_DIR (the collector's cwd).
+    Twin of RESEARCH_DB in basketball/output/research.py."""
     p = os.getenv("NBA_RESEARCH_DB_PATH") or "data/history/research.db"
     return p if os.path.isabs(p) else os.path.join(BASKETBALL_DIR, p)
 
 
 def _nba_db():
-    """READ-ONLY. The collector owns this file and its schema (migrated at startup via
-    `main.py --migrate`), and nothing on the web side should write to it. Read-only also
-    makes a missing file an error, rather than a new empty database at a misconfigured
-    path. as_uri() because the local path contains a space."""
+    """Read-only: the collector owns this file. as_uri() because the local path has a
+    space."""
     conn = sqlite3.connect(f"{Path(_nba_db_path()).as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def _nba_stale_cutoff() -> str:
-    """Slate date before which every prediction should already be graded.
-
-    Today's slate is Eastern, a fixed UTC-5 — twin of slate_date() in
-    basketball/pipeline/calendar.py. The 11:00 UTC run grades the previous slate, so
-    yesterday's rows can legitimately still be pending; anything OLDER means grading is
-    stuck. It was, silently, for six days (2026-10-20..26) while collection looked healthy.
-    """
+    """Slate date before which every prediction should be graded: yesterday, Eastern
+    (fixed UTC-5, twin of slate_date() in basketball/pipeline/calendar.py)."""
     today = datetime.now(timezone.utc) - timedelta(hours=5)
     return (today - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 @app.get("/api/nba/summary")
 def api_nba_summary(who: tuple = Depends(auth)):
-    """Headline NBA numbers for any signed-in user, plus what the page needs in order to
-    say when grading is behind. Buckets, ranking gap and collection health are admin-only
-    via /api/nba/report."""
+    """Headline NBA numbers and grading backlog for any signed-in user; the rest is
+    admin-only (/api/nba/report)."""
     s = stats(_nba_db, bench=True)
     out = {"logged": s.get("logged", 0), "graded": s.get("graded", 0),
            "actual": s.get("actual"), "predicted": s.get("predicted"),
@@ -518,17 +422,8 @@ def api_nba_summary(who: tuple = Depends(auth)):
 @app.get("/api/nba/slate")
 def api_nba_slate(_: tuple = Depends(auth),
                   day: str | None = Query(None, alias="date", pattern=r"^\d{4}-\d{2}-\d{2}$")):
-    """Every prop logged for one slate (default: the latest), ranked by model probability.
-
-    No edge column, unlike the MLB slate. NBA has no fitted calibration (calibrated_prob
-    is NULL by design), and model_prob minus the book's implied probability would present
-    an edge the model has not demonstrated. Both numbers are shown and the reader compares.
-    Graded rows carry their outcome, so a past slate doubles as its own results page.
-
-    Players listed OUT are ranked last. The model logs injury status but does not use it,
-    so an out player's stale low line scores near-certain — on 10-26 the two top rows were
-    out players at 98% — and a DNP voids anyway. Display order only; every row is returned.
-    """
+    """Every prop logged for one slate (default: the latest), ranked by model probability
+    with players listed out last. No edge column: NBA has no fitted calibration."""
     try:
         c = _nba_db()
         day = day or c.execute("SELECT MAX(date) FROM predictions").fetchone()[0]
@@ -554,12 +449,8 @@ def api_nba_slate(_: tuple = Depends(auth),
 @app.get("/api/nba/parlays")
 def api_nba_parlays(_: tuple = Depends(auth), limit: int = 40):
     """The method's paper parlays, newest first, with their legs and a per-tier record.
-
-    Paper only: these live in the research DB and nothing was staked, so they sit beside
-    the simulated predictions and never beside bets.db (§14). `staked` counts settled
-    win/loss parlays only — a void returns its stake and is neither. `record` is empty while
-    the count is reset (NBA_RECORD_FROM None), and counts from that date once it is set.
-    """
+    `staked` counts settled win/loss parlays only; `record` is empty while NBA_RECORD_FROM
+    is None."""
     try:
         c = _nba_db()
         parlays = [dict(r) for r in c.execute(
@@ -602,18 +493,8 @@ def api_nba_parlays(_: tuple = Depends(auth), limit: int = 40):
 
 @app.get("/api/nba/report")
 def api_nba_report(_: tuple = Depends(require_admin)):
-    """NBA calibration (the shared stats()) plus three NBA-only tables.
-
-    `health` is collection AND grading per slate, and the page renders it even when
-    nothing is graded. MLB's admin page hides its by-day table in exactly that case, which
-    is the one case where it matters: NBA collected for six days while every grading run
-    settled zero rows, and nothing on any screen said so.
-
-    `trusted` and `pools` lead the page with the players the method would consider, since
-    much of the board is players it would never take. The trust rule alone carries the
-    headline: the full filter adds consistency, logged from the 10-26 slate, and only 14
-    of that night's 450 props passed it, so it needs months to read.
-    """
+    """NBA calibration (the shared stats()) plus `trusted` and `pools` (the method's
+    player pools), `by_market`, and `health` (collection and grading per slate)."""
     out = stats(_nba_db)
     if out.get("error"):
         return out
@@ -637,8 +518,7 @@ def api_nba_report(_: tuple = Depends(require_admin)):
                          for r in c.execute(
             "SELECT date, COUNT(*) logged, SUM(model_prob IS NOT NULL) scored, "
             "       SUM(book_odds IS NOT NULL) priced, "
-            # outcome IN (...) is NULL, not 0, on an ungraded row, so a slate with nothing
-            # graded would SUM to NULL — exactly the slate this table exists to show as 0.
+            # COALESCE: the SUM over a slate with nothing graded is NULL, not 0.
             "       COALESCE(SUM(outcome IN ('win','loss')), 0) graded, "
             "       COALESCE(SUM(outcome = 'void'), 0) void, "
             "       SUM(outcome IS NULL) pending "
@@ -651,9 +531,7 @@ def api_nba_report(_: tuple = Depends(require_admin)):
 
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")
 
-# Assets are unauthenticated on purpose: they are compiled JS/CSS with no data in them,
-# and browsers do not reliably attach Basic credentials to subresource requests. Every
-# piece of actual data goes through /api/report, which does require auth.
+# Assets need no auth: compiled JS/CSS, no data. Data endpoints require a session.
 if os.path.isdir(os.path.join(FRONTEND_DIST, "assets")):
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")),
               name="assets")
@@ -661,8 +539,7 @@ if os.path.isdir(os.path.join(FRONTEND_DIST, "assets")):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    """Serves the built React app. Auth here is what makes the browser prompt once,
-    after which it reuses the credentials for the /api/report fetch."""
+    """Serves the built React app."""
     idx = os.path.join(FRONTEND_DIST, "index.html")
     if not os.path.exists(idx):
         return HTMLResponse(
@@ -677,28 +554,17 @@ COLLECT_HOURS = {int(h) for h in
                  (os.getenv("COLLECT_HOURS") or "19,20,21,22,23,0,1,2").split(",")}
 GRADE_HOUR = int(os.getenv("GRADE_HOUR") or 13)
 
-# NBA runs later than MLB: tips are 23:00-03:00 UTC (7pm-10pm ET), so collection sits a
-# couple of hours earlier and grading waits until every West Coast game has finished.
 NBA_COLLECT_HOURS = {int(h) for h in
                      (os.getenv("NBA_COLLECT_HOURS") or "21,22,23,0,1").split(",")}
 NBA_GRADE_HOUR = int(os.getenv("NBA_GRADE_HOUR") or 11)
 NBA_ENABLED = (os.getenv("NBA_ENABLED") or "1") not in ("0", "false", "False")
-# Pause switch for MLB in the offseason. An empty COLLECT_HOURS can't do it — `or` treats
-# "" as unset and falls back to the default hours — so it needs its own flag.
+# MLB's pause switch: an empty COLLECT_HOURS falls back to the default hours.
 MLB_ENABLED = (os.getenv("MLB_ENABLED") or "1") not in ("0", "false", "False")
 
 
 def _run_basketball(arg: str) -> int:
-    """Run the NBA collector as a SUBPROCESS, not an import.
-
-    basketball/ deliberately duplicates baseball/ rather than sharing a package, so both
-    define `main`, `output.research` and `pipeline.*`. This process already has
-    BASEBALL_DIR on sys.path, and Python caches modules by name — so an in-process
-    `import main` here would silently return BASEBALL's module and collect the wrong
-    sport into the wrong database. A subprocess with its own cwd gets a clean namespace
-    and makes the relative data/ paths resolve correctly, and an NBA crash cannot take
-    the web process down with it.
-    """
+    """Run the NBA collector as a subprocess. Never import basketball/ here: its module
+    names collide with baseball's, which is already on sys.path."""
     proc = subprocess.run([sys.executable, "main.py", arg], cwd=BASKETBALL_DIR,
                           capture_output=True, text=True, timeout=1800)
     for line in (proc.stdout or "").splitlines()[-25:]:
@@ -710,18 +576,15 @@ def _run_basketball(arg: str) -> int:
 
 
 def _scheduler():
-    """Replaces Railway cron. Collection is idempotent (_already_collected skips games
-    already captured, and log_predictions upserts), so a duplicate pass is cheap rather
-    than harmful — which is what makes a simple hourly check safe."""
+    """Hourly collection and daily grading for both sports. Collection is idempotent, so a
+    repeated pass is harmless."""
     done: set[str] = set()
     while True:
         try:
             now = datetime.now(timezone.utc)
             key = f"{now:%Y-%m-%d}-{now.hour}"
             if MLB_ENABLED and key not in done:
-                # Its own try. A failure here used to jump straight to the handler below,
-                # skipping NBA for the pass, and again every pass while it kept failing.
-                # Not marked done, so it retries next pass.
+                # Its own try, so an MLB failure can't skip NBA; unmarked, so it retries.
                 try:
                     if now.hour == GRADE_HOUR:
                         from output.research import grade_predictions
@@ -734,8 +597,7 @@ def _scheduler():
                 except Exception as e:
                     print(f"[scheduler] MLB run failed: {type(e).__name__}: {e}", flush=True)
 
-            # NBA keyed separately: its hours overlap MLB's, and sharing `done` would let
-            # whichever sport ran first mark the hour complete for both.
+            # Keyed apart from MLB: their hours overlap.
             nba_key = f"nba-{key}"
             if NBA_ENABLED and nba_key not in done:
                 if now.hour == NBA_GRADE_HOUR:
@@ -747,8 +609,6 @@ def _scheduler():
             if len(done) > 60:
                 done.clear()
         except Exception as e:
-            # Never let a bad run kill the thread — that would silently stop collection
-            # for the rest of the season with the web server still looking healthy.
-            # This now covers two sports, so one sport failing must not stop the other.
+            # Never let a bad run kill the thread.
             print(f"[scheduler] run failed: {type(e).__name__}: {e}", flush=True)
         time.sleep(600)

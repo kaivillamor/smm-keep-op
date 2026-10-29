@@ -5,16 +5,8 @@ const pts = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed
 const american = (o) => (o == null ? '—' : o > 0 ? `+${o}` : `${o}`)
 
 /**
- * Today's slate — the pool a parlay would be built from, ranked by edge.
- *
- * Shows BOTH probabilities on purpose. The raw model number is what research.db logs;
- * the calibrated one is what the gate decides on, and they diverge sharply at the top
- * because the measured calibration slope is 0.257. Presenting only the raw figure would
- * imply an edge the model has not demonstrated.
- *
- * Ranked and gated on EDGE against each leg's own price, not on a probability
- * threshold — the server does the gating so this view can never disagree with what
- * actually surfaces, and `blocked_by` carries the reason when a leg does not clear.
+ * Today's MLB slate ranked by edge: raw and calibrated probability, and the server's
+ * gate verdict per leg.
  */
 export default function Slate({ slate }) {
   const [showAll, setShowAll] = useState(false)
@@ -40,8 +32,6 @@ export default function Slate({ slate }) {
         {slate.count} legs scored
         <span className="sep">·</span>
         {gate.clearing ?? 0} clear a {pct(gate.min_edge)} edge
-        {/* Say it plainly rather than letting an empty column imply the market is tight.
-            An unexplained zero is how a dead gate went unnoticed for three weeks. */}
         {gate.live === false && (
           <>
             <span className="sep">·</span>

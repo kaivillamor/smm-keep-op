@@ -17,21 +17,14 @@ _SEASON_PREFILTER        = 55.0
 _BARREL_PREFILTER        = BARREL_THRESHOLD - 3.0  # catches borderline barrel + pitcher_hrfb gate guys
 _TOP_N                   = 5    # max candidates to surface after gate + ranking (2/18 hit at top-8 vs ~20% break-even)
 
-# Savant's p_home_run_pct leaderboard returns all NaN in 2026, so HR/FB is proxied from
-# FIP minus xERA: FIP charges a pitcher for the homers he allowed, xERA for the contact
-# he allowed, so FIP running above xERA reads as homer-prone. It is NOT the textbook
-# FIP − xFIP signal, though the leaderboard stored xERA under an "xfip" key until
-# 2026-10-27: xFIP isolates HR/FB luck, while xERA also moves with contact quality on
-# balls in play, so this gap is the noisier of the two.
-# Calibration: ~4 pts of HR/FB per 1.0 unit of gap above league avg (11%).
+# Savant's HR/FB leaderboard is empty for 2026, so HR/FB is proxied from FIP − xERA
+# (FIP above xERA reads as homer-prone): ~4 pts of HR/FB per unit above league avg (11%).
 _LEAGUE_AVG_HRFB = 11.0
 _HRFB_PER_FIP_UNIT = 4.0
 
 
 def _pitcher_hrfb_proxy(p_stats: dict) -> float | None:
-    """Estimate HR/FB from the FIP − xERA gap. Clamped at 0: a pitcher massively
-    outperforming his xERA (e.g. 2.00 vs 5.00) produced a negative rate, which is
-    impossible and silently failed the gate for the wrong reason."""
+    """Estimate HR/FB from the FIP − xERA gap, clamped at 0."""
     fip  = p_stats.get("fip")
     xera = p_stats.get("xera")
     if fip is None or xera is None:
@@ -56,8 +49,6 @@ def analyze_hr_props(
     pitcher_stats        : from stats["pitcher_stats"] — supplies FIP for the HR/FB proxy
 
     Returns a list of candidates who pass the gate, each with batter info + scores.
-    Additional HR prop logic can be added here as new scoring functions in
-    hr_prop_model.py — score_batter_hr_props() accepts any new metric naturally.
     """
     year = str(datetime.now(timezone.utc).year)
     candidates = []
@@ -67,8 +58,7 @@ def analyze_hr_props(
     total_batters_checked = 0
     prefilter_passed = 0
 
-    # Narrow to games that are both confirmed and still bettable. A game already
-    # underway is dropped, not a reason to stop — the rest of the slate still counts.
+    # Games both confirmed and not yet started.
     eligible = {
         pk: entry for pk, entry in lineups.items()
         if entry.get("confirmed") and not game_has_started(entry.get("commence_time"))
@@ -88,8 +78,7 @@ def analyze_hr_props(
             if pid and batters:
                 pitcher_ids.add(pid)
 
-    # Fetch pitcher zone tendencies in parallel — sequentially these can stall the
-    # whole run when Savant is slow (each retry is up to ~65s). Cached by pitcher_id.
+    # Pitcher zone tendencies, fetched in parallel (Savant is slow).
     print(f"[prop_pipeline] Fetching zone tendencies for {len(pitcher_ids)} pitcher(s)...")
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(fetch_pitcher_zone_tendencies, pid, year): pid
@@ -102,9 +91,7 @@ def analyze_hr_props(
                 print(f"[prop_pipeline] pitcher zone fetch error ({pid}): {e}")
                 pitcher_zone_cache[pid] = {}
 
-    # xERA for the HR/FB proxy, fetched here by its only reader. It used to come from
-    # fetch_stats(), unguarded, so a Savant outage failed hit research collection, which
-    # never reads it. Empty on failure: the proxy is then None and gate condition 4 is off.
+    # xERA for the HR/FB proxy; empty on failure, which turns gate condition 4 off.
     xera = fetch_pitcher_xera(year) if pitcher_ids else {}
 
     # Build the work queue: one entry per (batter, pitcher, side, game) that passes pre-filter.

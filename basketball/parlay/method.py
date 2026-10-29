@@ -1,63 +1,23 @@
 """
-The owner's parlay method, written down so the system can follow it and keep score.
+The owner's parlay method. Paper only: nothing here places a bet.
 
-Written 2026-10-26 from the owner's own description, BEFORE measuring it — the honest-use
-rule from model/factors/owner_logic.py applies here too: write the method down first and
-measure it forward. Retuning these settings after reading the method's results would fit
-noise and the record would stop being evidence. Change a setting because the method
-changed, never because last week's parlays lost.
-
-What it does each slate:
-  1. score every FanDuel points, rebounds and assists leg the owner would consider — main
-     lines, plus points rungs 2-5 under the main line;
-  2. keep the legs that pass the owner's rules (bans, trust, consistency, average,
-     head-to-head, similar defenses, defense vs position, price);
-  3. build the best $10 parlay, then the best $5 from the players it left, each inside the
-     owner's payout targets;
-  4. store them, so every one is graded against the box scores.
-
-Paper only. Nothing here places a bet.
+Each slate: score every FanDuel points, rebounds and assists leg (main lines, plus points
+rungs 2-5 under), keep the legs that pass fails(), build the best $10 parlay and then the
+best $5 from the players it left, and store both for grading.
 """
 from itertools import combinations
 from math import prod
 
-# ── the owner's settings, in the owner's words ──────────────────────────────────
+# ── the owner's settings (rules quoted in METHOD.md) ─────────────────────────────
 
-# "For rebounds we check the head to head and their consistency." Points and rebounds are
-# the markets the method was first described for. Assists joined 2026-10-27, for starters
-# and sixth men alike, at the owner's word. Threes are not part of it.
 METHOD_MARKETS = ("player_points", "player_rebounds", "player_assists")
-
-# "take 5 points under ... It's even better if you can find alt lines where I undercut by
-# 4 points and 2 points if the odds are good." Every FanDuel rung 2-5 points under the main
-# line, points only. 3 is included because FanDuel ladders mostly run in 1-point steps.
-POINTS_UNDERCUT = (2.0, 5.0)
-
-# "star-players or players I trust will be in the starting lineup or will be in down the
-# stretch in the 4th quarter." Recent minutes is the measurable stand-in: 28+ a game is a
-# starter or a closer. ESPN's free data has no quarter-by-quarter minutes.
+POINTS_UNDERCUT = (2.0, 5.0)   # points rungs this far under the main line
 TRUST_MINUTES = 28.0
-
-# "You're better off judging sixth man's by their points or assists in terms of
-# consistency." A bench player on 20+ minutes is trusted in those two markets only, and
-# still has to pass every rule below. Under 20 is not a sixth man (the owner, 2026-10-27).
 SIXTH_MAN_MINUTES = 20.0
 SIXTH_MAN_MARKETS = ("player_points", "player_assists")
-
-# "The main thing I look for is consistency." Cleared this exact line in 7+ of the last 10
-# games and 12+ of the last 20.
 CONSISTENCY_L10 = 0.7
 CONSISTENCY_L20 = 0.6
 
-# "how they perform against teams similar to their opponent or against their opponent in
-# general which is just head2head." Applied only with enough games to mean anything.
-# Since 2026-10-29 both count the way consistency does: how often he cleared THIS line in
-# those games, which has to be more than half (the owner's bar). Until then each compared an
-# average to the line, so one big night hid the misses: Saddiq Bey's 10.0 against DEN beat
-# a 9.5 line on 2 overs in 4. Head-to-head also looks back three seasons, not two, which
-# left one to four meetings: Alexander-Walker was 3 of 3 against HOU inside the window and
-# 0 of 4 the season before it. Similar defenses stays on two seasons, because the defenses
-# are matched on what they allow now.
 H2H_SEASONS = 3                # this season and the two before it
 H2H_MIN_GAMES = 2
 SIMILAR_TEAMS = 5              # nearest defenses by what they allow in this market
@@ -65,48 +25,26 @@ SIMILAR_MIN_GAMES = 3
 if H2H_SEASONS < 2:
     raise ValueError("H2H_SEASONS counts this season and last at least: the game log has both")
 
-# "Teams that play solid defense or have an opponent team player set to match up against
-# our intended player" (the owner, 2026-10-29). ESPN has no data on who guards whom, so the
-# measure is what tonight's opponent allows to his position (guard, forward or center) per
-# 36 minutes in this market, from stored box scores (pipeline/team_defense). The owner
-# skips the 3 stingiest of 30.
-STINGY_VS_POSITION = 3
+STINGY_VS_POSITION = 3         # skip opponents ranked 1..this against his position
 
-# "We also need to begin banning teams/players" (the owner, 2026-10-29). A banned player is
-# never used; a banned team means none of its players are. Both filter this method only:
-# banned players keep their research rows, and every row logs whether it was banned, so the
-# bans can be measured (output/research.compare_bans). Keyed by ESPN id, never by name:
+# Keyed by ESPN id, never by name; a team ban drops all its players:
 #     BANNED_PLAYERS = {"<player id>": ("Name", "date added", "why"), ...}
 #     BANNED_TEAMS   = {"<team id>": ("ABBR", "date added", "why"), ...}
 BANNED_PLAYERS: dict[str, tuple] = {}
 BANNED_TEAMS: dict[str, tuple] = {}
 
-# "I tend to avoid anything that's -400 over but if it adds a significant amount (+$20)
-# to the parlay payout i keep it."
 MAX_FAVORITE = -400
 SWEETENER_MIN_GAIN = 20.0
-
-# "I generally keep my parlays within 3 to 5 legs now."
 LEG_COUNTS = (3, 4, 5)
-
-# "I usually stake $5 for a small profit of anything from 30 to 70 dollars and for $10 i
-# aim for anything over $100 to $300 if the odds are really good and the stats look good."
-# "Stats look good" for the $10 tier = every leg cleared its line 8+ of the last 10.
 TIERS = {
     "$5":  {"stake": 5.0,  "profit": (30.0, 70.0),   "min_l10": 0.7},
     "$10": {"stake": 10.0, "profit": (100.0, 300.0), "min_l10": 0.8},
 }
-
-# "The standard should be taking different legs or different players." (the owner,
-# 2026-10-28, after the $5 and $10 slips shared four of five players on 10-27 and 10-28.)
-# No player sits in both slips, at any line or market. The $10 picks first: its 8-of-10
-# bar leaves it the smaller pool, and the $5 builds from the players it left.
 BUILD_ORDER = ("$10", "$5")
 if sorted(BUILD_ORDER) != sorted(TIERS):
     raise ValueError(f"BUILD_ORDER {BUILD_ORDER} must name every tier in TIERS once")
 
-# Search bounds. Legs are ranked first, so the cap only drops the weakest candidates; 30
-# keeps a 3-5 leg search to ~170k combinations, well under a second.
+# Search bounds: POOL_CAP 30 keeps a 3-5 leg search to ~170k combinations.
 RUNGS_PER_PLAYER_MARKET = 2
 POOL_CAP = 30
 
@@ -147,22 +85,21 @@ def more_than_half(hits: int, games: int) -> bool:
 
 
 def mean(vals: list) -> float | None:
-    """To 2 places, as sim_avg and sim_opp_avg have always been stored."""
+    """Mean to 2 places; None if empty."""
     return round(sum(vals) / len(vals), 2) if vals else None
 
 
 def meetings(rows: list, stat: str, opponent_id: str | None) -> list:
-    """His `stat` in every game against tonight's opponent, newest first. `rows` carries
-    H2H_SEASONS seasons here: the game log plus the older seasons main.py fetches apart."""
+    """His `stat` in every game against tonight's opponent, newest first. `rows` spans
+    H2H_SEASONS seasons."""
     return [g[stat] for g in rows
             if opponent_id and g.get("opponent_id") == opponent_id and g.get(stat) is not None]
 
 
 def similar_opponent_games(rows: list, stat: str, opponent_id: str, factors: dict,
                            team_stat: str, k: int = SIMILAR_TEAMS) -> list:
-    """His `stat` in every game against the k defenses closest to tonight's opponent in what
-    they allow in this market — tonight's opponent itself excluded, since head-to-head is
-    measured apart."""
+    """His `stat` against the k defenses closest to tonight's opponent in what they allow
+    in this market, tonight's opponent excluded."""
     f0 = factors.get((opponent_id, team_stat))
     if f0 is None:
         return []
@@ -173,13 +110,8 @@ def similar_opponent_games(rows: list, stat: str, opponent_id: str, factors: dic
 
 
 def player_inputs(rows: list, stat: str, opponent_id: str | None) -> dict:
-    """Minutes, averages and head-to-head, read straight from the game log.
-
-    The method's own reads, never the model's player_form(), so tuning the model cannot
-    change which legs this method takes. It did once: from 10-26 player_form() shrank this
-    season toward last season, and the average rule read that blend (about three quarters
-    last season, five games in), though nothing in the owner's description asks for one.
-    Season average here is this season's games alone, or last season's before the first.
+    """Minutes, averages and head-to-head, read straight from the game log: never from
+    player_form(). Season average is this season's games, or last season's before the first.
     """
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
     this = [g[stat] for g in rows if not g.get("prior") and g.get(stat) is not None]
@@ -205,9 +137,7 @@ def legs_for(candidate: dict, rows: list, stat: str, rungs: list, own: dict,
     for line, odds, undercut in rungs:
         r10, h10, n10 = hit_rate(rows, stat, line, 10)
         r20, h20, n20 = hit_rate(rows, stat, line, 20)
-        # The rate used for SCORING is smoothed — (hits+1)/(games+2) — so a perfect 10 of
-        # 10 ranks as very likely, not certain. The threshold checks use the raw rate,
-        # because "7 of the last 10" is how the owner states the rule.
+        # Scoring uses the smoothed rate; the threshold checks use the raw one.
         smooth = (h10 + 1) / (n10 + 2) if n10 else None
         legs.append({
             **{k: candidate.get(k) for k in ("game_id", "player_id", "player_name", "team",
@@ -235,11 +165,8 @@ def legs_for(candidate: dict, rows: list, stat: str, rungs: list, own: dict,
 # ── the rules ────────────────────────────────────────────────────────────────────
 
 def untrusted(minutes: float | None, market: str) -> str | None:
-    """None if the owner trusts this player in this market, else why not.
-
-    Starters and closers in every method market, sixth men in points and assists. The
-    research report reads this too, so its "trusted" cut cannot drift from the method's.
-    """
+    """None if the player is trusted in this market, else why not. web/app.py restates
+    this as NBA_TRUSTED_SQL: change both."""
     minutes = minutes or 0
     if market not in METHOD_MARKETS:
         return "not_a_method_market"
@@ -251,8 +178,7 @@ def untrusted(minutes: float | None, market: str) -> str | None:
 
 
 def banned(player_id, team_id) -> str | None:
-    """'player' or 'team' if a ban list covers this player, else None. The rule and the
-    research log both read this, so the flag can never disagree with the filter."""
+    """'player' or 'team' if a ban list covers this player, else None."""
     if str(player_id) in BANNED_PLAYERS:
         return "player"
     if str(team_id) in BANNED_TEAMS:
@@ -261,11 +187,7 @@ def banned(player_id, team_id) -> str | None:
 
 
 def fails(leg: dict) -> str | None:
-    """None if the leg passes the owner's rules, else the first rule it fails.
-
-    A reason rather than a bare False: a night where nothing qualifies has to say why, or
-    it is indistinguishable from a broken filter (§29).
-    """
+    """None if the leg passes the owner's rules, else the first rule it fails."""
     line = leg["line"]
     ban = banned(leg["player_id"], leg.get("team_id"))
     if ban:
@@ -287,12 +209,11 @@ def fails(leg: dict) -> str | None:
     if (leg["sim_games"] >= SIMILAR_MIN_GAMES
             and not more_than_half(leg["sim_hits"], leg["sim_games"])):
         return "similar_defenses_under_line"
-    # No rank (the box-score backfill is unfinished, or ESPN lists no position): the rule
-    # cannot judge, so it does not apply. The collector prints how many legs that was.
+    # No rank (backfill unfinished, or no ESPN position): the rule does not apply.
     if leg.get("opp_pos_rank") is not None and leg["opp_pos_rank"] <= STINGY_VS_POSITION:
         return "stingy_vs_position"
     if not leg["worth"] or leg["worth"] < 1.0:
-        return "price_too_short"          # "if the odds are good": record must beat price
+        return "price_too_short"          # smoothed record must beat the implied price
     return None
 
 
@@ -316,12 +237,9 @@ def qualify(legs: list[dict]) -> tuple[list[dict], dict]:
 # ── building ─────────────────────────────────────────────────────────────────────
 
 def build(legs: list[dict], tier: str, taken: frozenset = frozenset()) -> dict | None:
-    """The best parlay for a tier, or None if nothing fits the owner's targets.
-
-    Best = highest product of the legs' smoothed hit rates — a RANKING score built from
-    the legs' own records, not a calibrated probability. Ties go to the bigger payout.
-    `taken` is the players already in another of tonight's slips; none of them is used.
-    """
+    """The best parlay for a tier, or None if nothing fits its targets. Best = highest
+    product of the legs' smoothed hit rates, ties to the bigger payout. Players in `taken`
+    are skipped."""
     t = TIERS[tier]
     stake, (lo, hi) = t["stake"], t["profit"]
     pool = sorted((l for l in legs
@@ -336,7 +254,7 @@ def build(legs: list[dict], tier: str, taken: frozenset = frozenset()) -> dict |
             profit = stake * (dec - 1)
             if not lo <= profit <= hi:
                 continue
-            # A -400-or-shorter leg stays only if it adds $20+ to the payout.
+            # A sweetener (MAX_FAVORITE or shorter) must add SWEETENER_MIN_GAIN to the payout.
             if any(stake * (dec / l["decimal"]) * (l["decimal"] - 1) < SWEETENER_MIN_GAIN
                    for l in combo if l["sweetener"]):
                 continue
@@ -355,13 +273,10 @@ def build(legs: list[dict], tier: str, taken: frozenset = frozenset()) -> dict |
 
 
 def build_slate(legs: list[dict], held: dict[str, set]) -> tuple[dict, dict]:
-    """Tonight's parlay per tier still open, with no player in two slips.
+    """Tonight's parlay per open tier, built in BUILD_ORDER with no player in two slips.
 
-    Tiers build in BUILD_ORDER, each clear of every player an earlier tier took. `held` is
-    frozen(): tiers already locked at tip, which save() keeps as they are, so their players
-    are out for every tier: a slip that could have been placed outranks first pick. Also
-    returns how many players each tier was built without, so a tier that comes back empty
-    can say whether the rules left it nothing or the other slip did.
+    `held` is frozen(): locked tiers, whose players are out for every tier. Also returns
+    how many players each tier was built without.
     """
     taken = set().union(*held.values())
     parlays, held_out = {}, {}
@@ -385,8 +300,7 @@ _LEG_COLS = ("game_id", "player_id", "player_name", "team", "opponent", "tipoff"
 
 
 def frozen(conn, day: str, now: str) -> dict[str, set[str]]:
-    """This slate's frozen tiers (first leg tipped, save()'s test), with each one's players,
-    so the tiers still being built can stay clear of them."""
+    """This slate's frozen tiers (first leg tipped) and each one's players."""
     held: dict[str, set[str]] = {}
     for pid, tier in conn.execute(
             "SELECT id, tier FROM method_parlays WHERE date=? AND first_tip <= ?",
@@ -397,13 +311,9 @@ def frozen(conn, day: str, now: str) -> dict[str, set[str]]:
 
 
 def save(conn, day: str, parlays: dict, now: str) -> list[str]:
-    """Store tonight's parlay per tier. Returns a status line per tier.
-
-    One parlay per tier per slate, replaced on each run — UNTIL its first leg tips. From
-    then on it is frozen, because that is the version that could actually have been
-    placed. A run that finds nothing for an unfrozen tier removes the earlier pick: the
-    record is what the method said at its last chance before tip, not its first guess.
-    """
+    """Store tonight's parlay per tier; returns a status line per tier. Each run replaces
+    (or, if nothing fits, removes) a tier's parlay until its first leg tips, then it is
+    frozen."""
     status = []
     for tier in TIERS:
         old = conn.execute("SELECT id, first_tip FROM method_parlays WHERE date=? AND tier=?",
@@ -438,11 +348,8 @@ def save(conn, day: str, parlays: dict, now: str) -> list[str]:
 # ── grading ──────────────────────────────────────────────────────────────────────
 
 def grade(conn, finals: dict, called_off: set, box_for) -> int:
-    """Grade pending legs, then any parlay whose legs are all settled.
-
-    A void leg (did not play, or the game was called off) drops out and the parlay pays
-    on the legs that remain — how a book reprices it. Any losing leg loses the parlay.
-    """
+    """Grade pending legs, then each parlay whose legs are all settled. A void leg drops
+    out and the parlay pays on the rest; any losing leg loses it."""
     from pipeline.stats_fetcher import MARKET_STAT
 
     pending = conn.execute(

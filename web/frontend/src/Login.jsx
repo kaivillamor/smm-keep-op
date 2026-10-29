@@ -1,13 +1,7 @@
 import { useState } from 'react'
 import FallingHits from './FallingHits.jsx'
 
-/**
- * Centred sign-in over the ambient feed.
- *
- * The feed runs on the PUBLIC /api/hits, so the background is alive before anyone signs
- * in. That endpoint withholds the model's predicted probability while signed out —
- * player names and hit counts are public box-score facts, the model's output is not.
- */
+/** Centred sign-in over the ambient feed (the public /api/hits). */
 export default function Login({ hits, onSignedIn }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -68,8 +62,7 @@ export default function Login({ hits, onSignedIn }) {
           />
         </label>
 
-        {/* One message for both failure modes — saying which half was wrong would
-            confirm whether a username exists. */}
+        {/* One message for both failures, so it never confirms a username exists. */}
         {error && <p className="bad login-error">{error}</p>}
 
         <button type="submit" disabled={busy || !username || !password}>

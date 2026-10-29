@@ -1,8 +1,6 @@
 MIN_WIN_PROB_EDGE = 0.03   # 3% edge on moneyline
 MIN_TOTAL_EDGE   = 0.5    # 0.5 runs on totals (after shrinkage — see TOTAL_SHRINK)
-TOTAL_SHRINK     = 0.5    # our_implied_total runs hot vs book lines (16 of 19 legs were
-                          # OVER through 2026-07-06, hitting 45%) — trust the book's line
-                          # halfway until the run model is recalibrated
+TOTAL_SHRINK     = 0.5    # trust the book's total line halfway
 
 
 def detect_edges(probabilities: list[dict]) -> list[dict]:
@@ -47,10 +45,7 @@ def american_to_implied_prob(odds: int) -> float:
 
 
 def remove_vig(home_prob: float, away_prob: float) -> tuple[float, float]:
-    """
-    Strips the bookmaker's vig from both sides so probabilities sum to 1.0.
-    Without this, we'd be comparing our clean probability to an inflated book probability.
-    """
+    """Strips the bookmaker's vig from both sides so probabilities sum to 1.0."""
     total = home_prob + away_prob
     return home_prob / total, away_prob / total
 

@@ -6,10 +6,9 @@ NBA prop research collector.
     python main.py --collect-grade  grade yesterday, then collect tonight
     python main.py --report         calibration + ranking signal
     python main.py --migrate        create/upgrade the research DB schema, nothing else
+    python main.py --parlays [DAY]  print a slate's method parlays (default: tonight)
 
-Research only. Nothing here places or records a bet, and there is deliberately no betting
-gate: MLB shipped one before its inputs were logged and it could not fire for three weeks
-without anyone noticing (PROJECT.md §29). Collect and measure first.
+Research only: nothing here places or records a bet.
 """
 import sys
 
@@ -28,44 +27,30 @@ from pipeline.team_defense import (MARKET_TEAM_STAT, allowance_factors, position
 
 
 def collect(day: str | None = None) -> int:
-    """Score every player with a posted line on tonight's slate, and log them all.
-
-    EVERY priced player, not just the ones the model likes. Logging only the surfaced
-    picks is a biased sample — the ones the model already rated highly — and it cannot
-    answer whether the ranking works at all. That realisation is what made MLB's
-    calibration measurable in days instead of months.
-    """
+    """Score and log every player with a posted line on tonight's slate."""
     day = day or slate_date()
     print(f"[main] slate {day} — research only, no bets")
 
-    # Scheduled games only. Not `not final` — that includes in-progress games, and
-    # re-scoring one replaces a bettable pre-tip line with a live-market number.
+    # Unstarted games only: re-scoring a live game would log an in-play line.
     all_games = fetch_scoreboard(day)
     games = [g for g in all_games if not g["started"]]
     if len(games) != len(all_games):
         print(f"[main] skipping {len(all_games) - len(games)} game(s) already underway")
-    # ESPN's own season type, per game. The date-based calendar is only a fallback now.
     phase_by_game = {g["game_id"]: g.get("phase") for g in games}
     if not games:
         print("[main] no scheduled games on this slate.")
         return 0
     print(f"[main] {len(games)} game(s)")
 
-    # Index EVERY game on the slate, started ones included, then skip started games
-    # explicitly below. Indexing only scheduled games made a player in a game already
-    # underway look like a failed name match — 25 of them on 2026-10-26 — and a real
-    # matching failure would have been invisible inside that list.
+    # Every game, started ones included, so their players don't read as unmatched.
     index = build_player_index(all_games, day, normalize_name)
     scheduled = {g["game_id"] for g in games}
     in_progress: set[str] = set()
     print(f"[main] {len(index)} players on rosters")
 
-    # One game log per PLAYER, reused across all four markets. Fetching per player-market
-    # would quadruple the calls for identical data.
     logs: dict[str, tuple] = {}
 
-    # Opponent defense. The first run backfills last season into the DB (~210 calls,
-    # once); every run after adds only the dates since.
+    # Opponent defense.
     season_year = next((g["season_year"] for g in games if g.get("season_year")), None)
     prior_year = season_year - 1 if season_year else None
     factors: dict = {}
@@ -75,9 +60,7 @@ def collect(day: str | None = None) -> int:
         conn = _connect()
         added = sync_team_games(conn, season_year, day)
         factors = allowance_factors(conn, season_year)
-        # Defense vs position, for the method: every player's line from each stored game.
-        # The first runs backfill last season a capped batch at a time, and the rule waits
-        # until the backfill is done rather than rank teams on whichever games loaded first.
+        # Defense vs position, for the method; empty until the box-score backfill is done.
         boxes = sync_player_games(conn)
         pos_factors = position_factors(conn, season_year)
         stored, total = position_sync_status(conn, season_year)
@@ -92,28 +75,20 @@ def collect(day: str | None = None) -> int:
                 if method.banned(r["player_id"], r["team_id"])}
     print(f"[method] bans: {len(method.BANNED_PLAYERS)} player(s), "
           f"{len(method.BANNED_TEAMS)} team(s); {len(on_slate)} banned player(s) on this slate")
-    # A mistyped team id would ban nobody without a word. Player ids cannot be checked the
-    # same way (a player is only seen on the nights he plays), so the count above is it.
     unknown = sorted(t for t in method.BANNED_TEAMS if known_teams and t not in known_teams)
     if unknown:
         print(f"[method] WARNING: banned team id(s) {', '.join(unknown)} match no NBA team — "
               f"check BANNED_TEAMS in parlay/method.py")
 
-    # The method's head-to-head looks back H2H_SEASONS seasons, further than the model's two.
-    # Seasons before last are fetched apart from `logs`, so player_form() never sees them.
+    # Seasons before last stay out of `logs`, so player_form() never sees them.
     older_years = (range(prior_year - 1, season_year - method.H2H_SEASONS, -1)
                    if season_year else range(0))
     older: dict[str, list] = {}
 
-    # Once per run, as in the baseball twin: drop cached files no run will read again (old
-    # slate folders, and finished seasons older than any this run reads), so a cache on the
-    # volume stays a couple of slates plus the seasons still in use.
     pruned = prune_cache(day, min((prior_year, *older_years)) if season_year else None)
     if pruned:
         print(f"[main] cache: removed {pruned} old slate folder(s) / season log(s)")
 
-    # Injury report. None means it could not be fetched — kept distinct from "nobody is
-    # out", so a failed fetch never logs the whole slate as healthy.
     injuries = fetch_injuries()
     team_ids = {g["home_id"] for g in games} | {g["away_id"] for g in games}
     out_minutes: dict[str, dict[str, float]] = {}       # team_id -> {player_id: minutes}
@@ -137,14 +112,9 @@ def collect(day: str | None = None) -> int:
     method_legs: list[dict] = []
     unmatched: set[str] = set()
     for market in NBA_MARKETS:
-        # One fetch gives the main lines AND the alternate ladder (the owner's undercuts).
         board, ladders = fetch_prop_board(market, book=DEFAULT_BOOK)
         for name, entry in board.items():
-            # The board is NOT date-filtered — it carries every slate the provider has up,
-            # so on 2026-10-21 it also held 41 players from the 10-20 games. The roster
-            # index happened to exclude them, but relying on that made a normal condition
-            # look like 43 failed name matches. Filter explicitly and the only names left
-            # in `unmatched` are real misses.
+            # The board carries every slate the provider has up: keep tonight's.
             if game_slate_date(entry.get("start")) != day:
                 continue
             who = index.get(name)
@@ -164,7 +134,6 @@ def collect(day: str | None = None) -> int:
 
             form = player_form(rows, market, opponent_id=who["opponent_id"]) if rows else {}
             stat, team_stat = MARKET_STAT.get(market), MARKET_TEAM_STAT.get(market)
-            # The owner's rule inputs at this row's main line — logged for every row.
             own = method.player_inputs(rows, stat, who["opponent_id"]) if rows else {}
             l10 = method.hit_rate(rows, stat, entry["line"], 10)[0] if rows else None
             l20 = method.hit_rate(rows, stat, entry["line"], 20)[0] if rows else None
@@ -175,9 +144,7 @@ def collect(day: str | None = None) -> int:
             pos_factor, pos_rank = pos_factors.get(
                 (who["opponent_id"], who.get("position"), team_stat), (None, None))
             prob = prop_probability(form, market, entry.get("line"))
-            # Your rules, as a DELTA on top of the quant number — never a replacement.
-            # Only applied when the quant model produced a probability: a rule nudging a
-            # number that doesn't exist would invent a prediction from nothing.
+            # Owner rules add a delta to the quant probability, only when there is one.
             adj = 0.0
             if prob is not None:
                 adj = apply_prop_owner_logic(entry.get("player_name") or name, market,
@@ -191,17 +158,8 @@ def collect(day: str | None = None) -> int:
                 "market": market, "line": entry.get("line"),
                 "tipoff": who["tipoff"],
                 "season_phase": phase_by_game.get(who["game_id"]),
-                # base_prob is the quant number, owner_adj your rules' delta, model_prob
-                # the clamped sum. Kept separate so compare_owner_logic() can score the
-                # rules against the quant model on identical outcomes. Until 2026-10-26
-                # this hardcoded 0.0 and never called the rules at all, so anything
-                # written in owner_logic.py would have silently done nothing.
                 "base_prob": prob, "owner_adj": adj, "model_prob": final,
-                # calibrated_prob stays NULL on purpose. No NBA calibration has been
-                # fitted — there is no data to fit one on — and inventing a slope is
-                # exactly what made MLB's gate unfireable. The column is here so that
-                # when one IS fitted, it cannot be used without being logged.
-                "calibrated_prob": None,
+                "calibrated_prob": None,      # no NBA calibration is fitted
                 "book_odds": entry.get("over"), "book": entry.get("book"),
                 "book_under_odds": entry.get("under"),
                 "book_implied": _implied(entry.get("over")),
@@ -215,7 +173,6 @@ def collect(day: str | None = None) -> int:
                 "vs_opp_games": form.get("vs_opp_games"),
                 "days_rest": days_rest(rows, who["tipoff"]),
                 "is_home": who["is_home"],
-                # Logged, not used by the model yet — see pipeline/team_defense.
                 "opp_allow_factor": factors.get((who["opponent_id"],
                                                  MARKET_TEAM_STAT.get(market))),
                 "injury_status": (None if injuries is None else
@@ -227,19 +184,15 @@ def collect(day: str | None = None) -> int:
                 "hit_l10": l10, "hit_l20": l20,
                 "sim_opp_avg": method.mean(sim), "sim_opp_games": len(sim),
                 "season_avg_raw": own.get("season_avg"),
-                # Head-to-head and similar defenses as the method now reads them: games
-                # over this line, three seasons back for head-to-head (10-29).
                 "h2h_hits": method.over(meet, entry.get("line")) if rows else None,
                 "h2h_meetings": len(meet) if rows else None,
                 "sim_opp_hits": method.over(sim, entry.get("line")) if rows else None,
                 "position": who.get("position"),
                 "opp_pos_factor": pos_factor, "opp_pos_rank": pos_rank,
-                # Logged on every row, banned or not, so the ban can be measured; the ban
-                # filters the method only.
                 "banned": method.banned(pid, who["team_id"]) or "no",
             })
 
-            # The owner's method: the main line, plus (points only) every rung 2-5 under it.
+            # The method's legs: the main line, plus points rungs within POINTS_UNDERCUT.
             if market in method.METHOD_MARKETS and rows and entry.get("over") is not None:
                 rungs = [(entry["line"], entry["over"], 0.0)]
                 if market == "player_points":
@@ -316,12 +269,9 @@ if __name__ == "__main__":
     elif cmd == "--report":
         report()
     elif cmd == "--migrate":
-        # The web service runs this at startup. It reads this database READ-ONLY, so it
-        # cannot apply _connect()'s migrations itself — without this, a column added in a
-        # deploy would be missing from the dashboard until the next collect or grade run.
+        # Run by the web service at startup: it opens this DB read-only, so can't migrate it.
         _connect().close()
     elif cmd == "--parlays":
-        # Tonight's method parlays (or a given slate's): python main.py --parlays 2026-10-27
         conn = _connect()
         print(method.describe(conn, sys.argv[2] if len(sys.argv) > 2 else slate_date()))
         conn.close()

@@ -22,12 +22,8 @@ function status(p) {
 }
 
 /**
- * The method's paper parlays, one slate at a time — one per tier, legs underneath — paged
- * newest to oldest.
- *
- * `latest` is the newest slate with any props. A slate with props but no parlay means
- * the method ran and nothing fit its targets, which is said rather than left blank: an
- * empty list is otherwise indistinguishable from a method that never ran.
+ * The method's paper parlays, one slate at a time, newest first. `latest` is the newest
+ * slate with props: one with props but no parlay says nothing fit.
  */
 export default function MethodParlays({ data, latest }) {
   const [day, setDay] = useState('')          // '' = the newest date

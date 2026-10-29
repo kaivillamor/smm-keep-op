@@ -2,30 +2,15 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 
-# NOTE: parlay_builder is imported lazily inside the logging functions below, not
-# here at module top. Running `python output/backtest.py summary` executes this
-# file as a script (only 'output/' on sys.path), where 'parlay' isn't importable;
-# summary never logs, so the import only needs to exist when main.py does the logging.
+# parlay_builder and the slate calendar are imported inside functions: run as a script
+# (`python output/backtest.py summary`), only output/ is on sys.path.
 
-# Env-overridable for containerised runs (see RESEARCH_DB in research.py). Note the
-# collection service deliberately does NOT set this — it never writes bets.db, so the
-# real-money record stays on the local machine only.
+# Never set BETS_DB_PATH in a deployed environment: the real-money record stays local.
 DB_PATH = os.getenv("BETS_DB_PATH") or "data/history/bets.db"
 
 
 def _slate_today() -> str:
-    """The MLB slate date (Eastern) — not the calendar date this process happens to see.
-
-    `date.today()` rolls over at midnight while collection is still running (the window is
-    roughly 19:00-02:00 UTC). In research.db that put the same game under two dates and
-    duplicated 20% of the corpus (§29); every table here keys on `date` the same way, so
-    they carried the identical latent bug. bets.db has not been written since 2026-07-31,
-    which is the only reason it never bit.
-
-    Imported inside the function for the same reason as parlay_builder above — `python
-    output/backtest.py summary` runs this file with only output/ on sys.path. Unguarded on
-    purpose: a missing slate calendar is an error, not a cue to use a different date.
-    """
+    """The MLB slate date (Eastern), not the calendar date this process sees."""
     from pipeline.stats_fetcher import slate_date
     return slate_date()
 
@@ -75,7 +60,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             llm_downgraded INTEGER DEFAULT 0,
             llm_reason    TEXT,
             outcome       TEXT    DEFAULT NULL,  -- 'win' | 'loss' | 'push'
-            closing_odds  INTEGER DEFAULT NULL,  -- never written: game lines retired first
+            closing_odds  INTEGER DEFAULT NULL,  -- never written
             created_at    TEXT    NOT NULL
         );
 
@@ -145,36 +130,22 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             created_at  TEXT    NOT NULL
         );
     """)
-    # Migration: existing DBs created before the odds column was added
+    # Migrations. The interpolated column names and types are the literals in the tuples
+    # below: SQLite can't bind identifiers.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(hit_parlays)").fetchall()}
     if "odds" not in cols:
         conn.execute("ALTER TABLE hit_parlays ADD COLUMN odds INTEGER DEFAULT NULL")
-    # Migration: hit_legs gained book odds / implied / ev columns
-    #
-    # The two ALTER TABLE statements below interpolate `col`/`decl` into the SQL string.
-    # That is safe and unavoidable, not an oversight: both values come from the literal
-    # tuples on the `for` lines — never from user input, a file, or an API — and SQLite
-    # cannot bind a column name or type as a parameter (`?` placeholders work only for
-    # values, not identifiers). Every other statement in this module is parameterized.
     leg_cols = {r[1] for r in conn.execute("PRAGMA table_info(hit_legs)").fetchall()}
     for col, decl in (("book_odds", "INTEGER"), ("book_implied", "REAL"), ("ev", "REAL"),
                       ("book", "TEXT")):
         if col not in leg_cols:
             conn.execute(f"ALTER TABLE hit_legs ADD COLUMN {col} {decl} DEFAULT NULL")
-    # Migration: hr_prop_candidates gained book odds / implied columns
     hr_cols = {r[1] for r in conn.execute("PRAGMA table_info(hr_prop_candidates)").fetchall()}
     for col, decl in (("book_odds", "INTEGER"), ("book_implied", "REAL"),
                       ("book", "TEXT")):
         if col not in hr_cols:
             conn.execute(f"ALTER TABLE hr_prop_candidates ADD COLUMN {col} {decl} DEFAULT NULL")
-    # Same provenance backfill as research.py — see the note there. hr_prop_candidates is
-    # doubly ambiguous: DraftKings prices were used as a FanDuel stand-in when FanDuel had
-    # no line, and were relabelled 'fanduel', so the two sources are now indistinguishable.
-    #
-    # Bounded at the 2026-09-17 fix, as research.py's is. Unbounded, it stamped any later
-    # price that reached the table without a book as the broken feed's — and the odds
-    # backfills in log_hr_candidates and log_hit_parlay wrote exactly that (the twin of
-    # research.py's ON CONFLICT bug). They now carry `book`.
+    # Price provenance: a price with no book from before the feed fix is suspect.
     for _t in ("hit_legs", "hr_prop_candidates"):
         conn.execute(f"UPDATE {_t} SET book = 'fanduel_feed_suspect' "
                      f"WHERE book_odds IS NOT NULL AND book IS NULL "
@@ -205,7 +176,7 @@ def log_hr_candidates(candidates: list[dict], db_path: str = DB_PATH) -> list[in
         for r in existing_rows:
             c = by_bid.get(str(r["batter_id"]))
             if c and c.get("book_odds") is not None and r["book_odds"] is None:
-                # `book` travels with the price it describes — see _ensure_schema.
+                # `book` travels with the price it describes.
                 conn.execute("UPDATE hr_prop_candidates SET book_odds=?, book_implied=?, book=? "
                              "WHERE id=?",
                              (c["book_odds"], c.get("book_implied"), c.get("book"), r["id"]))
@@ -313,15 +284,9 @@ def log_hr_parlays(cand_ids: list[int], stake: float = 10.0,
 
 
 def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
-    """Persists a BATCH of hit parlay legs and returns that batch's leg IDs.
-
-    Same-day re-runs append rather than overwrite. Once games start, a later run
-    legitimately covers a different set of games, and those earlier legs are bets
-    that may already be placed — deleting them would erase a live wager from the
-    record. The only skip case is an exact repeat: every batter in this batch is
-    already logged today, in which case we backfill any odds we didn't have before
-    and reuse the existing rows.
-    """
+    """Persists a batch of hit parlay legs and returns that batch's leg IDs. Same-day
+    re-runs append (earlier legs may be placed bets); an exact repeat only backfills odds
+    and reuses the existing rows."""
     if not legs:
         return []
     conn  = _connect(db_path)
@@ -349,7 +314,7 @@ def log_hit_parlay(legs: list[dict], db_path: str = DB_PATH) -> list[int]:
                 continue
             cur = conn.execute("SELECT book_odds FROM hit_legs WHERE id=?", (row_id,)).fetchone()
             if cur["book_odds"] is None:
-                # `book` travels with the price it describes — see _ensure_schema.
+                # `book` travels with the price it describes.
                 conn.execute(
                     "UPDATE hit_legs SET book_odds=?, book_implied=?, book=?, ev=? WHERE id=?",
                     (leg["book_odds"], leg.get("book_implied"), leg.get("book"),
@@ -745,8 +710,6 @@ def _print_summary(s: dict) -> None:
 
 if __name__ == "__main__":
     import sys
-    # `summary` is the only command. With no argument this used to list pending game
-    # parlays; game lines are retired and none are pending, so it summarises instead.
     if len(sys.argv) > 1 and sys.argv[1] != "summary":
         sys.exit("usage: python output/backtest.py [summary]")
     evaluate_results()

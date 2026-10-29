@@ -1,17 +1,9 @@
-# Pinned to keep `pip install -r` reproducible and to make dependency CVE scans
-# meaningful — an unpinned file resolves differently on every machine, so a clean
-# `pip-audit` today says nothing about what the next install will pull.
-# Re-scan after any bump:  pip-audit
+# Pinned for reproducible installs and meaningful CVE scans. Re-scan after any bump:
+# pip-audit
 requests==2.34.2
 pandas==3.0.3
 python-dotenv==1.2.2
-# anthropic was dropped 2026-10-27 with its only importer, the game-line LLM review.
 
 # Dashboard service (web/app.py) — always-on, also hosts the collection scheduler.
 fastapi==0.141.1
 uvicorn==0.49.0
-
-# streamlit was listed but never imported anywhere in the codebase. It pulled in
-# gitpython, pillow, and starlette, which together accounted for every known CVE
-# in the environment (21 advisories). Removed 2026-08-26. If a dashboard gets built
-# later, re-add it pinned and re-run pip-audit.

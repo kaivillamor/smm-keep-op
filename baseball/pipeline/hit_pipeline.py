@@ -40,8 +40,7 @@ def analyze_hit_props(lineups: dict, stats: dict,
     pitcher_stats = stats.get("pitcher_stats", {})
 
     confirmed_count = sum(1 for v in lineups.values() if v.get("confirmed"))
-    # Games already underway can't be bet — drop them and carry on with the rest of
-    # the slate rather than treating a started game as a reason to produce nothing.
+    # Games already underway can't be bet: drop them and score the rest.
     started = sum(1 for v in lineups.values()
                   if v.get("confirmed") and game_has_started(v.get("commence_time")))
     bettable = confirmed_count - started
@@ -131,10 +130,7 @@ def analyze_hit_props(lineups: dict, stats: dict,
                 owner_adj = apply_hit_owner_logic(batter_name, opponent_team, base_prob)
                 prob = round(min(max(base_prob + owner_adj, 0.0), 1.0), 4)
 
-                # The handedness split actually used as this matchup's BA base. Stored
-                # so a refit can use it: it is the model's single largest input, and it
-                # was silently empty for every batter until the statSplits sitCodes fix
-                # (2026-09-08), so rows logged before then have it NULL.
+                # The handedness split used as this matchup's BA base.
                 _split = splits.get("vs_rhp" if pitcher_hand == "R" else "vs_lhp", {})
 
                 candidates.append({
@@ -142,15 +138,8 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     "batter_name":     batter_name,
                     "split_avg":       _split.get("avg"),
                     "split_ab":        _split.get("ab", 0),
-                    # Needed to REPRODUCE the model from stored rows. Without these the
-                    # reconstruction runs on 100% recent H/9 (the model blends season
-                    # 60/40) and on a neutral park, giving 0.05 mean error and making
-                    # any weight-fitting describe a different model than the live one.
                     "park_factor":       runs_factor,
                     "pitcher_season_h9": _pitcher_hits_per_9(p_stats),
-                    # The sample the shrinkage weight is computed from. §24 — h9 is now
-                    # regressed toward league average by innings, so without this the
-                    # stored h9 cannot be reproduced or un-shrunk by a later refit.
                     "pitcher_season_ip": p_stats.get("innings_pitched"),
                     "team":            team,
                     "opponent_team":   opponent_team,
@@ -161,43 +150,25 @@ def analyze_hit_props(lineups: dict, stats: dict,
                     "h2h_avg":         h2h_stats.get("avg"),
                     "recent_ab":       recent_stats.get("ab", 0),
                     "recent_avg":      recent_stats.get("avg"),
-                    # No venue_ab/venue_avg: the lookup was removed 2026-09-08 (the API
-                    # ignored venueId and returned the career line), so research.db logs
-                    # those columns NULL. Park effects come from park_factors.
                     "pitcher_recent_h9": pitcher_recent.get("h_per_9"),
                     "pitcher_days_rest": pitcher_recent.get("days_rest"),
                     "team_recent_avg":   team_recent.get("avg"),
                     "is_day_game":       day_game,
-                    # The slate this GAME belongs to, not the day collection happened to
-                    # run. Keys the research row — see game_slate_date() and §29.
-                    "game_date":         game_slate_date(commence),
-                    # Which regime this game falls in. The EV gate refuses to fire outside
-                    # the phase the calibration was fit on — see hit_model.CALIBRATION_PHASE.
+                    "game_date":         game_slate_date(commence),   # keys the research row
                     "season_phase":      season_phase(game_slate_date(commence)),
                     "base_prob":       base_prob,
                     "owner_adj":       owner_adj,
                     "hit_probability": prob,
-                    # Raw value above is what research.db logs. The calibrated one below
-                    # is what the betting gate uses — see hit_model.calibrated_hit_prob.
                     "calibrated_prob": calibrated_hit_prob(prob),
                     "game_pk":         game_pk,
                 })
 
     candidates.sort(key=lambda c: c["hit_probability"], reverse=True)
 
-    # Price the WHOLE slate, not just the surfaced legs. Costs NOTHING extra:
-    # fetch_hit_prop_odds() already pulls the entire board in one paginated call
-    # (~180 players) and the old code looked up 4 names from it, discarding the rest.
-    # Pricing only the top 4 made the recorded price distribution a 4-row sample of the
-    # model's own favourites — which cannot answer whether playable prices exist on the
-    # legs it likes, and that question decides whether this layer is viable at all.
-    # No legs are dropped for negative EV — we surface the same picks, ranked by edge.
+    # Price the whole slate, before the research hand-off below, so research.db gets prices.
     _attach_hit_odds(candidates)
 
-    # Optional hand-off of EVERY scored batter for calibration research. The surfaced
-    # legs alone are a biased sample (the ones the model already liked), which can't
-    # reveal whether the ranking works. Default None keeps existing callers unchanged.
-    # Odds are attached ABOVE this line so research.db records the price too.
+    # Every scored batter, for calibration research.
     if all_candidates_out is not None:
         all_candidates_out.extend(candidates)
 
@@ -228,47 +199,24 @@ def _attach_hit_odds(legs: list[dict]) -> None:
         leg["book_odds"]    = entry["odds"]
         leg["book_implied"] = entry["implied"]
         leg["book"]         = entry["book"]
-        # EV as a probability edge: how much higher our estimate is than the book's.
-        # Uses the CALIBRATED probability, not the raw one — EV is a betting decision and
-        # the raw number is known to overstate badly at the top end. Computing edge from
-        # the inflated value manufactured positive EV that was never there.
-        #
-        # Delegates to hit_model.leg_edge so this and the gate can never disagree. It had
-        # its own copy of the subtraction, and two formulas for one quantity is how they
-        # drift — note the old fallback to the RAW probability when calibrated_prob was
-        # missing, which would have reintroduced exactly the overstatement above.
+        # Edge from the calibrated probability, via the gate's own leg_edge.
         leg["ev"] = leg_edge(leg.get("calibrated_prob"), entry["implied"])
     print(f"[hit_pipeline] matched book odds for {matched}/{len(legs)} scored batters "
           f"({len(board)} players on the board)")
     if board and matched < len(legs) * 0.5:
-        # Low coverage has two very different causes: names that failed to normalise, or
-        # players absent because _paginate hit the provider's ~600-row cap. Say which.
         print("[hit_pipeline] NOTE low odds coverage — if the board looks truncated, "
               "prop_odds._paginate stops at the provider's ~600-row cap")
 
 
 def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
-    """Pick up to max_legs legs clearing the per-leg EV gate, at most 1 per team.
-
-    Selection is on EDGE against each leg's OWN price, not on a probability threshold.
-    A single threshold derived from the median price cannot protect against selection,
-    because the legs the model likes are not priced at the median — measured, and then
-    confirmed live when the old gate selected legs that did WORSE than the ones it
-    rejected (§29, hit_model.MIN_EDGE_PTS).
-
-    Prices are attached to the whole slate before this runs, so every candidate already
-    carries book_implied wherever the board had one.
-
-    Ranked by edge, highest first, so a thin slate keeps the best available rather than
-    whatever the lineup order happened to put first.
-    """
+    """Up to max_legs legs clearing the per-leg EV gate, at most 1 per team, ranked by
+    edge against each leg's own price."""
     seen_teams: set[str] = set()
     legs: list[dict] = []
     rejected: dict[str, int] = {}
 
     def _edge_key(c: dict) -> float:
-        # -inf rather than `or -1`, so an unpriced leg sorts last and an edge of exactly
-        # 0.0 is not mistaken for a missing one.
+        # -inf, not `or -1`: an unpriced leg sorts last and an edge of 0.0 stays 0.0.
         edge = leg_edge(c.get("calibrated_prob"), c.get("book_implied"))
         return edge if edge is not None else float("-inf")
 
@@ -290,9 +238,6 @@ def _select_legs(candidates: list[dict], max_legs: int) -> list[dict]:
             break
 
     if len(legs) < max_legs:
-        # Say WHY nothing qualified. An unexplained empty slate is indistinguishable from
-        # a broken gate, which is exactly how the 2026-09-09 gate stayed dead for three
-        # weeks — it surfaced nothing and that read as a fact about the market.
         detail = ", ".join(f"{code} {cnt}" for code, cnt in sorted(rejected.items()))
         print(f"[hit_pipeline] {len(legs)} of {max_legs} leg(s) cleared the EV gate "
               f"(min edge {MIN_EDGE_PTS:.1%}) — not padding with weaker legs. "

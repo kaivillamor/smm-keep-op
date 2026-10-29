@@ -14,8 +14,6 @@ from output.result_tracker import resolve_pending
 
 def run(run_props: bool = False, run_hits: bool = False,
         run_hits_2: bool = False, run_all: bool = False):
-    # Game lines (moneylines + totals, with the LLM review and weather) were retired on
-    # 2026-10-27 after 3-26 on real money; their parlays stay in bets.db for the summary.
     if run_all:
         run_props = True
         run_hits  = True
@@ -57,18 +55,8 @@ def run(run_props: bool = False, run_hits: bool = False,
 
 
 def _collect_predictions() -> None:
-    """Research-only run: score every batter on the slate and record the predictions.
-
-    Deliberately does NOT call any log_* function from backtest.py — no legs, no
-    parlays, no stakes. Simulated results stay in research.db and can never appear
-    in the P&L.
-
-    Run it EARLY in the day: the pipeline only scores games that haven't started,
-    so a late run captures just the remaining slate (~60 batters) instead of the
-    full one (~180). Every scored batter is priced, not just the surfaced legs:
-    the board comes down in one call either way, and pricing only the model's
-    favourites would make the recorded prices a sample of its own picks.
-    """
+    """Research-only run: score and price every batter in games not yet started, and log
+    them to research.db. Never calls backtest's log_* functions."""
     from output.research import log_predictions, report
     print("\n[main] Research collection — no bets logged, bets.db untouched.")
     stats   = fetch_stats()
@@ -92,16 +80,8 @@ def _already_collected(slate: str) -> set[str]:
 
 
 def _watch_lineups(interval_min: int = 10, max_hours: float = 14.0) -> None:
-    """Poll for lineup confirmations and collect each game the moment it's ready.
-
-    Lineups post in waves 1–3h before first pitch, so a single daily run always
-    misses part of the slate. This watches instead: every cycle it scores any game
-    that is newly confirmed and hasn't started, then sleeps. Already-collected games
-    are skipped (state lives in research.db, so restarting resumes cleanly), and it
-    exits once every game is either collected or underway.
-
-    Research only — logs predictions, never bets.
-    """
+    """Poll for lineup confirmations and collect each game once confirmed and not yet
+    started; resumable, since state lives in research.db. Research only."""
     import time
     from output.research import log_predictions
     from pipeline.stats_fetcher import game_has_started, slate_date, _match_probable
@@ -136,9 +116,8 @@ def _watch_lineups(interval_min: int = 10, max_hours: float = 14.0) -> None:
                                   for v in list(ready.values())[:3])
                 more  = f" (+{len(ready) - 3} more)" if len(ready) > 3 else ""
                 print(f"[watch] {len(ready)} newly confirmed: {names}{more}")
-                # A game whose probable pitcher appeared after startup needs fresh stats.
-                # Test for None, not falsiness — an empty-but-present entry is a real
-                # match, and treating it as missing triggers a needless 30+ call refetch.
+                # A probable pitcher added since startup needs fresh stats. `is None`, not
+                # falsiness: an empty entry is still a match.
                 if any(_match_probable(pk, stats.get("probable_pitchers", {})) is None
                        for pk in ready):
                     print("[watch] refreshing probable pitchers...")
@@ -282,8 +261,6 @@ def _print_hit_parlay_split(pairs: list[list[dict]]) -> None:
     print(f"{'=' * width}")
 
     if not pairs:
-        # Don't guess at the cause — the pipeline prints the real reason above
-        # (unconfirmed lineups, games already started, or the probability gate).
         print("  No pairs generated — see the [hit_pipeline] lines above for why.")
         print(f"{'=' * width}")
         return
@@ -374,8 +351,7 @@ def _print_hr_candidates(candidates: list[dict]) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MLB value betting pipeline")
-    # The LLM review went with game lines (2026-10-27). Accepted and ignored so commands
-    # written before then, like `--no-llm --hits-2`, still run.
+    # Accepted and ignored, so older commands like `--no-llm --hits-2` still run.
     parser.add_argument("--no-llm", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--props",
@@ -383,8 +359,6 @@ if __name__ == "__main__":
         help="Run HR prop analysis: barrel rate alone, sweet spot or zone fit with hard "
              "contact, or a homer-prone pitcher with barrel rate qualifies a batter",
     )
-    # Built from the constants so the help cannot drift from the code, as "8-leg at $10"
-    # and "4×2-leg at $50" did.
     parser.add_argument(
         "--hits", "--hits-8",
         dest="hits",
@@ -480,5 +454,4 @@ if __name__ == "__main__":
         run(run_props=args.props, run_hits=args.hits, run_hits_2=args.hits_2,
             run_all=args.all)
     else:
-        # A bare run used to mean game lines, the only mode that needed no flag.
         parser.print_help()

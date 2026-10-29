@@ -1,16 +1,8 @@
-/* ── tokens ──────────────────────────────────────────────────────────────────
-   Dark ground kept; the boxes are gone. The old look leaned on bordered,
-   rounded, surface-filled cards — a stat tile, a note, a table and a list were
-   four nested rectangles before a single number was read. This pass is
-   Baseball-Reference density in the same palette: hairline rules instead of
-   containers, uppercase micro-labels, tight rows, numerals that line up.
-   ------------------------------------------------------------------------- */
+/* ── tokens ────────────────────────────────────────────────────────────────── */
 :root {
   color-scheme: dark;
   --bg:      #000;
-  /* Only ever a hover wash now. Nothing is "a surface" — no element earns a
-     fill just for existing, which is what made the page read as boxes. */
-  --surface: rgba(255, 255, 255, .03);
+  --surface: rgba(255, 255, 255, .03);   /* hover wash only */
   --line:    rgba(255, 255, 255, .12);   /* row rules */
   --line-strong: rgba(255, 255, 255, .26); /* section + header rules */
   --text:    #f5f5f5;
@@ -19,12 +11,8 @@
   --good:    #4ade80;
   --warn:    #fbbf24;
   --bad:     #f87171;
-  /* Player names. Not --good: a name in the win colour reads as a win, a positive
-     edge or a cleared gate. Lighter and yellower, so the two never match. */
-  --player:  #a5ef8b;
-  /* Radii survive only where a control needs a visible edge (inputs, buttons).
-     Data never gets a corner. */
-  --r: 4px;
+  --player:  #a5ef8b;                    /* player names */
+  --r: 4px;                              /* inputs and buttons only */
 }
 
 * { box-sizing: border-box; }
@@ -39,10 +27,6 @@ body {
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
   font-size: 14px;
   line-height: 1.45;
-  /* NOTE: no global `tnum` here, deliberately. Tabular figures give every digit
-     the width of a zero, which is right for a column and wrong for a display
-     number — at 48px a tabular "121" reads visibly loose. Tabular is applied to
-     table cells and sub-labels only; big values keep proportional figures. */
   font-feature-settings: 'cv05' 1;
   -webkit-font-smoothing: antialiased;
 }
@@ -55,8 +39,6 @@ h1 {
   margin: 0;
 }
 
-/* Section head = label + full-width rule. The whole structural vocabulary of a
-   reference page, and it replaces every card border on the screen. */
 h2 {
   font-size: .66rem; font-weight: 600; text-transform: uppercase;
   letter-spacing: .11em; color: var(--muted);
@@ -79,7 +61,6 @@ p { margin: .5rem 0; }
 }
 .bar nav a:hover { color: var(--text); }
 
-/* Standing disclaimer: a line of text between rules, not a panel. */
 .note {
   font-size: .76rem; color: var(--muted);
   margin: 0 0 1.4rem; padding: .5rem 0;
@@ -87,10 +68,7 @@ p { margin: .5rem 0; }
 }
 .note strong { color: var(--text); font-weight: 600; }
 
-/* ── hero figure ─────────────────────────────────────────────────────────────
-   Exactly one per view: the number the page exists to report. Same sans as
-   everything else, proportional figures, and the qualifier sits under it so the
-   number is never read without its interval. */
+/* ── hero figure ───────────────────────────────────────────────────────────── */
 .hero { margin: 1.25rem 0 .5rem; }
 .hero-label {
   font-size: .62rem; font-weight: 600; text-transform: uppercase;
@@ -103,9 +81,7 @@ p { margin: .5rem 0; }
 .hero-note { font-size: .8rem; color: var(--muted); margin-top: .3rem; }
 .hero-note .ci { font-variant-numeric: tabular-nums; }
 
-/* ── KPI row ─────────────────────────────────────────────────────────────────
-   Divided by hairlines, not boxed. Rules top and bottom close the band without
-   drawing four borders per figure. */
+/* ── KPI row ───────────────────────────────────────────────────────────────── */
 .kpis {
   display: flex; flex-wrap: wrap; margin: 1.1rem 0 .25rem;
   border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
@@ -122,9 +98,7 @@ p { margin: .5rem 0; }
 .kpi-value { font-size: 1.35rem; font-weight: 600; letter-spacing: -.02em; margin-top: .05rem; }
 .kpi-sub { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 
-/* ── tables ──────────────────────────────────────────────────────────────────
-   No outer border, no radius, no header fill. A double rule under the column
-   heads and a hairline between rows is the entire chrome. */
+/* ── tables ────────────────────────────────────────────────────────────────── */
 table {
   width: 100%; border-collapse: collapse;
   margin: 0 0 1.1rem; font-size: .83rem;
@@ -134,8 +108,7 @@ th {
   letter-spacing: .09em; color: var(--dim); text-align: left;
   padding: .3rem .55rem .32rem; white-space: nowrap;
   border-bottom: 1px solid var(--line-strong);
-  /* Sticky so a long slate keeps its headings while scrolling. Needs an opaque
-     background or rows show through as it passes under. */
+  /* Sticky headings need an opaque background, or rows show through. */
   position: sticky; top: 0; background: var(--bg); z-index: 1;
 }
 td {
@@ -145,11 +118,8 @@ td {
 tbody tr:hover td { background: var(--surface); }
 th:first-child, td:first-child { padding-left: 0; }
 th:last-child,  td:last-child  { padding-right: 0; }
-/* Numbers right-align so magnitudes compare down the column; names stay left. */
 th.n, td.n { text-align: right; }
-/* A 3- or 5-column table stretched to the full 64rem puts a quarter-page of dead
-   space between a label and its first number, which reads as sparse rather than
-   dense. Narrow tables size to their content; the 9-column slate still fills. */
+/* Narrow tables size to their content. */
 table.narrow { width: auto; min-width: min(34rem, 100%); }
 table.narrow th, table.narrow td { padding-left: 1.6rem; }
 table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
@@ -160,8 +130,6 @@ table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
 .warn  { color: var(--warn); }
 .bad   { color: var(--bad); }
 .neutral { color: var(--muted); }
-/* Status is never carried by hue alone — these always sit beside a signed number
-   or a worded verdict. */
 .verdict { font-size: .83rem; font-weight: 600; }
 
 .row-strong td { font-weight: 600; }
@@ -192,10 +160,7 @@ table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
   100% { transform: translate(var(--drift), 44vh) scale(1); opacity: 0; }
 }
 
-/* ── sign-in screen ──────────────────────────────────────────────────────────
-   The one place a container is still correct: a form needs a visible edge. The
-   radius is tightened from 28px to match the new language instead of reading as
-   a leftover from the bubbly pass. */
+/* ── sign-in screen ────────────────────────────────────────────────────────── */
 .login-screen {
   position: relative; min-height: 100vh; overflow: hidden;
   background: var(--bg);
@@ -262,10 +227,7 @@ table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
   .feed { height: auto; min-height: 0; overflow: visible; mask-image: none; -webkit-mask-image: none; }
 }
 
-/* ── recent hits ─────────────────────────────────────────────────────────────
-   Was a bordered, rounded, zebra-striped list. Now the same grid with hairline
-   rules and no container, so it reads as a continuation of the tables above it
-   rather than another panel. */
+/* ── recent hits ───────────────────────────────────────────────────────────── */
 .hits {
   list-style: none; margin: 0 0 1.1rem; padding: 0;
   max-height: 24rem;
@@ -294,8 +256,7 @@ table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
 .hit-meta  { color: var(--muted); }
 .hit-date  { color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
 
-/* The phone tables' two-line row: name over team on the left, the count on the
-   name's line and the date on the team's, both right-aligned. */
+/* Phones: two-line rows, name over team, count and date right-aligned. */
 @media (max-width: 34rem) {
   .hits li { grid-template-columns: 1fr auto; row-gap: 0; }
   .hits li > span:first-child { grid-row: span 2; }
@@ -306,8 +267,7 @@ table.narrow th:first-child, table.narrow td:first-child { padding-left: 0; }
 /* ── today's slate ───────────────────────────────────────────────────────── */
 .slate-meta { font-size: .76rem; margin: 0 0 .5rem; color: var(--muted); }
 .slate-meta .sep { color: var(--dim); margin: 0 .4rem; }
-/* The gate marker is a left rule on the row, not a filled block — a tinted
-   table row is a box by another name. */
+/* The gate marker: a left rule on the row. */
 table.slate tr.clears td:first-child { box-shadow: inset 2px 0 0 var(--good); padding-left: .5rem; }
 table.slate td.blocked { color: var(--dim); font-size: .76rem; }
 .link-btn {
@@ -318,9 +278,7 @@ table.slate td.blocked { color: var(--dim); font-size: .76rem; }
 .link-btn:hover { color: var(--text); }
 .link-btn:disabled { color: var(--dim); border-bottom-color: transparent; cursor: default; }
 
-/* ── NBA controls ────────────────────────────────────────────────────────────
-   Slate picker then market filter, on one row. The filter reuses the link
-   button, so it reads as part of the page rather than as a toolbar. */
+/* ── NBA controls ──────────────────────────────────────────────────────────── */
 .filters {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem 1.1rem;
   margin: 0 0 .55rem;
@@ -334,52 +292,40 @@ select {
 }
 .slate-meta strong { color: var(--text); font-weight: 600; }
 .parlay { margin: 0 0 1.4rem; }
-/* Full column on desktop; the phone rule below (same specificity, later) keeps
-   its natural-width sideways scroll. */
+/* Full width on desktop; the later phone rule (same specificity) overrides it. */
 .parlay table.narrow { width: 100%; }
 .nowrap { white-space: nowrap; }
 
 /* ── phones ──────────────────────────────────────────────────────────────────
-   Phone width only, so the desktop layout above is untouched by construction.
-   Tables keep their columns: each scrolls sideways inside its own box with the
-   first column pinned, which is Baseball-Reference's phone treatment, the same
-   reference the density came from. Nothing may widen the page itself: the slate
-   health table did, at ~590px, and the whole page panned sideways, header and
-   all. */
+   Nothing may widen the page: tables scroll sideways, first column pinned. */
 @media (max-width: 40rem) {
   main { padding: 1.25rem 1rem 3rem; }
 
-  /* Title and nav no longer fit on one line, and the nowrap nav squeezed the
-     title into three. Stack them; the links wrap if they must. */
+  /* Stack title and nav. */
   .bar { flex-direction: column; align-items: flex-start; gap: .25rem; }
   h1 { font-size: 1rem; }
   .bar nav { flex-wrap: wrap; gap: 0 1.4rem; }
   .bar nav a { padding: .45rem 0; }
 
-  /* Two figures a row. Flex-wrap left the first figure of each wrapped row with a
-     stray left rule and indent, and no rule between the rows. */
+  /* Two figures a row. */
   .kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi { min-width: 0; padding: .6rem 0 .6rem .9rem; }
   .kpi:nth-child(odd) { border-left: 0; padding-left: 0; }
   .kpi:nth-child(n+3) { border-top: 1px solid var(--line); }
 
-  /* Narrow screens only: a scroll container also captures `position: sticky`, and
-     on a desktop the sticky column heads are worth more than the wrapper. */
+  /* Phones only: a scroll container also captures `position: sticky`. */
   .scroll-x { overflow-x: auto; }
-  /* Natural width, scrolled, not squeezed to fit. Squeezing broke every name at
-     every space ("Amen / Thompson / HOU vs / ATL") and still did not fit. */
+  /* Natural width, scrolled, not squeezed. */
   .scroll-x table, .scroll-x table.narrow {
     width: max-content; min-width: 100%;
-    /* Collapsed borders are painted by the table, not the cell, so a pinned cell
-       would slide off its own row rule. Separate borders travel with the cell. */
+    /* Separate borders travel with a pinned cell; collapsed ones are the table's. */
     border-collapse: separate; border-spacing: 0;
   }
   table.narrow th, table.narrow td { padding-left: .55rem; }
   /* Figures sit on the name's line, not centred against name and team. */
   .scroll-x td { vertical-align: baseline; }
 
-  /* The pinned column: opaque so the rest slides under it, with a hairline for the
-     edge it slides under. */
+  /* The pinned column, opaque so the rest slides under it. */
   .scroll-x th:first-child, .scroll-x td:first-child {
     position: sticky; left: 0; z-index: 2;
     background: var(--bg);
@@ -389,15 +335,13 @@ select {
   .scroll-x table.slate tr.clears td:first-child {
     box-shadow: inset 2px 0 0 var(--good), inset -1px 0 0 var(--line-strong);
   }
-  /* Name on its own line with team, opponent and injury under it, capped so one
-     long name wraps rather than widening the column every row has to pin. */
+  /* Cap the pinned name so a long one wraps. */
   .scroll-x td:first-child .hit-name { display: block; max-width: 7.5rem; }
 
   /* iOS zooms into any focused field under 16px and leaves the page zoomed. */
   select, .login-card input { font-size: 1rem; }
 
-  /* A bigger touch target without moving the underline: the hit area grows, the
-     drawn button does not. */
+  /* A bigger touch target; the drawn button stays put. */
   .link-btn { position: relative; }
   .link-btn::after { content: ''; position: absolute; inset: -.45rem -.3rem; }
   .filters { gap: .75rem 1rem; }
@@ -407,8 +351,7 @@ select {
   .login-bg .feed { height: 100dvh; }
 }
 
-/* Touch screens have no hover, so a tapped row would keep its wash until the next
-   tap somewhere else. */
+/* Touch screens: a tapped row would keep its hover wash. */
 @media (hover: none) {
   tbody tr:hover td, .hits li:hover { background: none; }
 }

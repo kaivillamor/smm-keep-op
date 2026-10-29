@@ -23,10 +23,7 @@ PARK_FACTORS = {
     "Minnesota Twins":       (1.00, 1.00),
     "New York Mets":         (0.96, 0.96),
     "New York Yankees":      (1.05, 1.15),  # Short RF porch inflates HR factor significantly
-    # Keyed "Athletics", the name the MLB API has used since the move. Under the old
-    # "Oakland Athletics" key no A's home game ever matched, so every one was scored as a
-    # neutral 1.0 park. UNVERIFIED for Sacramento: 2022-24 is Coliseum data, and the
-    # comment here claimed Sacramento before the key had ever worked. Update for LV.
+    # The MLB API's name. Coliseum data, unverified for Sacramento.
     "Athletics":             (0.95, 0.91),
     "Philadelphia Phillies": (1.08, 1.10),
     "Pittsburgh Pirates":    (0.97, 0.94),

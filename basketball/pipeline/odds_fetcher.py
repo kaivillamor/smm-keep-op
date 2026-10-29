@@ -1,12 +1,4 @@
-"""NBA game-line odds — copied from baseball/pipeline/odds_fetcher.py 2026-09-12.
-
-SHARED ORIGIN. Only the sport slug differs (`basketball_nba` vs `baseball_mlb`); the
-quota accounting, book filtering and vig handling are a verbatim copy. Fix a logic bug
-here and check the twin. See PROJECT.md §25.
-
-`basketball_nba` is confirmed active on the existing ODDS_API_KEY — same key, no new
-credential needed (PROJECT.md §23).
-"""
+"""NBA game-line odds (moneylines and totals) from The Odds API, keyed by ODDS_API_KEY."""
 import os
 import json
 import requests
@@ -35,8 +27,7 @@ def fetch_odds() -> list[dict]:
 
 def _fetch_raw() -> list[dict]:
     now = datetime.now(timezone.utc)
-    # Window: from right now (exclude started games) to 7am UTC next day
-    # (covers all NBA games including late west-coast starts, ~10:30pm PT tip-offs)
+    # From now (started games excluded) to 07:00 UTC tomorrow, past the latest tip.
     next_day_7am = (now + timedelta(days=1)).replace(
         hour=7, minute=0, second=0, microsecond=0
     )
@@ -118,11 +109,8 @@ def _find_best_lines(home: str, away: str, bookmakers: dict) -> dict:
 
 
 def check_usage() -> dict:
-    """
-    Checks Odds API quota by hitting /v4/sports (0 credits, free endpoint).
-    Returns used, remaining, total, reset date, and days until reset.
-    The Odds API resets on the 1st of each calendar month (UTC).
-    """
+    """Odds API quota from /v4/sports (costs no credits): used, remaining, total, and the
+    reset date (the 1st of each month, UTC) with days until it."""
     if not ODDS_API_KEY:
         print("[odds_fetcher] No ODDS_API_KEY set")
         return {}
@@ -154,15 +142,9 @@ def check_usage() -> dict:
 
 
 def fetch_hr_prop_odds() -> list[dict]:
-    """
-    Fetches HR prop odds for today's games from The Odds API.
-
-    Requires The Odds API player props tier ($50+/month as of 2025).
-    Uses per-event endpoint: one call per game to get batter_home_runs market.
-    Returns a flat list of {batter_name, game_id, home_team, away_team, book, odds, point}.
-
-    NOTE: odds are "to score 1+ HRs" (point = 0.5 threshold, Over only).
-    """
+    """1+ HR odds (batter_home_runs, Over 0.5) for today's games, one call per event:
+    [{batter_name, game_id, home_team, away_team, book, odds, point}]. Needs the player
+    props tier."""
     if not ODDS_API_KEY:
         print("[odds_fetcher] No ODDS_API_KEY — skipping HR prop odds")
         return []

@@ -9,20 +9,15 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
-# Real Eastern zone for wall-clock questions (day vs night game), where an hour of
-# DST error changes the answer. slate_date() below deliberately keeps its fixed
-# offset — it only needs the calendar day, and the extra hour of grace helps late games.
+# Real Eastern zone for wall-clock questions (day vs night game); slate dates use the
+# fixed _ET_OFFSET below.
 _EASTERN = ZoneInfo("America/New_York")
 
 MLB_API = "https://statsapi.mlb.com/api/v1"
 SAVANT_BASE = "https://baseballsavant.mlb.com"
 
-# MLB schedules a "game day" in Eastern time — a 10pm ET game belongs to that day's
-# slate even though it's already tomorrow in UTC. Everything keyed by slate (lineups,
-# probable pitchers, per-day caches) must share one basis, so it lives here and
-# lineup_fetcher calls slate_date() rather than keeping a copy. Using UTC here silently
-# fetched the NEXT day's probables after 8pm ET, so no game_pk matched a lineup and
-# every pipeline produced zero candidates.
+# Everything keyed by slate (lineups, probable pitchers, per-day caches) uses this one
+# Eastern basis, never UTC.
 _ET_OFFSET = timedelta(hours=5)
 
 
@@ -31,21 +26,13 @@ def slate_date() -> str:
     return (datetime.now(timezone.utc) - _ET_OFFSET).strftime("%Y-%m-%d")
 
 
-# MLB regular-season / postseason boundary, by season. Lives here with the rest of the
-# slate calendar so `pipeline` can read it without importing `output` (it never does, and
-# the gate in hit_pipeline needs the phase). research.py imports it lazily for the same
-# reason it imports slate_date lazily. Update annually, like PARK_FACTORS.
+# MLB postseason start, by season. Update annually.
 POSTSEASON_START = {2026: "2026-09-29"}
 
 
 def season_phase(game_date: str | None) -> str | None:
-    """'regular' | 'postseason', or None when this season's boundary isn't recorded.
-
-    None on purpose: an unrecorded boundary is unknown, not 'regular'. Guessing would put
-    postseason rows into the model corpus under a confident label, and would let the EV
-    gate fire in a regime its calibration was never fit on — the two failures this
-    function exists to prevent.
-    """
+    """'regular' | 'postseason', or None (unknown, never a guess) when this season's
+    boundary isn't recorded."""
     if not game_date:
         return None
     try:
@@ -59,22 +46,8 @@ def season_phase(game_date: str | None) -> str | None:
 
 
 def game_slate_date(commence_time: str | None) -> str:
-    """The MLB slate date (Eastern) a given first pitch belongs to, as YYYY-MM-DD.
-
-    Deliberately the same basis as slate_date() — the fixed offset, not the DST zone.
-    This value is the key written to predictions.date, so it has to agree with the
-    per-day caches and probable-pitcher keying, which key off slate_date(). An hour of
-    DST drift cannot move a first pitch across a slate boundary; a different offset can.
-
-    Why this exists: research.py used `date.today()`, the COLLECTION date, as part of
-    UNIQUE(date, game_pk, batter_id). Collection runs ~19:00-02:00 UTC, so a late game
-    scored either side of UTC midnight was written twice under two different dates — 678
-    duplicate rows, 20% of the corpus (§29). A slate date derived from first pitch is a
-    property of the game and cannot drift with the clock.
-
-    Falls back to slate_date() on a missing or unparseable timestamp, so a game with no
-    start time is attributed to the run's own slate rather than dropped.
-    """
+    """The MLB slate date (Eastern) a first pitch belongs to, on slate_date()'s basis: the
+    key of predictions.date. Falls back to slate_date() on a missing or bad timestamp."""
     if not commence_time:
         return slate_date()
     try:
@@ -87,13 +60,7 @@ def game_slate_date(commence_time: str | None) -> str:
 
 
 def is_day_game(commence_time: str | None) -> bool:
-    """True if first pitch is before 6pm Eastern.
-
-    Uses a real DST-aware zone rather than arithmetic on the UTC hour. Slicing the
-    hour out of the timestamp and testing `utc_hour < 22` wrapped past midnight, so
-    a 9:40pm ET game (01:40 UTC) read as hour 1 and was classified a DAY game —
-    misflagging every game after 8pm ET and applying the day-game penalty to it.
-    """
+    """True if first pitch is before 6pm Eastern (DST-aware)."""
     if not commence_time:
         return False
     try:
@@ -106,13 +73,7 @@ def is_day_game(commence_time: str | None) -> bool:
 
 
 def game_has_started(commence_time: str | None) -> bool:
-    """True once first pitch has passed — you can no longer place a pregame bet.
-
-    Used to filter a slate down to still-bettable games rather than to abort:
-    an early game being underway says nothing about the 7pm cluster. An unknown
-    or unparseable start time returns False so a missing field never silently
-    drops a game we could still bet.
-    """
+    """True once first pitch has passed; False for an unknown or unparseable start."""
     if not commence_time:
         return False
     try:
@@ -125,9 +86,7 @@ def game_has_started(commence_time: str | None) -> bool:
 
 _SAVANT_TIMEOUT_CODES = {"502", "503", "524"}
 
-# Savant's season-long CSV queries are slow enough to graze a fixed timeout.
-# Escalate the read timeout across attempts and back off between them so one
-# slow response doesn't drop a pitcher/batter's zone data for the whole run.
+# Savant's season-long CSV queries are slow: escalate the timeout across attempts.
 _SAVANT_RETRY_TIMEOUTS = (25, 40)  # seconds, one per attempt
 _SAVANT_RETRY_BACKOFF  = 2.0       # seconds between attempts
 
@@ -145,23 +104,18 @@ def _is_transient_savant_error(e: Exception) -> bool:
     return _is_savant_timeout(e)
 
 
-# Cache root. Env-overridable so a containerised run can point it at a mounted
-# volume — otherwise the cache lives on the container's ephemeral disk, is wiped
-# between scheduled runs, and every run re-fetches identical day-stable data.
+# Cache root; STATS_CACHE_DIR points it at a mounted volume.
 _CACHE_DIR = os.getenv("STATS_CACHE_DIR") or "data/stats"
 
 
 def _day_cache_path(kind: str, player_id: int) -> str:
-    """Per-player, per-day cache path. Zone/recent/split inputs are stable within a
-    day, so this makes repeated runs on the same slate near-instant."""
+    """Per-player, per-slate cache path."""
     date_str = slate_date()
     return f"{_CACHE_DIR}/{kind}_{player_id}_{date_str}.json"
 
 
 def _prune_old_caches(keep_days: int = 3) -> None:
-    """Delete day-cache files older than keep_days. The service writes ~600 small
-    files per slate; without this the volume grows for the whole season. Failures
-    are ignored — pruning is housekeeping and must never break a run."""
+    """Delete day-cache files older than keep_days. Never raises."""
     cutoff = time.time() - keep_days * 86400
     try:
         for name in os.listdir(_CACHE_DIR):
@@ -188,14 +142,8 @@ def _read_day_cache(path: str, int_keys: bool = False) -> dict | None:
 
 
 def _write_day_cache(path: str, data: dict) -> None:
-    """Atomic write so a concurrent reader never sees a half-written file.
-    Only call after a SUCCESSFUL fetch — never cache a transient failure.
-
-    The temp name must be unique per *call*, not per process: these run in a
-    thread pool, so a pid-based name collides whenever two threads write the
-    same cache path (e.g. a batter appearing in both games of a doubleheader).
-    The first os.replace consumes the shared temp file and the second fails
-    with ENOENT, losing that batter's data."""
+    """Atomic write; call only after a successful fetch. The temp name is unique per
+    call, not per process: these run in a thread pool and can write the same path."""
     os.makedirs(_CACHE_DIR, exist_ok=True)
     tmp = f"{path}.{uuid.uuid4().hex}.tmp"
     try:
@@ -203,8 +151,7 @@ def _write_day_cache(path: str, data: dict) -> None:
             json.dump(data, f)
         os.replace(tmp, path)
     except Exception as e:
-        # A cache-write problem must never discard data we already fetched — warn,
-        # clean up the stray temp file, and let the caller return its result.
+        # A failed cache write must never discard data already fetched.
         print(f"[stats_fetcher] cache write skipped ({path}): {e}")
         try:
             os.remove(tmp)
@@ -234,8 +181,6 @@ def _savant_csv_get(url: str, params: dict) -> str | None:
 
 
 def fetch_stats() -> dict:
-    # Once per run: drop day-cache files from previous slates so an unattended
-    # service doesn't grow its volume for the whole season.
     _prune_old_caches()
 
     date_str = slate_date()
@@ -249,9 +194,7 @@ def fetch_stats() -> dict:
         if pid
     }
 
-    # MLB Stats API only. Savant's xERA, read by nothing but the HR/FB proxy, is fetched
-    # by prop_pipeline: here it ran unguarded, so one Savant timeout failed every hit
-    # research run, and the hit model never reads it.
+    # MLB Stats API only; prop_pipeline fetches Savant's xERA itself.
     pitcher_stats = {str(pid): _fetch_pitcher_season_stats(pid, year) for pid in pitcher_ids}
 
     result = {
@@ -300,13 +243,8 @@ def _fetch_probable_pitchers(date_str: str) -> dict:
 
 
 def _match_probable(game_pk, probable: dict) -> dict | None:
-    """One game's entry from _fetch_probable_pitchers' output, or None on a miss.
-
-    Game IDs arrive as int from the schedule API and str from the saved lineup JSON, so
-    try both. A non-numeric ID returns None rather than raising — a lookup miss should
-    never take down the caller. The single copy for both pipelines and the watcher: the
-    two it replaces disagreed, one returning {} and raising on a non-numeric ID.
-    """
+    """One game's entry from _fetch_probable_pitchers' output, or None on a miss (never
+    raises). Game IDs arrive as int from the schedule API and str from saved lineup JSON."""
     try:
         hit = probable.get(int(game_pk))
     except (TypeError, ValueError):
@@ -352,8 +290,6 @@ def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
         # FIP = ((13*HR) + (3*(BB+HBP)) - (2*K)) / IP + constant
         fip = round((13 * hr + 3 * (bb + hbp) - 2 * k) / ip + _FIP_CONSTANT, 2) if ip > 0 else None
 
-        # whip/bb_per_9/opp_avg/innings_pitched feed hit_model._pitcher_hits_per_9; fip
-        # feeds prop_pipeline's HR/FB proxy. Nothing else reads these.
         return {
             "whip": _safe_float(stat.get("whip")),
             "fip": fip,
@@ -367,12 +303,8 @@ def _fetch_pitcher_season_stats(pitcher_id: int, year: str) -> dict:
 
 def fetch_pitcher_xera(year: str) -> dict:
     """xERA (expected ERA, from Statcast contact quality) for every pitcher, as
-    {player_id (str): {"xera": float}}. Empty on any failure, so its one reader degrades.
-
-    Read only by prop_pipeline's HR/FB proxy, which fetches it. The custom leaderboard's
-    p_fip/xfip columns are empty; expected_statistics has real values. Stored under
-    "xfip" until 2026-10-27, which made the proxy look like the FIP − xFIP signal it is not.
-    """
+    {player_id (str): {"xera": float}}; empty on any failure. The custom leaderboard's
+    p_fip/xfip columns are empty, so this reads expected_statistics."""
     url = f"{SAVANT_BASE}/leaderboard/expected_statistics"
     params = {
         "type": "pitcher",
@@ -397,13 +329,9 @@ def fetch_pitcher_xera(year: str) -> dict:
 def fetch_batter_statcast_season(year: str) -> dict:
     """
     Bulk-fetches Sweet Spot % and Hard Hit % for all batters from Baseball Savant leaderboard.
-    One call for the whole season — use this to pre-filter before making per-batter calls.
-    Cached to disk daily so repeated --props runs don't re-download 575 rows.
-    Returns dict keyed by player_id (str).
+    One call for the whole season, cached daily; returns a dict keyed by player_id (str).
     """
     date_str  = slate_date()
-    # Follows _CACHE_DIR: this is a day cache and should persist on the mounted
-    # volume, unlike the slate snapshot in _save().
     cache_path = f"{_CACHE_DIR}/batter_season_{date_str}.json"
 
     if os.path.exists(cache_path):
@@ -449,10 +377,8 @@ def fetch_batter_statcast_season(year: str) -> dict:
 
 def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
     """
-    Fetches Hard Hit % and Sweet Spot % for a batter over the last N days.
-    Pulls raw batted ball events and computes metrics from launch_speed / launch_angle
-    to avoid column name uncertainty in Statcast's group_by aggregation.
-    Returns empty dict if the batter had no batted balls in the window.
+    Hard Hit % and Sweet Spot % for a batter over the last N days, computed from raw
+    batted-ball events. Empty dict if the batter had no batted balls in the window.
     """
     cache_path = _day_cache_path(f"batter_recent{days}d", batter_id)
     cached = _read_day_cache(cache_path)
@@ -463,9 +389,8 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
     start = today - timedelta(days=days)
 
     url = f"{SAVANT_BASE}/statcast_search/csv"
-    # `start_dt/end_dt` are ignored by this endpoint — they returned the batter's whole
-    # career, so "recent form" was really a career average. `game_date_gt/lt` is the
-    # filter that applies, and `batters_lookup[]` is the one that scopes to the player.
+    # statcast_search ignores start_dt/end_dt (it returns the career): filter dates with
+    # game_date_gt/lt and the player with batters_lookup[].
     params = {
         "all": "true",
         "type": "batter",
@@ -507,12 +432,8 @@ def fetch_batter_recent_stats(batter_id: int, days: int = 14) -> dict:
 
 def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
     """
-    Fetches batter xwOBA by Statcast zone for the season.
-    Filters to batted balls only (hfBBT) so estimated_woba_using_speedangle is populated
-    and the dataset is smaller. Aggregates xwOBA by zone.
-    Returns {zone_id (int): xwoba (float)} for zones 1-14.
-    Season-scoped by game_date_gt/lt, not hfSea (unreliable) or start_dt/end_dt (ignored
-    by this endpoint, which then returns career data) — see the params note below.
+    Batter xwOBA by Statcast zone for the season, from batted balls only (hfBBT, so
+    estimated_woba_using_speedangle is populated): {zone_id (int): xwoba (float)}.
     """
     cache_path = _day_cache_path("batter_zone", batter_id)
     cached = _read_day_cache(cache_path, int_keys=True)
@@ -521,10 +442,8 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
 
     today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
-    # NOTE on params: statcast_search ignores `player_id` when `all=true` (it returns a
-    # league-wide 25k-row dump — this silently made zone xwOBA identical for every
-    # batter). The player filter that actually works is `batters_lookup[]`, and the date
-    # filter is `game_date_gt/lt` — `start_dt/end_dt` are ignored and return career data.
+    # statcast_search ignores `player_id` under all=true (a league-wide dump) and
+    # start_dt/end_dt (career data): use batters_lookup[] and game_date_gt/lt.
     params = {
         "all": "true",
         "type": "batter",
@@ -563,10 +482,8 @@ def fetch_batter_zone_stats(batter_id: int, year: str) -> dict:
 
 def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
     """
-    Fetches a pitcher's pitch frequency by Statcast zone for the season.
-    Returns {zone_id (int): fraction_of_total_pitches (float)}.
-    Season-scoped by game_date_gt/lt, not hfSea (unreliable) or start_dt/end_dt (ignored
-    by this endpoint, which then returns career data) — see the params note below.
+    A pitcher's pitch frequency by Statcast zone for the season:
+    {zone_id (int): fraction_of_total_pitches (float)}.
     """
     cache_path = _day_cache_path("pitcher_zone", pitcher_id)
     cached = _read_day_cache(cache_path, int_keys=True)
@@ -575,9 +492,7 @@ def fetch_pitcher_zone_tendencies(pitcher_id: int, year: str) -> dict:
 
     today = datetime.now(timezone.utc).date()
     url = f"{SAVANT_BASE}/statcast_search/csv"
-    # Same endpoint quirk as the batter queries: `player_id` is ignored under `all=true`
-    # (returned a league-wide dump, making every pitcher's zone profile identical), and
-    # `start_dt/end_dt` don't filter. Use `pitchers_lookup[]` + `game_date_gt/lt`.
+    # Same quirk as the batter queries: use pitchers_lookup[] and game_date_gt/lt.
     params = {
         "all": "true",
         "type": "pitcher",
@@ -634,9 +549,6 @@ _TEAM_IDS: dict[str, int] = {
     "Minnesota Twins":       142,
     "New York Mets":         121,
     "New York Yankees":      147,
-    # The MLB API has said "Athletics" all of 2026 (147 cached occurrences, none of the
-    # old name). Keyed "Oakland Athletics", no A's batter ever got team form: 90 of 90
-    # logged rows have it NULL, against 4.6% across the other 29 teams.
     "Athletics":             133,
     "Philadelphia Phillies": 143,
     "Pittsburgh Pirates":    134,
@@ -752,13 +664,11 @@ def fetch_batter_vs_pitcher(batter_id: int, pitcher_id: int) -> dict:
         _write_day_cache(cache_path, result)
         return result
     except (IndexError, KeyError):
-        # Genuinely no such record (never faced him / no games in window). That is a
-        # real answer and worth caching — it is the common case for H2H.
+        # No record (never faced him) is a real answer: cache it.
         _write_day_cache(cache_path, {})
         return {}
     except requests.RequestException:
-        # Transient. Return empty so the caller degrades, but do NOT cache it —
-        # caching a network blip would poison this player for the rest of the day.
+        # Transient: never cache it.
         return {}
 
 
@@ -796,13 +706,11 @@ def fetch_batter_recent_ba(batter_id: int, days: int = 14) -> dict:
         _write_day_cache(cache_path, result)
         return result
     except (IndexError, KeyError):
-        # No games in the window (injured list, a call-up, an off stretch). That is a
-        # real answer and worth caching.
+        # No games in the window is a real answer: cache it.
         _write_day_cache(cache_path, {})
         return {}
     except requests.RequestException:
-        # Transient. Return empty so the caller degrades, but do NOT cache it —
-        # caching a network blip would poison this player for the rest of the day.
+        # Transient: never cache it.
         return {}
 
 
@@ -821,11 +729,7 @@ def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
         "group": "hitting",
         "season": year,
         "gameType": "R",
-        # REQUIRED. `stats=statSplits` without sitCodes returns a stats entry with an
-        # EMPTY splits list — no error, no warning, just nothing. Omitting it made this
-        # function return {} for every batter, so hit_model fell through to
-        # LEAGUE_AVG_BA (.248) as the base for all of them and the batter's own
-        # handedness split — the single largest input — was a constant.
+        # REQUIRED: without sitCodes, statSplits returns an empty splits list (HTTP 200).
         "sitCodes": "vr,vl",
     }
     resp = requests.get(url, params=params, timeout=10)
@@ -835,9 +739,7 @@ def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
     splits = {"vs_rhp": {}, "vs_lhp": {}}
     for stat_group in data.get("stats", []):
         for split in stat_group.get("splits", []):
-            # Match on the stable code, not the description. The old code compared
-            # against "vs. RHP"/"vs. LHP"; the API actually returns "vs Right"/"vs Left",
-            # so even with sitCodes set every comparison would still have failed.
+            # Match on the stable code, not the description.
             split_code = split.get("split", {}).get("code", "")
             stat = split.get("stat", {})
             if split_code == "vr":
@@ -857,8 +759,6 @@ def fetch_batter_splits(batter_id: int, year: str = None) -> dict:
                     "ab": int(stat.get("atBats", 0) or 0),
                 }
 
-    # Unlike the fetches above this one has no try/except — raise_for_status means
-    # any failure propagates, so getting here is proof of success.
     _write_day_cache(cache_path, splits)
     return splits
 
@@ -872,10 +772,7 @@ def _safe_float(val) -> float | None:
 
 
 def _save(data: dict, date_str: str) -> None:
-    # This is the whole-slate day snapshot, NOT the per-player cache, so it does not
-    # follow _CACHE_DIR — create the directory it actually writes to. (A global
-    # makedirs("data/stats") -> makedirs(_CACHE_DIR) edit briefly pointed these at two
-    # different places, which crashes as soon as STATS_CACHE_DIR is set elsewhere.)
+    # The whole-slate snapshot, not the per-player cache: it does not follow _CACHE_DIR.
     path = f"data/stats/{date_str}.json"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:

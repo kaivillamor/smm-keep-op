@@ -1,14 +1,14 @@
 PROJECT.md
 PROJECT_CHANGELOG.md
 LEVERS.md
+METHOD.md
 venv/
 .env
 __pycache__/
 *.pyc
 *.pyo
 *.db
-# Backups too: `*.db` did NOT match bets.db.bak-<timestamp>, so three copies of the
-# real betting record were committed to a PUBLIC repo (found 2026-09-08).
+# `*.db` does not match bets.db.bak-<timestamp>.
 *.db.bak*
 *.db-journal
 *.sqlite

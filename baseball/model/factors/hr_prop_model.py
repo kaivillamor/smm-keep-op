@@ -64,12 +64,8 @@ def _sweet_spot_score(season_stats: dict) -> float | None:
 
 
 def _hard_contact_score(recent_stats: dict, season_stats: dict) -> float | None:
-    """Prefer the 14-day window; fall back to season only when recent is genuinely absent.
-
-    Must test `is None`, not falsiness: a batter who made contact but hit nothing hard
-    scores a legitimate 0.0, and `or` treated that as missing and substituted the season
-    figure — erasing exactly the cold streak this metric exists to catch.
-    """
+    """The 14-day window, else season when recent is absent. `is None`, not falsiness:
+    0.0 is a real score."""
     pct = recent_stats.get("hard_hit_percent")
     if pct is None:
         pct = season_stats.get("hard_hit_percent")
@@ -109,12 +105,8 @@ def _zone_fit_score(batter_zones: dict, pitcher_zones: dict) -> float | None:
 # ── gate ──────────────────────────────────────────────────────────────────────
 
 def _which_gate(scores: dict) -> str | None:
-    """Returns a short label for the first gate condition that triggered, or None.
-
-    This IS the gate: a batter passes when it returns a label. A separate _check_gate
-    restated the same four conditions until 2026-10-27, and two copies of one rule can
-    drift apart.
-    """
+    """The label of the first gate condition that triggered, or None. This is the gate: a
+    batter passes when it returns a label."""
     barrel       = scores.get("barrel_rate")
     sweet_spot   = scores.get("sweet_spot")
     hard_contact = scores.get("recent_hard_contact")
@@ -135,14 +127,9 @@ def _which_gate(scores: dict) -> str | None:
 
 def rank_score(scores: dict) -> float:
     """
-    Composite ranking score (0–100) for sorting candidates after gate filtering.
-    Barrel rate carries the most weight — it's the best single HR predictor.
-    Hard contact and sweet spot add signal; zone fit and pitcher_hrfb are bonuses.
-
-    Missing metrics are EXCLUDED and the remaining weights renormalized, rather than
-    scored as 0. Treating an unavailable zone fit or HR/FB proxy as zero made it the
-    worst possible value, so candidates ranked lower for having incomplete data instead
-    of for being worse hitters — a data-availability bias, not a skill signal.
+    Composite ranking score (0–100) for sorting candidates after gate filtering; barrel
+    rate weighs most. Missing metrics are excluded and the remaining weights renormalized,
+    never scored as 0.
     """
     # (normalized 0–1 value, weight) — only for metrics we actually have
     parts: list[tuple[float, float]] = []

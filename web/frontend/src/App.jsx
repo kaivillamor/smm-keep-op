@@ -11,35 +11,21 @@ const num = (v) => (v == null ? '—' : v.toLocaleString())
 const ci = (lo, hi) => (lo == null ? '—' : `[${lo.toFixed(2)}, ${hi.toFixed(2)}]`)
 const signed = (v) => (v == null ? '—' : `${v >= 0 ? '+' : '−'}$${Math.abs(v).toFixed(2)}`)
 
-// The ranking gap is the number that decides whether the model is bettable at all, so
-// it gets an explicit verdict rather than leaving the reader to interpret a decimal.
-
-// A gap this size, ESTABLISHED, is what "usable" means.
+// The CI's lower bound must clear this for "usable". Twin of usable_gap in
+// baseball/output/research.py.
 const USABLE_GAP = 0.08
 
+// The verdict reads the confidence interval, never the point estimate alone.
 function verdictFor(gap, ciLow, ciHigh) {
   if (gap == null) return { label: 'not enough data', tone: 'neutral' }
-  // The interval decides, not the point estimate. Thresholds alone read noise as a
-  // finding: +6.9pt on 696 rows carries a CI of [-0.2, +14.0] and means nothing yet.
   if (ciLow == null || ciHigh == null) return { label: `${(gap * 100).toFixed(1)} pts`, tone: 'neutral' }
   if (ciHigh < 0) return { label: 'inverted — ranks worse than chance', tone: 'bad' }
   if (ciLow <= 0) return { label: 'inconclusive — interval still contains zero', tone: 'warn' }
-  // Compare the LOWER BOUND, not the point estimate. This line used to read
-  // `gap < USABLE_GAP`, which is the very mistake the comment above warns about — and it
-  // misfired on 2026-09-30: tripling the sample pulled the point estimate from +8.9 to
-  // +7.4 while the interval TIGHTENED (width 10.5 -> 6.6) and its lower bound ROSE
-  // (+3.6 -> +4.1). Strictly better evidence, and the badge downgraded itself, which read
-  // as the model decaying. Testing ciLow means the badge only ever claims what the data
-  // establishes, and more data can no longer make the verdict worse on its own.
   if (ciLow < USABLE_GAP) return { label: 'weak but real signal', tone: 'warn' }
   return { label: 'usable signal', tone: 'good' }
 }
 
-/**
- * The one number a view leads with. Exactly one per page — a second "hero" is just
- * two medium numbers. Proportional figures on purpose: tabular digits are for
- * columns, and at this size they read loose.
- */
+/** The one number a view leads with. */
 function Hero({ label, value, tone, note }) {
   return (
     <div className="hero">
@@ -95,11 +81,7 @@ function Buckets({ buckets, label = 'Predicted range' }) {
   )
 }
 
-/**
- * The model's figures on the players the owner's method would consider, then wider.
- * Actually hit against Priced at is what a bet on those rows needed; the gap is the
- * model's own ranking within them.
- */
+/** The model's figures on the method's player pools, then wider. */
 function Pools({ rows }) {
   if (!rows?.length) return null
   return (
@@ -158,11 +140,7 @@ function Days({ days }) {
   )
 }
 
-/**
- * Collection AND grading per slate. Rendered even when nothing is graded — that empty
- * column is the signal. NBA's grading settled zero rows for six days (2026-10-20..26)
- * while collection looked healthy, and no screen said so.
- */
+/** Collection and grading per slate, rendered even when nothing is graded. */
 function Health({ rows }) {
   if (!rows?.length) return <p className="muted">Nothing collected yet.</p>
   return (
@@ -200,16 +178,11 @@ function Health({ rows }) {
   )
 }
 
-/**
- * Ranking gap, headline figures and calibration buckets: the part of an admin page that
- * is identical for every sport, because each sport's report() computes it the same way
- * from model_prob and outcome.
- */
+/** Ranking gap, headline figures and calibration buckets, the same for both sports. */
 function Calibration({ data, label = 'Ranking gap' }) {
   const v = verdictFor(data.gap, data.gap_ci_low, data.gap_ci_high)
   return (
     <>
-      {/* The gap is the number this page exists to report, so it leads. */}
       <Hero
         label={label}
         value={pts(data.gap)}
@@ -251,7 +224,7 @@ function useJson(url) {
         .then(setData)
         .catch((e) => setError(e.message))
     load()
-    // The scheduler collects at most hourly, so anything faster is wasted requests.
+    // The scheduler collects at most hourly.
     const t = setInterval(load, 5 * 60 * 1000)
     return () => clearInterval(t)
   }, [url])
@@ -276,7 +249,7 @@ function Banner() {
 }
 
 function Home() {
-  // /api/summary, not /api/report — report is admin-only now and a non-admin would 403.
+  // /api/summary: /api/report is admin-only.
   const { data: sum } = useJson('/api/summary')
   const { data: feed } = useJson('/api/hits')
 
@@ -292,10 +265,6 @@ function Home() {
       </header>
       <Banner />
 
-      {/* No KPI band here, deliberately. /api/summary returns four numbers and the hero
-          plus its note already state all four — a band of "legs graded / hit rate /
-          model says" was three restatements of what sits directly above it. Admin keeps
-          its band because six of those figures appear nowhere else on the page. */}
       {sum && sum.graded > 0 && (
         <Hero
           label="Hit rate, graded legs"
@@ -322,8 +291,6 @@ function Home() {
 
 function Admin() {
   const { data, error } = useJson('/api/report')
-  // Fetched here rather than in App(): the slate is a research view, and App() was
-  // requesting it on every page load without ever rendering it.
   const { data: slate } = useJson('/api/slate')
 
   if (error?.includes('403'))
@@ -386,9 +353,7 @@ function NbaHome() {
       <Banner />
 
       {sum?.error && <p className="bad">{sum.error}</p>}
-      {/* The headline is the model against the book's price. The over rate used to be it,
-          and read as the model "underperforming": overs hit under half whatever a model
-          says, so it measures the props, not the model. */}
+      {/* The headline: the model's ranking against the book's price. */}
       {sum && !sum.error && (sum.graded > 0 ? (sum.auc != null ? (
         <Hero
           label="Ranking skill, model vs the book's price"
@@ -421,7 +386,6 @@ function NbaHome() {
           every game on the slate is final.
         </p>
       ))}
-      {/* Silence is a value: a grader that settles nothing must say so on the page. */}
       {sum?.stale_pending > 0 && (
         <p className="warn">
           {num(sum.stale_pending)} props more than a day old are still ungraded (oldest{' '}
@@ -437,8 +401,7 @@ function NbaHome() {
         defenses; Pos D is the opponent's rank against his position, 1 = stingiest, and the
         method skips 1–3.
       </p>
-      {/* The count is reset (the owner, 10-29) until NBA_RECORD_FROM in web/app.py is set;
-          each parlay below keeps its own result either way. */}
+      {/* record_from is null while the count is reset (NBA_RECORD_FROM in web/app.py). */}
       {parlays && !parlays.error && (parlays.record_from == null ? (
         <p className="muted">
           The count is reset: wins and losses aren't being counted until it's switched back
@@ -498,9 +461,6 @@ function NbaAdmin() {
         </p>
       ) : (
         <>
-          {/* Players the method would consider lead: much of the board is players it would
-              never take. The trust rule alone carries the headline because the full filter
-              fills slowly — 14 of 450 props passed it on 10-26. */}
           <Calibration data={data.trusted} label={`Ranking gap · ${data.trusted.label}`} />
 
           <h2>By player pool</h2>
@@ -536,13 +496,11 @@ export default function App() {
       .catch(() => setMe(null))
   }, [])
 
-  // Render nothing while the session check is in flight — flashing the login screen at
-  // an already-signed-in user is worse than a brief blank.
+  // Nothing until the session check returns, so a signed-in user never sees the login.
   if (me === undefined) return null
   if (me === null) return <Login hits={feed?.hits} onSignedIn={setMe} />
 
-  // Two sports x two views still do not justify a router dependency; the server serves
-  // index.html for all four paths.
+  // The server serves index.html for all four paths.
   const path = window.location.pathname
   if (path.startsWith('/nba/admin')) return <NbaAdmin />
   if (path.startsWith('/nba')) return <NbaHome />
