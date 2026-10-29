@@ -1,5 +1,6 @@
 PROJECT.md
 PROJECT_CHANGELOG.md
+LEVERS.md
 venv/
 .env
 __pycache__/
