@@ -24,6 +24,8 @@ from parlay.method import (CONSISTENCY_L10, CONSISTENCY_L20, METHOD_MARKETS, SIX
 from pipeline.calendar import game_slate_date, season_phase, slate_date
 
 RESEARCH_DB = os.getenv("NBA_RESEARCH_DB_PATH") or "data/history/research.db"
+# The dashboard's ban list, beside the research DB. Twin of _nba_bans_path() in web/app.py.
+BANS_DB = os.path.join(os.path.dirname(RESEARCH_DB), "nba_bans.db")
 
 
 def _connect(db_path: str = RESEARCH_DB) -> sqlite3.Connection:

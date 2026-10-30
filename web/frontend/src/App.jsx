@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import HitsList from './HitsList.jsx'
 import Login from './Login.jsx'
 import MethodParlays from './MethodParlays.jsx'
+import NbaBans from './NbaBans.jsx'
 import NbaSlate, { MARKET } from './NbaSlate.jsx'
 import Slate from './Slate.jsx'
 
@@ -423,6 +424,13 @@ function NbaHome() {
         <p className="muted">No method parlay has settled since {parlays.record_from}.</p>
       ))}
       <MethodParlays data={parlays} latest={sum?.slates?.[0]} />
+
+      {sum?.role === 'admin' && (
+        <>
+          <h2>Bans</h2>
+          <NbaBans />
+        </>
+      )}
 
       <h2>Props</h2>
       <NbaSlate slate={slate} slates={sum?.slates} onPick={setDay} />

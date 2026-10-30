@@ -109,6 +109,7 @@ export default function NbaSlate({ slate, slates, onPick }) {
                   <span className="hit-name">{p.name}</span>{' '}
                   <span className="hit-meta">{p.team}</span>
                   {p.injury && p.injury !== 'active' && <span className="warn"> {p.injury}</span>}
+                  {p.banned && p.banned !== 'no' && <span className="dim"> banned</span>}
                 </td>
                 <td className="hit-meta">{p.opp}</td>
                 <td>{MARKET[p.market] || p.market}</td>

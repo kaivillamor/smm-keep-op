@@ -5,8 +5,11 @@ Each slate: score every FanDuel points, rebounds and assists leg (main lines, pl
 rungs 2-5 under), keep the legs that pass fails(), build the best $10 parlay and then the
 best $5 from the players it left, and store both for grading.
 """
+import os
+import sqlite3
 from itertools import combinations
 from math import prod
+from pathlib import Path
 
 # ── the owner's settings (rules quoted in METHOD.md) ─────────────────────────────
 
@@ -27,11 +30,10 @@ if H2H_SEASONS < 2:
 
 STINGY_VS_POSITION = 3         # skip opponents ranked 1..this against his position
 
-# Keyed by ESPN id, never by name; a team ban drops all its players:
-#     BANNED_PLAYERS = {"<player id>": ("Name", "date added", "why"), ...}
-#     BANNED_TEAMS   = {"<team id>": ("ABBR", "date added", "why"), ...}
-BANNED_PLAYERS: dict[str, tuple] = {}
-BANNED_TEAMS: dict[str, tuple] = {}
+# ESPN id -> name, filled by load_bans() from the dashboard's list; a team ban drops all its
+# players.
+BANNED_PLAYERS: dict[str, str] = {}
+BANNED_TEAMS: dict[str, str] = {}
 
 MAX_FAVORITE = -400
 SWEETENER_MIN_GAIN = 20.0
@@ -175,6 +177,19 @@ def untrusted(minutes: float | None, market: str) -> str | None:
     if minutes >= SIXTH_MAN_MINUTES:
         return None if market in SIXTH_MAN_MARKETS else "sixth_man_market"
     return "not_trusted_minutes"
+
+
+def load_bans(path: str) -> None:
+    """Fill BANNED_PLAYERS and BANNED_TEAMS from the dashboard's ban list. Read-only: the
+    dashboard owns the file. No file means no bans."""
+    BANNED_PLAYERS.clear()
+    BANNED_TEAMS.clear()
+    if not os.path.exists(path):
+        return
+    conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+    for kind, espn_id, name in conn.execute("SELECT kind, espn_id, name FROM bans"):
+        (BANNED_PLAYERS if kind == "player" else BANNED_TEAMS)[espn_id] = name
+    conn.close()
 
 
 def banned(player_id, team_id) -> str | None:

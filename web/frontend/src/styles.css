@@ -284,12 +284,13 @@ table.slate td.blocked { color: var(--dim); font-size: .76rem; }
   margin: 0 0 .55rem;
 }
 .link-btn.on { color: var(--text); border-bottom-color: var(--text); }
-select {
+select, .filters input {
   font: inherit; font-size: .76rem; color: var(--text);
   padding: .2rem .45rem;
   border: 1px solid var(--line-strong); border-radius: var(--r);
   background: #000;
 }
+.filters input[list] { width: 16rem; max-width: 100%; }
 .slate-meta strong { color: var(--text); font-weight: 600; }
 .parlay { margin: 0 0 1.4rem; }
 /* Full width on desktop; the later phone rule (same specificity) overrides it. */
@@ -339,7 +340,7 @@ select {
   .scroll-x td:first-child .hit-name { display: block; max-width: 7.5rem; }
 
   /* iOS zooms into any focused field under 16px and leaves the page zoomed. */
-  select, .login-card input { font-size: 1rem; }
+  select, .login-card input, .filters input { font-size: 1rem; }
 
   /* A bigger touch target; the drawn button stays put. */
   .link-btn { position: relative; }

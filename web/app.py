@@ -9,11 +9,12 @@ import sqlite3
 import threading
 import time
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime, timedelta, timezone
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse
@@ -430,7 +431,7 @@ def api_nba_slate(_: tuple = Depends(auth),
         rows = [dict(r) for r in c.execute(
             "SELECT player_name, team, opponent, market, line, book_odds, book_implied, "
             "       base_prob, owner_adj, model_prob, hit_l10, injury_status, outcome, "
-            "       actual_value "
+            "       actual_value, banned "
             "FROM predictions WHERE date = ? "
             "ORDER BY COALESCE(injury_status = 'out', 0), model_prob IS NULL, "
             "         model_prob DESC LIMIT 800", (day,))] if day else []
@@ -442,7 +443,7 @@ def api_nba_slate(_: tuple = Depends(auth),
          "market": r["market"], "line": r["line"], "odds": r["book_odds"],
          "implied": r["book_implied"], "quant": r["base_prob"], "rules": r["owner_adj"],
          "model": r["model_prob"], "l10": r["hit_l10"], "injury": r["injury_status"],
-         "outcome": r["outcome"], "actual": r["actual_value"]}
+         "outcome": r["outcome"], "actual": r["actual_value"], "banned": r["banned"]}
         for r in rows]}
 
 
@@ -527,6 +528,109 @@ def api_nba_report(_: tuple = Depends(require_admin)):
     except Exception as e:
         out["error"] = str(e)
     return out
+
+
+# ── NBA bans ─────────────────────────────────────────────────────────────────
+# The dashboard writes nba_bans.db; the collector reads it at the start of each run.
+
+def _nba_bans_path() -> str:
+    """nba_bans.db, beside the NBA research DB. Twin of BANS_DB in
+    basketball/output/research.py."""
+    return os.path.join(os.path.dirname(_nba_db_path()), "nba_bans.db")
+
+
+def _nba_bans_db():
+    p = _nba_bans_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bans (
+            kind      TEXT NOT NULL,     -- 'player' | 'team'
+            espn_id   TEXT NOT NULL,
+            name      TEXT NOT NULL,     -- player name, or team abbreviation
+            team      TEXT,              -- a player's team when banned
+            why       TEXT,
+            added_by  TEXT,
+            added_at  TEXT NOT NULL,
+            PRIMARY KEY (kind, espn_id)
+        )""")
+    conn.commit()
+    return conn
+
+
+def _nba_ban_list(conn) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT kind, espn_id, name, team, why, added_by, added_at FROM bans "
+        "ORDER BY added_at DESC")]
+
+
+class BanBody(BaseModel):
+    kind: Literal["player", "team"]
+    espn_id: str = Field(pattern=r"^\d{1,12}$")
+    why: str = Field("", max_length=200)
+
+
+@app.get("/api/nba/bans")
+def api_nba_bans(_: tuple = Depends(require_admin)):
+    """The method's ban list, newest first, and the picker's choices: every player with a
+    logged prop (latest name and team) and every team."""
+    c = _nba_bans_db()
+    bans = _nba_ban_list(c)
+    c.close()
+    try:
+        n = _nba_db()
+        # With one MAX(), SQLite takes the bare columns from that row: the latest name and team.
+        players = [dict(r) for r in n.execute(
+            "SELECT player_id espn_id, player_name name, team, MAX(date) last_seen "
+            "FROM predictions GROUP BY player_id ORDER BY player_name")]
+        teams = [dict(r) for r in n.execute(
+            "SELECT DISTINCT team_id espn_id, team name FROM team_games ORDER BY team")]
+        n.close()
+    except Exception as e:
+        return {"error": str(e), "bans": bans, "players": [], "teams": []}
+    return {"error": None, "bans": bans, "players": players, "teams": teams}
+
+
+@app.post("/api/nba/bans")
+def api_nba_ban(body: BanBody, who: tuple = Depends(require_admin)):
+    """Ban a player or team by ESPN id. The name comes from the NBA DB, so an id it has
+    never logged is refused."""
+    try:
+        n = _nba_db()
+        if body.kind == "player":
+            row = n.execute("SELECT player_name, team FROM predictions WHERE player_id = ? "
+                            "ORDER BY date DESC LIMIT 1", (body.espn_id,)).fetchone()
+        else:
+            row = n.execute("SELECT team, NULL FROM team_games WHERE team_id = ? LIMIT 1",
+                            (body.espn_id,)).fetchone()
+        n.close()
+    except Exception as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"NBA DB unavailable: {e}")
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"No NBA {body.kind} with ESPN id {body.espn_id}")
+    c = _nba_bans_db()
+    c.execute("INSERT OR IGNORE INTO bans (kind, espn_id, name, team, why, added_by, added_at) "
+              "VALUES (?,?,?,?,?,?,?)",
+              (body.kind, body.espn_id, row[0], row[1], body.why.strip() or None, who[0],
+               datetime.now(timezone.utc).isoformat()))
+    c.commit()
+    bans = _nba_ban_list(c)
+    c.close()
+    return {"bans": bans}
+
+
+@app.delete("/api/nba/bans/{kind}/{espn_id}")
+def api_nba_unban(kind: Literal["player", "team"], espn_id: str,
+                  _: tuple = Depends(require_admin)):
+    """Lift a ban; returns the list left."""
+    c = _nba_bans_db()
+    c.execute("DELETE FROM bans WHERE kind = ? AND espn_id = ?", (kind, espn_id))
+    c.commit()
+    bans = _nba_ban_list(c)
+    c.close()
+    return {"bans": bans}
 
 
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "frontend", "dist")

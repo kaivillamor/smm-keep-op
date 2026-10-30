@@ -15,7 +15,7 @@ import sys
 from model.factors.owner_logic import apply_prop_owner_logic
 from parlay import method
 from model.prop_model import prop_probability
-from output.research import _connect, grade_predictions, log_predictions, report
+from output.research import BANS_DB, _connect, grade_predictions, log_predictions, report
 from pipeline.calendar import game_slate_date, slate_date
 from pipeline.prop_odds import DEFAULT_BOOK, NBA_MARKETS, fetch_prop_board, normalize_name
 from pipeline.stats_fetcher import (FETCH_FAILURES, MARKET_STAT, build_player_index, days_rest,
@@ -55,7 +55,6 @@ def collect(day: str | None = None) -> int:
     prior_year = season_year - 1 if season_year else None
     factors: dict = {}
     pos_factors: dict = {}
-    known_teams: set[str] = set()
     if season_year:
         conn = _connect()
         added = sync_team_games(conn, season_year, day)
@@ -64,21 +63,17 @@ def collect(day: str | None = None) -> int:
         boxes = sync_player_games(conn)
         pos_factors = position_factors(conn, season_year)
         stored, total = position_sync_status(conn, season_year)
-        known_teams = {r[0] for r in conn.execute("SELECT DISTINCT team_id FROM team_games")}
         conn.close()
         print(f"[main] team defense: {added} new game(s) stored, "
               f"{len({t for t, _ in factors})} teams rated")
         print(f"[main] position defense: {boxes} new box score(s), {stored} of {total} games "
               f"stored{'' if pos_factors else ' — the rule waits for the backfill'}")
 
+    method.load_bans(BANS_DB)
     on_slate = {r["player_id"] for r in index.values()
                 if method.banned(r["player_id"], r["team_id"])}
     print(f"[method] bans: {len(method.BANNED_PLAYERS)} player(s), "
           f"{len(method.BANNED_TEAMS)} team(s); {len(on_slate)} banned player(s) on this slate")
-    unknown = sorted(t for t in method.BANNED_TEAMS if known_teams and t not in known_teams)
-    if unknown:
-        print(f"[method] WARNING: banned team id(s) {', '.join(unknown)} match no NBA team — "
-              f"check BANNED_TEAMS in parlay/method.py")
 
     # Seasons before last stay out of `logs`, so player_form() never sees them.
     older_years = (range(prior_year - 1, season_year - method.H2H_SEASONS, -1)
